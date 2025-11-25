@@ -33,6 +33,35 @@ docker compose up -d
 
 ## Usage
 
+### Requests Page
+![Requests page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/requests.png)
+
+Access:  
+- `http://<server-ip>:5173/requests`
+- `http://<server-ip>:5173/`
+
+Users can:
+
+- Search the library  
+- Add songs to the queue  
+- Enter their name for rotation
+
+---
+
+### Player Page
+![Player page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/player.png)
+
+Access:  
+- `http://<server-ip>:5173/player`
+
+The Player page includes:
+
+- A scrolling **queue overlay** (tickler) showing the current rotation  
+- A **QR code** linking users to the Requests page  
+- Full‑screen playback with MP4 or CDG+MP3 support  
+
+---
+
 ### Admin Page
 ![Admin page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/admin_dash.png)
 
@@ -65,31 +94,6 @@ The Host page allows you to:
 
 ---
 
-### Requests Page
-![Requests page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/requests.png)
-
-Access:  
-- `http://<server-ip>:5173/requests`
-- `http://<server-ip>:5173/`
-
-Users can:
-
-- Search the library  
-- Add songs to the queue  
-- Enter their name for rotation
-
----
-
-### Player Page
-
-The Player page includes:
-
-- A scrolling **queue overlay** (tickler) showing the current rotation  
-- A **QR code** linking users to the Requests page  
-- Full‑screen playback with MP4 or CDG+MP3 support  
-
----
-
 ## Known Issues
 
 - Minor UI issues on mobile devices
@@ -98,8 +102,8 @@ The Player page includes:
 
 ## Roadmap
 
-- Additional music format support  
-- KaraokeNerds integration on the Host page  
+- Break music support
+- KaraokeNerds integration on the Host page. (Only works from the requests page)
 - Improved mobile interface  
 
 ---
