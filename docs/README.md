@@ -3,7 +3,7 @@
 ## Overview
 
 **Docker Karaoke** is a web‑based karaoke platform designed for fast setup, local library playback, and online streaming.  
-It supports **CDG+MP3** (raw & zip), **MP4 karaoke tracks**, and integrates with **KaraokeNerds.com** for searching and streaming songs.
+It supports **CDG+MP3** (raw & zip), **MP4 karaoke tracks**, and integrates with **[KaraokeNerds.com](https://karaokenerds.com)** for searching and streaming songs.
 
 ## Features
 
@@ -74,7 +74,7 @@ The Admin page lets you:
 - Run scans  
 - Generate the **admin token** (required for Host page control)
 
-Authentication is configured through environment variables in `.env`.
+Authentication username & password is configured through environment variables ADMIN_USERNAME & ADMIN_PASSWORD in `.env`.
 
 ---
 
