@@ -3,9 +3,9 @@ services:
     image: postgres:16-alpine
     container_name: karaoke-db
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-karaoke}
-      POSTGRES_USER: ${POSTGRES_USER:-karaoke}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-karaoke}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_INITDB_ARGS: >-
         --encoding=UTF8
         --locale=C
@@ -25,23 +25,22 @@ services:
       -c autovacuum_vacuum_scale_factor=0.1
       -c autovacuum_analyze_scale_factor=0.05
     volumes:
-      - ${DB_PATH}:/var/lib/postgresql/data
-      - ./server/migrations:/app/migrations:Z
+      - ${DB_PATH}
     restart: unless-stopped
 
 
   api:
     image: haggardj2/karaoke-api:latest
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://karaoke:karaoke@db:5432/karaoke}
-      MEDIA_ROOT: ${MEDIA_ROOT:-/media}
-      ORIGIN: ${ORIGIN:-http://localhost:5173,http://127.0.0.1:5173}
-      WEB_APP_URL: ${WEB_APP_URL:-http://localhost:5173}
-      PORT: ${PORT:-5174}
+      DATABASE_URL: ${DATABASE_URL}
+      MEDIA_ROOT: ${MEDIA_ROOT}
+      ORIGIN: ${ORIGIN}
+      WEB_APP_URL: ${WEB_APP_URL}
+      PORT: ${PORT}
     depends_on:
       - db
     volumes:
-      - "${MEDIA_PATH}:/media:ro"
+      - ${MEDIA_PATH}
     ports:
       - "5174:5174"
     command: ["sh", "-c", "npm run migrate && npm start"]
@@ -49,7 +48,7 @@ services:
   web:
     image: haggardj2/karaoke-web:latest
     environment:
-      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:5174}
+      VITE_API_BASE: ${VITE_API_BASE}
     depends_on:
       - api
     ports:
