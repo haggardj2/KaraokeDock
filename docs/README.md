@@ -37,7 +37,7 @@ docker compose up -d
 ![Admin page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/admin_dash.png)
 
 Access:  
-**http://<server-ip>:5173/admin**
+`http://<server-ip>:5173/admin`
 
 The Admin page lets you:
 
@@ -53,7 +53,7 @@ Authentication is configured through environment variables in `.env`.
 ![Host page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/host_dash.png)
 
 Access:  
-**http://<server-ip>:5173/host**
+`http://<server-ip>:5173/host`
 
 The Host page allows you to:
 
@@ -69,8 +69,8 @@ The Host page allows you to:
 ![Requests page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/requests.png)
 
 Access:  
-- **http://<server-ip>:5173/requests**  
-- or simply **http://<server-ip>:5173**
+- `http://<server-ip>:5173/requests`
+- `http://<server-ip>:5173/`
 
 Users can:
 
