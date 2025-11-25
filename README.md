@@ -19,8 +19,8 @@ You can rapidly deploy Web Karaoke MVP using Docker Compose:
     git clone https://github.com/haggardj2/docker-karaoke.git
     cd docker-karaoke
 
-2. **Configure environment (if needed)**  
-    Adjust environment variables in a `.env` file (refer to [`.env.example`](.env.example) if present).
+2. **Configure environment**  
+    Adjust environment variables in a `.env` file (refer to [`.env.example`](.env.example).
 
 3. **Start with Docker Compose**
     docker compose up -d
