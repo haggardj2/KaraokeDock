@@ -2,57 +2,124 @@
 
 ## Overview
 
-Docker Karaoke is a web-based karaoke application focused on quick setup and streaming.  
-It supports CDG+MP3 (raw & zip format), MP4 karaoke backing tracks, and allows users to search & stream songs directly from [KaraokeNerds.com](https://karaokenerds.com).
+**Docker Karaoke** is a web‑based karaoke platform designed for fast setup, local library playback, and online streaming.  
+It supports **CDG+MP3** (raw & zip), **MP4 karaoke tracks**, and integrates with **KaraokeNerds.com** for searching and streaming songs.
 
 ## Features
 
-- **CDG+MP3 Support:** Play karaoke tracks with synchronized lyrics using the standard CDG+MP3 format.
-- **MP4 Support:** Stream or play MP4 karaoke videos directly in the browser.
-- **Integrated Search & Streaming:** Find tracks quickly and stream songs from KaraokeNerds.com, simplifying music discovery for parties or events.
+- **CDG+MP3 Support:** Play traditional karaoke files with synchronized lyrics.
+- **MP4 Video Support:** Stream or play MP4 karaoke videos directly in the browser.
+- **Integrated Search & Streaming:** Browse and stream songs directly from KaraokeNerds.com.
+- **Multi‑page Interface:** Admin, Host, Request, and Player pages for full karaoke‑rotation control.
 
 ## Setup (Docker Compose)
 
-You can rapidly deploy Web Karaoke MVP using Docker Compose:
+### 1. Clone the repository
+```bash
+git clone https://github.com/haggardj2/docker-karaoke.git
+cd docker-karaoke
+```
 
-1. **Clone the repository**
-    git clone https://github.com/haggardj2/docker-karaoke.git
-    cd docker-karaoke
+### 2. Configure environment
+Define environment variables in a `.env` file.  
+Use [`.env.example`](.env.example) as a template.
 
-2. **Configure environment**  
-    Adjust environment variables in a `.env` file (refer to [`.env.example`](.env.example).
+### 3. Start the stack
+```bash
+docker compose up -d
+```
 
-3. **Start with Docker Compose**
-    docker compose up -d
+---
 
 ## Usage
-![The Admin page:](https://github.com/haggardj2/docker-karaoke/blob/main/docs/admin_dash.png)
-Can be reached by going to http://ip address:5173/admin The admin page is where you add the intrenal library, and create the admin-token. The admin-token is needed to control the host page. The admin page is password protected by the varibales in the .env file.
 
-![The Host page:](https://github.com/haggardj2/docker-karaoke/blob/main/docs/host_dash.png)
-Can be reached by going to http://ip address:5173/host The host page allows the host to control the rotation, change songs, and rename requests. The admin-token needs to be set in order to control the functionality. 
+### Admin Page
+![Admin page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/admin_dash.png)
 
-![The Requests page:](https://github.com/haggardj2/docker-karaoke/blob/main/docs/requests.png)
-Can be reached by going to http://ip address:5173/requests or http://ip address:5173 Allows users to add songs to the queue.
+Access:  
+**http://<server-ip>:5173/admin**
 
-The Player page has a tickler overlay that shows who is in the queue, and what song their singing. has a QR code that will point to the requests page.
+The Admin page lets you:
 
-## Issues
+- Add your internal media library  
+- Run scans  
+- Generate the **admin token** (required for Host page control)
 
-- Minor U/I issues on mobile devices
+Authentication is configured through environment variables in `.env`.
+
+---
+
+### Host Page
+![Host page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/host_dash.png)
+
+Access:  
+**http://<server-ip>:5173/host**
+
+The Host page allows you to:
+
+- Control the rotation  
+- Start/stop tracks  
+- Reorder queue  
+- Rename requesters  
+- Manage playback with the **admin token**
+
+---
+
+### Requests Page
+![Requests page](https://github.com/haggardj2/docker-karaoke/blob/main/docs/requests.png)
+
+Access:  
+- **http://<server-ip>:5173/requests**  
+- or simply **http://<server-ip>:5173**
+
+Users can:
+
+- Search the library  
+- Add songs to the queue  
+- Enter their name for rotation
+
+---
+
+### Player Page
+
+The Player page includes:
+
+- A scrolling **queue overlay** (tickler) showing the current rotation  
+- A **QR code** linking users to the Requests page  
+- Full‑screen playback with MP4 or CDG+MP3 support  
+
+---
+
+## Known Issues
+
+- Minor UI issues on mobile devices
+
+---
 
 ## Roadmap
 
-- Break music support
-- KaraokeNerds support on the host page
+- Additional music format support  
+- KaraokeNerds integration on the Host page  
+- Improved mobile interface  
+
+---
 
 ## Early Production Warning
 
-- **Early production:** Expect frequent updates, breaking changes, and incomplete features.
-- Contributions and feedback are encouraged!
-- See [issues](https://github.com/haggardj2/docker-karaoke/issues) for current bugs and feature requests.
+Docker Karaoke is in **early production**, meaning:
 
+- Frequent updates  
+- Potential breaking changes  
+- Some incomplete functionality
+
+Feedback and PRs are encouraged.
+
+See open issues:  
+https://github.com/haggardj2/docker-karaoke/issues
 
 ---
-**Questions? Feedback?**  
-Open an issue or start a discussion on [Github Discussions](https://github.com/haggardj2/web-karaoke-mvp/discussions).
+
+## Questions / Feedback
+
+Start a discussion or open an issue here:  
+https://github.com/haggardj2/docker-karaoke/discussions
