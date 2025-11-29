@@ -103,7 +103,6 @@ The Host page allows you to:
 ## Roadmap
 
 - Break music support
-- KaraokeNerds integration on the Host page. (Only works from the requests page)
 - Improved mobile interface  
 
 ---
