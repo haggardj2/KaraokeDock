@@ -29,6 +29,16 @@ Use [`.env.example`](.env.example) as a template.
 docker compose up -d
 ```
 
+### 4. Let the DB initialize
+Restart the stack
+```bash
+docker compose down && docker compose up -d
+```
+
+### 5. Add your media
+On the Page, add your media and scan the directories
+
+
 ---
 
 ## Usage
