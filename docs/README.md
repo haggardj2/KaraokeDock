@@ -36,7 +36,7 @@ docker compose down && docker compose up -d
 ```
 
 ### 5. Add your media
-On the Page, add your media and scan the directories
+On the /Admin Page, add your media and scan the directories
 
 
 ---
