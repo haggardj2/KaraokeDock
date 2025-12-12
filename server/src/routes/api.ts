@@ -3,10 +3,11 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import { EventEmitter } from 'events';
-import { query, ensureHelpfulIndexes, getSetting, setSetting } from '../db';
-import { scanPath, getMediaDuration, getZipMp3Duration } from '../scanner';
+import { query, ensureHelpfulIndexes, getSetting, setSetting, createSession, validateSession, deleteSession, cleanupExpiredSessions } from '../db';
+import { scanPath, getMediaDuration, getZipMp3Duration, extractTrackDuration } from '../scanner';
 import QRCode from 'qrcode';
 import { searchKaraokeNerds } from '../karaoke-nerds';
+import crypto from 'crypto';
 
 ensureHelpfulIndexes().catch(e => console.error('ensureHelpfulIndexes failed', e));
 
@@ -22,6 +23,29 @@ const ah =
   (req, res, next) =>
     Promise.resolve(fn(req, res, next)).catch(next);
 
+// Session-based authentication guard
+const sessionGuard: express.RequestHandler = async (req, res, next) => {
+  const token = req.headers['x-session-token'] as string;
+  if (!token) {
+    res.status(403).json({ error: 'Forbidden: No session token provided' });
+    return;
+  }
+  
+  try {
+    const isValid = await validateSession(token);
+    if (isValid) {
+      next();
+      return;
+    }
+    
+    res.status(403).json({ error: 'Forbidden: Invalid or expired session' });
+  } catch (err) {
+    console.error('sessionGuard error:', err);
+    res.status(403).json({ error: 'Forbidden: Authentication error' });
+  }
+};
+
+// Legacy admin guard - kept for backward compatibility
 const adminGuard: express.RequestHandler = async (req, res, next) => {
   const token = req.headers['x-admin-token'];
   if (!token) {
@@ -59,18 +83,137 @@ apiRouter.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ===================== ADMIN AUTHENTICATION =====================
+// Clean up expired sessions periodically
+setInterval(() => {
+  cleanupExpiredSessions().catch(err => console.error('Failed to cleanup sessions:', err));
+}, 60 * 60 * 1000); // Run every hour
 
-// Admin login endpoint - validates username/password from env
+// ===================== AUTHENTICATION =====================
+
+// Admin/Host login endpoint - validates username/password and creates a session
+apiRouter.post(
+  '/auth/login',
+  ah(async (req, res) => {
+    const { username, password } = req.body;
+    
+    // Get stored username (defaults to 'admin')
+    const storedUsername = await getSetting('admin.username');
+    const adminUsername = storedUsername || process.env.ADMIN_USERNAME || 'admin';
+    
+    // Check database first, then fall back to env variable
+    const storedPassword = await getSetting('admin.password');
+    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    if (username === adminUsername && password === adminPassword) {
+      // Check if using default password
+      const isDefaultPassword = adminPassword === 'changeme-password';
+      
+      // Create a session that expires in 30 days
+      const sessionToken = await createSession(30);
+      res.json({ ok: true, sessionToken, isDefaultPassword });
+    } else {
+      res.status(401).json({ ok: false, message: 'Invalid credentials' });
+    }
+  })
+);
+
+// Validate session endpoint - check if a session is still valid
+apiRouter.get(
+  '/auth/validate',
+  ah(async (req, res) => {
+    const token = req.headers['x-session-token'] as string;
+    if (!token) {
+      return res.status(401).json({ valid: false });
+    }
+    
+    const isValid = await validateSession(token);
+    res.json({ valid: isValid });
+  })
+);
+
+// Logout endpoint - invalidate session
+apiRouter.post(
+  '/auth/logout',
+  ah(async (req, res) => {
+    const token = req.headers['x-session-token'] as string;
+    if (token) {
+      await deleteSession(token);
+    }
+    res.json({ ok: true });
+  })
+);
+
+// Change password endpoint - requires valid session
+apiRouter.post(
+  '/auth/change-password',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new passwords are required' });
+    }
+    
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+    
+    // Verify current password
+    const storedPassword = await getSetting('admin.password');
+    const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    if (currentPassword !== envPassword) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Save new password
+    await setSetting('admin.password', newPassword);
+    res.json({ ok: true });
+  })
+);
+
+// Change username endpoint - requires valid session
+apiRouter.post(
+  '/auth/change-username',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { currentPassword, newUsername } = req.body;
+    
+    if (!currentPassword || !newUsername) {
+      return res.status(400).json({ error: 'Current password and new username are required' });
+    }
+    
+    if (newUsername.length < 3) {
+      return res.status(400).json({ error: 'Username must be at least 3 characters long' });
+    }
+    
+    // Verify current password
+    const storedPassword = await getSetting('admin.password');
+    const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    if (currentPassword !== envPassword) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Save new username
+    await setSetting('admin.username', newUsername);
+    res.json({ ok: true });
+  })
+);
+
+// Legacy admin login endpoint - kept for backward compatibility
 apiRouter.post(
   '/admin/login',
   ah(async (req, res) => {
     const { username, password } = req.body;
     
-    const envUsername = process.env.ADMIN_USERNAME || 'admin';
-    const envPassword = process.env.ADMIN_PASSWORD || 'changeme-password';
+    const storedUsername = await getSetting('admin.username');
+    const adminUsername = storedUsername || process.env.ADMIN_USERNAME || 'admin';
     
-    if (username === envUsername && password === envPassword) {
+    const storedPassword = await getSetting('admin.password');
+    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    if (username === adminUsername && password === adminPassword) {
       res.json({ ok: true });
     } else {
       res.status(401).json({ ok: false, message: 'Invalid credentials' });
@@ -78,7 +221,7 @@ apiRouter.post(
   })
 );
 
-// Get current admin token (requires authentication)
+// Get current admin token (legacy - requires authentication)
 apiRouter.get(
   '/admin/token',
   adminGuard,
@@ -88,7 +231,7 @@ apiRouter.get(
   })
 );
 
-// Set admin token (requires authentication via token OR username/password)
+// Set admin token (legacy - requires authentication via token OR username/password)
 apiRouter.post(
   '/admin/token',
   ah(async (req, res) => {
@@ -119,7 +262,8 @@ apiRouter.post(
     // Method 2: Username/password authentication (for initial setup)
     if (!authenticated && username && password) {
       const envUsername = process.env.ADMIN_USERNAME || 'admin';
-      const envPassword = process.env.ADMIN_PASSWORD || 'changeme-password';
+      const storedPassword = await getSetting('admin.password');
+      const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
       
       if (username === envUsername && password === envPassword) {
         authenticated = true;
@@ -182,7 +326,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/libraries',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const name = String(req.body?.name ?? '').trim();
     const libPath = String(req.body?.path ?? '').trim();
@@ -194,7 +338,7 @@ apiRouter.post(
 
 apiRouter.delete(
   '/libraries/:id',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const id = toInt(req.params.id);
     if (id == null) return res.status(400).send('id required');
@@ -207,7 +351,7 @@ apiRouter.delete(
 
 apiRouter.post(
   '/scan',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const libraryId = Number.isFinite(+req.body?.libraryId) ? +req.body.libraryId : null;
 
@@ -261,7 +405,7 @@ apiRouter.post(
 
 apiRouter.get(
   '/admin/stats',
-  adminGuard,
+  sessionGuard,
   ah(async (_req, res) => {
     const [artists, tracks, queued] = await Promise.all([
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
@@ -279,16 +423,96 @@ apiRouter.get(
 
 // ===================== SEARCH =====================
 
-// Find the /search endpoint and update it to include disc_id:
-
 apiRouter.get(
   '/search',
   ah(async (req, res) => {
     const q = String(req.query.q ?? '').trim();
+    const kindFilter = req.query.kind as string | undefined;
+    const libraryIdFilter = req.query.library_id ? Number(req.query.library_id) : undefined;
+    
     if (!q) return res.json([]);
 
+    // Build filter conditions
+    let filterConditions = '';
+    const queryParams: any[] = [q];
+    let paramIndex = 2;
+
+    if (kindFilter && (kindFilter === 'mp4' || kindFilter === 'cdgmp3')) {
+      filterConditions += ` AND t.kind = $${paramIndex}`;
+      queryParams.push(kindFilter);
+      paramIndex++;
+    }
+
+    if (libraryIdFilter !== undefined) {
+      filterConditions += ` AND t.library_id = $${paramIndex}`;
+      queryParams.push(libraryIdFilter);
+      paramIndex++;
+    }
+
     try {
-      const fts = await query(
+      // Enhanced search with better ranking
+      // Priority order:
+      // 1. Exact title match (highest)
+      // 2. Title starts with query
+      // 3. Exact artist match
+      // 4. Artist starts with query
+      // 5. Full-text search match in title
+      // 6. Partial match in title or artist
+      // 7. Disc ID match
+      const searchResults = await query(
+        `
+        WITH ranked_results AS (
+          SELECT DISTINCT ON (t.id)
+                 t.id,
+                 t.title,
+                 t.disc_id,
+                 t.kind,
+                 a.name AS artist,
+                 CASE
+                   -- Exact title match (case-insensitive)
+                   WHEN LOWER(t.title) = LOWER($1) THEN 1
+                   -- Title starts with query
+                   WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 2
+                   -- Exact artist match
+                   WHEN LOWER(a.name) = LOWER($1) THEN 3
+                   -- Artist starts with query
+                   WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 4
+                   -- Full-text search in title
+                   WHEN to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1) THEN 5
+                   -- Contains query in title
+                   WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 6
+                   -- Contains query in artist
+                   WHEN LOWER(a.name) LIKE '%' || LOWER($1) || '%' THEN 7
+                   -- Disc ID match
+                   WHEN t.disc_id ILIKE '%' || $1 || '%' THEN 8
+                   ELSE 9
+                 END AS rank
+            FROM tracks t
+            LEFT JOIN artists a ON a.id = t.artist_id
+           WHERE (
+                   LOWER(t.title) LIKE '%' || LOWER($1) || '%'
+                   OR LOWER(a.name) LIKE '%' || LOWER($1) || '%'
+                   OR t.disc_id ILIKE '%' || $1 || '%'
+                   OR to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1)
+                 )
+                 ${filterConditions}
+        )
+        SELECT id, title, disc_id, kind, artist
+          FROM ranked_results
+         ORDER BY rank ASC, 
+                  LOWER(artist) NULLS LAST, 
+                  LOWER(title)
+         LIMIT 100
+        `,
+        queryParams
+      );
+      
+      return res.json(searchResults.rows);
+    } catch (err) {
+      console.error('Search error:', err);
+      
+      // Fallback to simple ILIKE search
+      const like = await query(
         `
         SELECT t.id,
                t.title,
@@ -297,35 +521,17 @@ apiRouter.get(
                a.name AS artist
           FROM tracks t
           LEFT JOIN artists a ON a.id = t.artist_id
-         WHERE to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery($1)
+         WHERE (t.title ILIKE '%' || $1 || '%'
             OR a.name ILIKE '%' || $1 || '%'
-            OR t.disc_id ILIKE '%' || $1 || '%'
+            OR t.disc_id ILIKE '%' || $1 || '%')
+            ${filterConditions}
          ORDER BY a.name NULLS LAST, t.title
          LIMIT 100
         `,
-        [q]
+        queryParams
       );
-      if (fts.rows.length) return res.json(fts.rows);
-    } catch {}
-
-    const like = await query(
-      `
-      SELECT t.id,
-             t.title,
-             t.disc_id,
-             t.kind,
-             a.name AS artist
-        FROM tracks t
-        LEFT JOIN artists a ON a.id = t.artist_id
-       WHERE t.title ILIKE '%' || $1 || '%'
-          OR a.name ILIKE '%' || $1 || '%'
-          OR t.disc_id ILIKE '%' || $1 || '%'
-       ORDER BY a.name NULLS LAST, t.title
-       LIMIT 100
-      `,
-      [q]
-    );
-    res.json(like.rows);
+      return res.json(like.rows);
+    }
   })
 );
 
@@ -419,7 +625,13 @@ apiRouter.get(
       const p = String(req.query.path || '');
       if (!p) return res.status(400).send('path required');
       if (p.startsWith('zip://')) {
-        const [zipPath, inner] = p.replace(/^zip:\/\//, '').split('#');
+        // Parse zip://path#entry format - split at .zip# to handle # in filenames
+        const ZIP_EXT = '.zip';
+        const ZIP_SEPARATOR = '.zip#';
+        const withoutPrefix = p.replace(/^zip:\/\//, '');
+        const separatorIdx = withoutPrefix.indexOf(ZIP_SEPARATOR);
+        const zipPath = separatorIdx >= 0 ? withoutPrefix.substring(0, separatorIdx + ZIP_EXT.length) : withoutPrefix;
+        const inner = separatorIdx >= 0 ? withoutPrefix.substring(separatorIdx + ZIP_SEPARATOR.length) : '';
         res.redirect(`/media/zip?zip=${encodeURIComponent(zipPath)}&file=${encodeURIComponent(inner)}`);
         return;
       }
@@ -436,7 +648,7 @@ apiRouter.get(
 // Add to your browse endpoint - ensure it handles permissions correctly
 apiRouter.get(
   '/browse',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const requestPath = String(req.query.path || '/media')
     
@@ -551,30 +763,7 @@ apiRouter.post(
       
       // If duration_ms is missing, try to extract it
       if (track.duration_ms === null) {
-        let extractedDuration: number | null = null;
-        
-        if (track.kind === 'cdgmp3' && track.file_mp3) {
-          const isFromZip = track.file_mp3.startsWith('zip://');
-          
-          if (isFromZip) {
-            // Extract duration from MP3 inside ZIP
-            const parsedPath = track.file_mp3.replace('zip://', '').split('#');
-            const zipPath = parsedPath[0];
-            const mp3Name = parsedPath[1];
-            
-            if (zipPath && mp3Name) {
-              console.log(`Extracting duration for CDG+MP3 from ZIP: ${zipPath}#${mp3Name}`);
-              extractedDuration = await getZipMp3Duration(zipPath, mp3Name);
-            }
-          } else {
-            // Loose MP3 file
-            console.log(`Extracting duration for CDG+MP3: ${track.file_mp3}`);
-            extractedDuration = await getMediaDuration(track.file_mp3);
-          }
-        } else if (track.kind === 'mp4' && track.file_mp4) {
-          console.log(`Extracting duration for MP4: ${track.file_mp4}`);
-          extractedDuration = await getMediaDuration(track.file_mp4);
-        }
+        const extractedDuration = await extractTrackDuration(track);
         
         // Update the database with the extracted duration
         if (extractedDuration !== null) {
@@ -591,16 +780,26 @@ apiRouter.post(
         const isFromZip = track.file_cdg?.startsWith('zip://');
         
         if (isFromZip) {
-          const parseCdgPath = track.file_cdg.replace('zip://', '').split('#');
-          const parseMp3Path = track.file_mp3.replace('zip://', '').split('#');
+          // Parse zip://path#entry format - split at .zip# to handle # in filenames
+          const ZIP_EXT = '.zip';
+          const ZIP_SEPARATOR = '.zip#';
+          const cdgWithoutPrefix = track.file_cdg.replace('zip://', '');
+          const mp3WithoutPrefix = track.file_mp3.replace('zip://', '');
+          
+          const cdgSeparatorIdx = cdgWithoutPrefix.indexOf(ZIP_SEPARATOR);
+          const mp3SeparatorIdx = mp3WithoutPrefix.indexOf(ZIP_SEPARATOR);
+          
+          const zipPath = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(0, cdgSeparatorIdx + ZIP_EXT.length) : cdgWithoutPrefix;
+          const cdgEntry = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(cdgSeparatorIdx + ZIP_SEPARATOR.length) : '';
+          const mp3Entry = mp3SeparatorIdx >= 0 ? mp3WithoutPrefix.substring(mp3SeparatorIdx + ZIP_SEPARATOR.length) : '';
           
           fetch(`http://localhost:${process.env.PORT || 5174}/media/precache`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              file: parseCdgPath[0],
-              cdg: parseCdgPath[1],
-              mp3: parseMp3Path[1],
+              file: zipPath,
+              cdg: cdgEntry,
+              mp3: mp3Entry,
               requestedBy,
               title: track.title,
               artist: track.artist
@@ -617,7 +816,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/reorder',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     const newPosition = toInt(req.body?.newPosition);
@@ -648,7 +847,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/rename',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     const requestedBy = String(req.body?.requestedBy ?? '').trim();
@@ -662,7 +861,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/delete',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     if (id == null) return res.status(400).send('id required');
@@ -688,7 +887,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/clear',
-  adminGuard,
+  sessionGuard,
   ah(async (_req, res) => {
     await query(`DELETE FROM queue`);
     res.json({ ok: true });
@@ -722,7 +921,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/player/play',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id ?? null);
     await query('BEGIN');
@@ -749,7 +948,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/next',
-  adminGuard,
+  sessionGuard,
   ah(async (_req, res) => {
     await query('BEGIN');
     try {
@@ -776,13 +975,183 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/stop',
-  adminGuard,
+  sessionGuard,
   ah(async (_req, res) => {
     await query(`UPDATE queue SET status = 'queued' WHERE status = 'playing'`);
     postQueueUpdate('player.stop');
     res.json({ ok: true });
   })
 );
+
+// Track song state for autoplay logic
+const songState = new Map<number | string, {
+  hasFinished: boolean;
+  autoplayScheduled: boolean;
+}>();
+
+// Track initial autoplay state to prevent duplicate triggers
+let initialAutoplayScheduled = false;
+let lastQueueCheck = 0;
+
+// Constants for initial autoplay timing
+const INITIAL_AUTOPLAY_CHECK_INTERVAL_MS = 2000; // Check every 2 seconds
+const INITIAL_AUTOPLAY_DEBOUNCE_MS = 3000; // Minimum time between scheduling attempts
+
+// Helper function to check if initial autoplay conditions are met
+async function checkInitialAutoplayConditions(): Promise<{ 
+  shouldAutoplay: boolean; 
+  autoplayEnabled: boolean;
+  hasPlayingSong: boolean;
+  hasQueuedSongs: boolean;
+}> {
+  const autoplayEnabled = await getSetting('autoplay.enabled');
+  const isEnabled = autoplayEnabled === 'true';
+  
+  const currentlyPlaying = await query<{ id: number }>(`
+    SELECT id FROM queue WHERE status = 'playing' LIMIT 1
+  `);
+  const hasPlayingSong = currentlyPlaying.rows.length > 0;
+  
+  const queuedSongs = await query<{ id: number }>(`
+    SELECT id FROM queue WHERE status = 'queued' ORDER BY position LIMIT 1
+  `);
+  const hasQueuedSongs = queuedSongs.rows.length > 0;
+  
+  return {
+    shouldAutoplay: isEnabled && !hasPlayingSong && hasQueuedSongs,
+    autoplayEnabled: isEnabled,
+    hasPlayingSong,
+    hasQueuedSongs
+  };
+}
+
+// Periodic check for initial autoplay - starts first song if:
+// 1. No song is playing
+// 2. Autoplay is enabled  
+// 3. There are songs in queue
+// 4. Enough time has passed since last check
+setInterval(async () => {
+  try {
+    const now = Date.now();
+    
+    // Skip check if autoplay was recently scheduled to avoid unnecessary queries
+    if (initialAutoplayScheduled && (now - lastQueueCheck) < INITIAL_AUTOPLAY_DEBOUNCE_MS) {
+      return;
+    }
+    
+    const conditions = await checkInitialAutoplayConditions();
+    
+    // Reset flag if conditions no longer met
+    if (!conditions.autoplayEnabled || conditions.hasPlayingSong || !conditions.hasQueuedSongs) {
+      initialAutoplayScheduled = false;
+      return;
+    }
+    
+    // Schedule initial autoplay if not already scheduled
+    if (!initialAutoplayScheduled && conditions.shouldAutoplay) {
+      initialAutoplayScheduled = true;
+      lastQueueCheck = now;
+      
+      const delayStr = await getSetting('autoplay.delay');
+      const delay = delayStr ? parseInt(delayStr, 10) : 5;
+      
+      console.log(`Initial autoplay: Waiting ${delay}s before starting first song...`);
+      
+      setTimeout(async () => {
+        try {
+          // Double-check conditions before starting song
+          const stillValid = await checkInitialAutoplayConditions();
+          
+          if (!stillValid.shouldAutoplay) {
+            console.log('Initial autoplay: Conditions changed, skipping');
+            initialAutoplayScheduled = false;
+            return;
+          }
+          
+          // Start playing the first queued song with proper transaction handling
+          try {
+            await query('BEGIN');
+            const result = await query<{ id: number }>(`
+              UPDATE queue SET status = 'playing'
+              WHERE id = (
+                SELECT id FROM queue
+                WHERE status = 'queued'
+                ORDER BY position
+                LIMIT 1
+              )
+              RETURNING id
+            `);
+            await query('COMMIT');
+            
+            if (result.rows.length > 0) {
+              console.log(`Initial autoplay: Started first song (ID: ${result.rows[0].id})`);
+              postQueueUpdate('player.play');
+            }
+          } catch (dbErr) {
+            await query('ROLLBACK');
+            throw dbErr;
+          }
+          
+          initialAutoplayScheduled = false;
+        } catch (err) {
+          console.error('Initial autoplay error:', err);
+          initialAutoplayScheduled = false;
+        }
+      }, delay * 1000);
+    }
+  } catch (err) {
+    console.error('Initial autoplay check error:', err);
+    initialAutoplayScheduled = false;
+  }
+}, INITIAL_AUTOPLAY_CHECK_INTERVAL_MS);
+
+// Helper function to normalize queue ID to a number
+function normalizeQueueId(queueId: number | string): number | null {
+  if (typeof queueId === 'number') {
+    return queueId;
+  }
+  
+  // Use stricter validation for string inputs
+  const parsed = parseInt(queueId, 10);
+  
+  // Ensure the parsed value is valid and the string representation matches
+  // This prevents cases like '123abc' being parsed as 123
+  if (isNaN(parsed) || String(parsed) !== String(queueId).trim()) {
+    return null;
+  }
+  
+  return parsed;
+}
+
+// Helper function to safely delete a finished song from queue
+async function deleteFinishedSong(queueId: number | string): Promise<boolean> {
+  try {
+    // Normalize to number
+    const id = normalizeQueueId(queueId);
+    
+    if (id === null) {
+      console.warn(`Invalid queueId for deletion: ${queueId}`);
+      return false;
+    }
+    
+    // Check if song still exists before deleting
+    const checkResult = await query<{ id: number }>(`
+      SELECT id FROM queue WHERE id = $1
+    `, [id]);
+    
+    if (checkResult.rows.length > 0) {
+      await query('DELETE FROM queue WHERE id = $1', [id]);
+      console.log(`Deleted finished song ${id}`);
+      return true;
+    } else {
+      console.log(`Song ${id} was already removed`);
+      return false;
+    }
+  } catch (err) {
+    console.error(`Error deleting finished song ${queueId}:`, err);
+    throw err;
+  }
+}
 
 // Report playback timing from Player
 apiRouter.post(
@@ -807,6 +1176,125 @@ apiRouter.post(
       duration,
       queueId
     });
+    
+    // Server-side autoplay logic: detect when song is finished
+    const SONG_END_TOLERANCE = 1; // Same as Host page
+    const songFinished = currentTime >= duration - SONG_END_TOLERANCE;
+    
+    if (songFinished && queueId != null) {
+      // Normalize queueId to a consistent type for Map lookups
+      const normalizedQueueId = normalizeQueueId(queueId);
+      
+      // Skip if the ID is invalid
+      if (normalizedQueueId === null) {
+        console.warn(`Invalid queueId received: ${queueId}`);
+        return res.json({ ok: true });
+      }
+      
+      // Get or initialize state for this song
+      const state = songState.get(normalizedQueueId) || { hasFinished: false, autoplayScheduled: false };
+      
+      // Only trigger autoplay once per song
+      if (!state.hasFinished && !state.autoplayScheduled) {
+        state.hasFinished = true;
+        state.autoplayScheduled = true;
+        songState.set(normalizedQueueId, state);
+        
+        // Check if autoplay is enabled
+        const autoplayEnabled = await getSetting('autoplay.enabled');
+        const isEnabled = autoplayEnabled === 'true';
+        
+        if (isEnabled) {
+          const delayStr = await getSetting('autoplay.delay');
+          const delay = delayStr ? parseInt(delayStr, 10) : 5;
+          
+          console.log(`Song ${normalizedQueueId} finished. Autoplay enabled, deleting finished song and waiting ${delay}s before next song...`);
+          
+          // IMMEDIATELY delete the finished song so Player page shows countdown
+          try {
+            const songStillExisted = await deleteFinishedSong(normalizedQueueId);
+            
+            if (!songStillExisted) {
+              // Song was already removed, don't schedule autoplay
+              songState.delete(normalizedQueueId);
+              console.log(`Autoplay: Song ${normalizedQueueId} was already removed, skipping autoplay`);
+              postQueueUpdate('queue.updated');
+              return res.json({ ok: true });
+            }
+            
+            // Notify clients that queue has updated (finished song removed)
+            postQueueUpdate('queue.updated');
+            
+            // Wait for configured delay, then advance to next song
+            setTimeout(async () => {
+              try {
+                await query('BEGIN');
+                
+                // Check if there's already a song playing (could happen if user manually advanced)
+                const currentlyPlaying = await query<{ id: number }>(`
+                  SELECT id FROM queue WHERE status = 'playing' LIMIT 1
+                `);
+                
+                if (currentlyPlaying.rows.length > 0) {
+                  // Another song is already playing, don't start a new one
+                  await query('COMMIT');
+                  songState.delete(normalizedQueueId);
+                  console.log(`Autoplay: Another song is already playing (ID: ${currentlyPlaying.rows[0].id}), skipping autoplay`);
+                  return;
+                }
+                
+                // Play the next queued song
+                const result = await query<{ id: number }>(`
+                  UPDATE queue SET status = 'playing'
+                  WHERE id = (
+                    SELECT id FROM queue
+                    WHERE status = 'queued'
+                    ORDER BY position
+                    LIMIT 1
+                  )
+                  RETURNING id
+                `);
+                
+                await query('COMMIT');
+                
+                // Clean up state for the finished song
+                songState.delete(normalizedQueueId);
+                
+                if (result.rows.length > 0) {
+                  console.log(`Autoplay: Started next song (ID: ${result.rows[0].id})`);
+                  postQueueUpdate('player.next');
+                } else {
+                  console.log('Autoplay: No more songs in queue');
+                  postQueueUpdate('queue.updated');
+                }
+              } catch (err) {
+                await query('ROLLBACK');
+                console.error('Autoplay error:', err);
+                songState.delete(normalizedQueueId);
+              }
+            }, delay * 1000);
+          } catch (err) {
+            console.error('Error deleting finished song for autoplay:', err);
+          }
+        } else {
+          console.log(`Song ${normalizedQueueId} finished but autoplay is disabled`);
+          // Still delete the finished song even if autoplay is disabled
+          try {
+            const deleted = await deleteFinishedSong(normalizedQueueId);
+            songState.delete(normalizedQueueId);
+            if (deleted) {
+              postQueueUpdate('queue.updated');
+            }
+          } catch (err) {
+            console.error('Error in autoplay-disabled song cleanup:', err);
+            // If deletion fails, still clean up state and notify clients
+            // The song may have been manually removed already
+            songState.delete(normalizedQueueId);
+            postQueueUpdate('queue.updated');
+          }
+        }
+      }
+    }
     
     res.json({ ok: true });
   })
@@ -837,7 +1325,7 @@ apiRouter.get(
 // Update overlay settings (requires admin)
 apiRouter.post(
   '/overlay/settings',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const { visible, height, qrSize, customMessage } = req.body;
     
@@ -891,7 +1379,7 @@ apiRouter.get(
 // Update autoplay settings (requires admin)
 apiRouter.post(
   '/autoplay/settings',
-  adminGuard,
+  sessionGuard,
   ah(async (req, res) => {
     const { enabled, delay } = req.body;
     
@@ -919,7 +1407,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/admin/clear-db',
-  adminGuard,
+  sessionGuard,
   ah(async (_req, res) => {
     const [a1, t1, q1] = await Promise.all([
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),

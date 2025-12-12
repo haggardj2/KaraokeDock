@@ -17,7 +17,39 @@ const ZIP_RE   = /\.zip$/i;
 const CDG_RE   = /\.cdg$/i;
 const MP3_RE   = /\.mp3$/i;
 
-async function* walkFiles(dir: string) {
+/**
+ * Semaphore to limit concurrent ffprobe operations
+ */
+class Semaphore {
+  private queue: Array<() => void> = [];
+  private running = 0;
+
+  constructor(private max: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.max) {
+      this.running++;
+      return;
+    }
+    return new Promise(resolve => {
+      this.queue.push(resolve);
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) {
+      this.running++;
+      next();
+    }
+  }
+}
+
+// Limit concurrent ffprobe processes to avoid EMFILE errors
+const ffprobeSemaphore = new Semaphore(10);
+
+async function* walkFiles(dir: string): AsyncGenerator<string> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const e of entries) {
     const p = path.join(dir, e.name);
@@ -33,14 +65,29 @@ async function* walkFiles(dir: string) {
  * Get duration of a media file using ffprobe
  */
 export async function getMediaDuration(filePath: string): Promise<number | null> {
+  await ffprobeSemaphore.acquire();
+  
   try {
-    return new Promise((resolve) => {
-      const ffprobe = spawn('ffprobe', [
-        '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        filePath
-      ]);
+    return await new Promise((resolve) => {
+      let ffprobe;
+      try {
+        ffprobe = spawn('ffprobe', [
+          '-v', 'error',
+          '-show_entries', 'format=duration',
+          '-of', 'default=noprint_wrappers=1:nokey=1',
+          filePath
+        ]);
+      } catch (err) {
+        // Handle synchronous spawn errors (e.g., EMFILE)
+        resolve(null);
+        return;
+      }
+
+      // Handle spawn errors where process is returned but is invalid
+      if (!ffprobe || !ffprobe.stdout) {
+        resolve(null);
+        return;
+      }
 
       let output = '';
       ffprobe.stdout.on('data', (data) => {
@@ -67,7 +114,47 @@ export async function getMediaDuration(filePath: string): Promise<number | null>
     });
   } catch {
     return null;
+  } finally {
+    ffprobeSemaphore.release();
   }
+}
+
+/**
+ * Utility function to extract duration from a track
+ * Handles all track types: mp4, cdgmp3 (zip or loose)
+ */
+export async function extractTrackDuration(track: { 
+  kind: string; 
+  file_mp4: string | null; 
+  file_mp3: string | null; 
+}): Promise<number | null> {
+  let extractedDuration: number | null = null;
+  
+  if (track.kind === 'cdgmp3' && track.file_mp3) {
+    const isFromZip = track.file_mp3.startsWith('zip://');
+    
+    if (isFromZip) {
+      // Extract duration from MP3 inside ZIP
+      // Parse zip://path#entry format - split at .zip# to handle # in filenames
+      const ZIP_EXT = '.zip';
+      const ZIP_SEPARATOR = '.zip#';
+      const withoutPrefix = track.file_mp3.replace('zip://', '');
+      const separatorIdx = withoutPrefix.indexOf(ZIP_SEPARATOR);
+      const zipPath = separatorIdx >= 0 ? withoutPrefix.substring(0, separatorIdx + ZIP_EXT.length) : withoutPrefix;
+      const mp3Name = separatorIdx >= 0 ? withoutPrefix.substring(separatorIdx + ZIP_SEPARATOR.length) : '';
+      
+      if (zipPath && mp3Name) {
+        extractedDuration = await getZipMp3Duration(zipPath, mp3Name);
+      }
+    } else {
+      // Loose MP3 file
+      extractedDuration = await getMediaDuration(track.file_mp3);
+    }
+  } else if (track.kind === 'mp4' && track.file_mp4) {
+    extractedDuration = await getMediaDuration(track.file_mp4);
+  }
+  
+  return extractedDuration;
 }
 
 /**
@@ -170,6 +257,9 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
   let zipPairsIndexed = 0;
   let loosePairsIndexed = 0;
 
+  // Track scanned files to remove orphaned tracks later
+  const scannedKeys = new Set<string>();
+
   console.log(`Scanning library path: ${libPath}`);
 
   for await (const abs of walkFiles(libPath)) {
@@ -180,8 +270,9 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
       const { artist, title, discId } = parseFromFilename(basename);
       const artistId = artist ? await upsertArtist(artist) : null;
       
-      // Get duration of MP4 file
-      const duration_ms = await getMediaDuration(abs);
+      // Skip duration extraction during scan for speed (lazy loading)
+      // Duration will be extracted in background or when song is queued
+      const duration_ms = null;
 
       await upsertTrack({
         artist_id: artistId,
@@ -197,8 +288,11 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
         library_id: libraryId,
       });
 
+      // Track this file as scanned (using kind + path + basename as key)
+      scannedKeys.add(`mp4:${dir}:${basename}`);
+
       mp4Indexed++;
-      console.log(`Indexed MP4: ${basename} (disc: ${discId}, duration: ${duration_ms ? Math.round(duration_ms/1000) + 's' : 'unknown'})`);
+      console.log(`Indexed MP4: ${basename} (disc: ${discId}, duration: pending)`);
       onProgress?.({ type: 'file', data: { kind: 'mp4', file: abs } });
       continue;
     }
@@ -213,8 +307,9 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
         const { artist, title, discId } = parseFromFilename(basename);
         const artistId = artist ? await upsertArtist(artist) : null;
         
-        // Get duration of MP3 inside ZIP
-        const duration_ms = await getZipMp3Duration(abs, contents.mp3);
+        // Skip duration extraction during scan for speed (lazy loading)
+        // Duration will be extracted in background or when song is queued
+        const duration_ms = null;
 
         await upsertTrack({
           artist_id: artistId,
@@ -230,8 +325,11 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
           library_id: libraryId,
         });
 
+        // Track this file as scanned (using kind + path + basename as key)
+        scannedKeys.add(`cdgmp3:${dir}:${basename}`);
+
         zipPairsIndexed++;
-        console.log(`Indexed ZIP CDG+MP3: ${basename} (disc: ${discId}, duration: ${duration_ms ? Math.round(duration_ms/1000) + 's' : 'unknown'})`);
+        console.log(`Indexed ZIP CDG+MP3: ${basename} (disc: ${discId}, duration: pending)`);
         onProgress?.({ type: 'file', data: { kind: 'zipPair', file: abs } });
       } else {
         console.warn(`ZIP file missing CDG or MP3: ${basename}`);
@@ -248,8 +346,9 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
         const { artist, title, discId } = parseFromFilename(basename);
         const artistId = artist ? await upsertArtist(artist) : null;
         
-        // Get duration of MP3 file
-        const duration_ms = await getMediaDuration(mp3);
+        // Skip duration extraction during scan for speed (lazy loading)
+        // Duration will be extracted in background or when song is queued
+        const duration_ms = null;
         
         await upsertTrack({
           artist_id: artistId,
@@ -265,8 +364,11 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
           library_id: libraryId,
         });
         
+        // Track this file as scanned (using kind + path + basename as key)
+        scannedKeys.add(`cdgmp3:${dir}:${basename}`);
+        
         loosePairsIndexed++;
-        console.log(`Indexed loose CDG+MP3: ${basename} (disc: ${discId}, duration: ${duration_ms ? Math.round(duration_ms/1000) + 's' : 'unknown'})`);
+        console.log(`Indexed loose CDG+MP3: ${basename} (disc: ${discId}, duration: pending)`);
         onProgress?.({ type: 'file', data: { kind: 'loosePair', file: abs } });
       } catch {
         console.warn(`CDG file missing matching MP3: ${basename}`);
@@ -274,8 +376,85 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
     }
   }
 
-  const summary = { mp4Indexed, zipsSeen, zipPairsIndexed, loosePairsIndexed };
+  // Remove tracks from this library that were not found during the scan
+  const { query } = await import('./db');
+  
+  // Get all existing tracks for this library (excluding external tracks and tracks in queue)
+  const existingTracks = await query<{ id: number; kind: string; path: string; basename: string }>(
+    `SELECT t.id, t.kind, t.path, t.basename 
+     FROM tracks t
+     LEFT JOIN queue q ON t.id = q.track_id
+     WHERE t.library_id = $1 
+       AND t.external_url IS NULL
+       AND q.track_id IS NULL`,
+    [libraryId]
+  );
+  
+  const tracksToDelete: number[] = [];
+  for (const track of existingTracks.rows) {
+    const key = `${track.kind}:${track.path}:${track.basename}`;
+    if (!scannedKeys.has(key)) {
+      tracksToDelete.push(track.id);
+    }
+  }
+  
+  let tracksRemoved = 0;
+  if (tracksToDelete.length > 0) {
+    console.log(`Removing ${tracksToDelete.length} tracks that are no longer in the library...`);
+    const deleteResult = await query(
+      `DELETE FROM tracks WHERE id = ANY($1)`,
+      [tracksToDelete]
+    );
+    tracksRemoved = deleteResult.rowCount || 0;
+    console.log(`Removed ${tracksRemoved} orphaned tracks`);
+  }
+
+  const summary = { mp4Indexed, zipsSeen, zipPairsIndexed, loosePairsIndexed, tracksRemoved };
   console.log('Scan summary:', summary);
   onProgress?.({ type: 'summary', data: summary });
   return summary;
+}
+
+/**
+ * Background task to process tracks with missing duration_ms
+ * Processes a batch of tracks at a time to avoid overwhelming the system
+ */
+export async function processMissingDurations(batchSize: number = 10): Promise<number> {
+  const { query } = await import('./db');
+  
+  // Get tracks without duration
+  const result = await query(
+    `SELECT id, kind, file_mp4, file_mp3, file_cdg, title
+     FROM tracks
+     WHERE duration_ms IS NULL
+     ORDER BY id
+     LIMIT $1`,
+    [batchSize]
+  );
+  
+  if (result.rows.length === 0) {
+    return 0;
+  }
+  
+  console.log(`Processing ${result.rows.length} tracks with missing duration...`);
+  let processed = 0;
+  
+  for (const track of result.rows) {
+    try {
+      const extractedDuration = await extractTrackDuration(track);
+      
+      // Update the database with the extracted duration
+      if (extractedDuration !== null) {
+        await query('UPDATE tracks SET duration_ms = $1 WHERE id = $2', [extractedDuration, track.id]);
+        console.log(`Updated duration for track ${track.id} (${track.title}): ${Math.round(extractedDuration / 1000)}s`);
+        processed++;
+      } else {
+        console.warn(`Failed to extract duration for track ${track.id} (${track.title})`);
+      }
+    } catch (err) {
+      console.error(`Error processing track ${track.id}:`, err);
+    }
+  }
+  
+  return processed;
 }

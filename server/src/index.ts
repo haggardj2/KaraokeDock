@@ -4,6 +4,7 @@ import { apiRouter, setPostQueueUpdate } from './routes/api';
 import { mediaRouter } from './routes/media';  // ADD THIS IMPORT
 import { WebSocketServer } from 'ws';
 import { qrRouter } from './routes/qr';
+import { processMissingDurations } from './scanner';
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -22,6 +23,16 @@ app.use(qrRouter);
 
 // websockets: broadcast exact message types Player expects
 const wss = new WebSocketServer({ noServer: true });
+
+// Keep WebSocket connections alive with ping/pong
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.readyState === 1) {
+      ws.ping();
+    }
+  });
+}, 30000); // Send ping every 30 seconds
+
 setPostQueueUpdate((type = 'queue.updated', data?: any) => {
   const msg = JSON.stringify({ type, ...(data || {}) });
   wss.clients.forEach((c) => {
@@ -36,6 +47,30 @@ const server = app.listen(port, () => {
 server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
+
+// Background task to process tracks with missing duration
+// Runs every 5 minutes to gradually fill in missing durations
+const DURATION_PROCESSING_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const DURATION_BATCH_SIZE = 10; // Process 10 tracks at a time
+const STARTUP_DELAY = 10000; // 10 seconds
+
+async function runDurationProcessing() {
+  try {
+    const processed = await processMissingDurations(DURATION_BATCH_SIZE);
+    if (processed > 0) {
+      console.log(`Background task: Processed ${processed} tracks with missing duration`);
+    }
+  } catch (err) {
+    console.error('Background duration processing error:', err);
+  }
+}
+
+// Start the background task after a short delay to allow the server to fully start
+setTimeout(() => {
+  console.log('Starting background duration processing task...');
+  runDurationProcessing(); // Run immediately on startup
+  setInterval(runDurationProcessing, DURATION_PROCESSING_INTERVAL);
+}, STARTUP_DELAY);
 
 // keep process alive, log crashes
 process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));

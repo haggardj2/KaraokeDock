@@ -1,10 +1,10 @@
-FROM node:20-bookworm
-RUN apt-get update && apt-get install -y \
+FROM node:25-alpine
+RUN apk update && apk add --no-cache \
     ffmpeg \
     zip \
     unzip \
     postgresql-client \
-    fonts-dejavu-core \
+    font-dejavu \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./

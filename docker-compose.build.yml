@@ -1,0 +1,59 @@
+# docker-compose.build.yml
+# Use this file for local development and building images
+# Run with: docker-compose -f docker-compose.build.yml up
+
+services:
+  db:
+    image: postgres:16
+    container_name: karaoke-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-karaoke}
+      POSTGRES_USER: ${POSTGRES_USER:-karaoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-karaoke}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: ${KARAOKE_API_IMAGE:-haggardj2/karaoke-api:beta}
+    container_name: karaoke-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://karaoke:karaoke@db:5432/karaoke}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme-admin}
+      MEDIA_ROOT: ${MEDIA_ROOT:-/media}
+      ORIGIN: ${ORIGIN:-http://localhost:5173,http://127.0.0.1:5173}
+      WEB_APP_URL: ${WEB_APP_URL:-http://localhost:5173}
+      PORT: ${PORT:-5174}
+    depends_on:
+      - db
+    volumes:
+      - ./media/local:/media/local:Z  # Local files
+      # Uncomment and configure the line below to mount a NAS directory
+      # - /path/to/nas/karaoke:/media/nas:Z
+      # Or use a Docker volume (creates nas-karaoke volume if it doesn't exist)
+      - ./server/migrations:/app/migrations:Z
+    ports:
+      - "5174:5174"
+    command: ["sh", "-c", "npm run migrate && npm start"]
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: ${KARAOKE_WEB_IMAGE:-haggardj2/karaoke-web:beta}
+    container_name: karaoke-web
+    environment:
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:5174}
+    depends_on:
+      - api
+    ports:
+      - "5173:5173"
+
+volumes:
+  dbdata:
+    # This creates a Docker volume. To mount a host directory instead,
+    # comment out this section and use a bind mount in the api service above

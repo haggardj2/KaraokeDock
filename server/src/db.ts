@@ -1,5 +1,6 @@
 // server/src/db.ts
 import { Pool } from 'pg';
+import crypto from 'crypto';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -202,4 +203,76 @@ export async function setSetting(key: string, value: any): Promise<void> {
     'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
     [key, JSON.stringify(value)]
   );
+}
+
+/**
+ * Session management functions
+ */
+
+export interface Session {
+  id: number;
+  token: string;
+  created_at: Date;
+  expires_at: Date;
+  last_accessed: Date;
+}
+
+/**
+ * Create a new session with a random token
+ * Sessions expire after 30 days by default
+ */
+export async function createSession(expiresInDays: number = 30): Promise<string> {
+  const token = generateToken();
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + expiresInDays);
+  
+  await query(
+    'INSERT INTO sessions (token, expires_at) VALUES ($1, $2)',
+    [token, expiresAt]
+  );
+  
+  return token;
+}
+
+/**
+ * Validate a session token and update last accessed time
+ */
+export async function validateSession(token: string): Promise<boolean> {
+  const res = await query<Session>(
+    'SELECT * FROM sessions WHERE token = $1 AND expires_at > NOW()',
+    [token]
+  );
+  
+  if (res.rows.length === 0) {
+    return false;
+  }
+  
+  // Update last accessed time
+  await query(
+    'UPDATE sessions SET last_accessed = NOW() WHERE token = $1',
+    [token]
+  );
+  
+  return true;
+}
+
+/**
+ * Delete a session (logout)
+ */
+export async function deleteSession(token: string): Promise<void> {
+  await query('DELETE FROM sessions WHERE token = $1', [token]);
+}
+
+/**
+ * Clean up expired sessions (can be called periodically)
+ */
+export async function cleanupExpiredSessions(): Promise<void> {
+  await query('DELETE FROM sessions WHERE expires_at <= NOW()');
+}
+
+/**
+ * Generate a secure random token
+ */
+function generateToken(): string {
+  return crypto.randomBytes(32).toString('hex');
 }
