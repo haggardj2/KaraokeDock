@@ -313,7 +313,7 @@ After starting the containers for the first time:
 **Infrastructure:**
 - Docker for containerization
 - Docker Compose for orchestration
-- Pre-built images hosted on Docker Hub
+- Pre-built x64 image hosted on Docker Hub (ARM Comming Soon)
 
 ### Supported File Formats
 
