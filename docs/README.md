@@ -1,8 +1,9 @@
-# 🎤 Web Karaoke MVP
+# 🎤 Web Karaoke
 
 A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
 
-![Requests Page](https://github.com/user-attachments/assets/7b8e00c6-8dce-40a9-9aae-89b260eaac77)
+
+![Requests Page](https://github.com/user-attachments/assets/a6c78d52-891a-4878-99d4-d3c5fd9f2c26)
 
 ## 📋 Table of Contents
 
@@ -34,7 +35,7 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 The main interface for guests to browse and request songs. Fully mobile-responsive and accessible via QR code.
 
-![Requests Page](https://github.com/user-attachments/assets/7b8e00c6-8dce-40a9-9aae-89b260eaac77)
+![Requests Page](https://github.com/user-attachments/assets/a6c78d52-891a-4878-99d4-d3c5fd9f2c26)
 
 **Functions:**
 - Search local karaoke library
@@ -48,7 +49,8 @@ The main interface for guests to browse and request songs. Fully mobile-responsi
 
 Access thousands of online karaoke tracks from Karaoke Nerds directly within the app.
 
-![Karaoke Nerds Page](https://github.com/user-attachments/assets/52afd39e-c42a-4cec-b3ab-5086852cef8d)
+
+![Karaoke Nerds Page](https://github.com/user-attachments/assets/14ccdb1a-bfc7-48d0-b727-ef9c39c92ced)
 
 **Functions:**
 - Search online karaoke catalog
@@ -77,7 +79,7 @@ The control center for managing the karaoke session.
 
 Full-screen karaoke player optimized for display on TVs or projectors.
 
-![Player Page](https://github.com/user-attachments/assets/a77561bb-9b73-434f-a055-924490f7862c)
+![Player Page](https://github.com/user-attachments/assets/538ab106-e027-42bd-8d80-b21027b7a0fa)
 
 **Functions:**
 - Full-screen video playback
@@ -92,7 +94,7 @@ Full-screen karaoke player optimized for display on TVs or projectors.
 
 Management interface for system configuration and media libraries.
 
-![Admin Page](https://github.com/user-attachments/assets/97bf0fc9-f4b6-4f8f-a16a-94ab8ff2f3bd)
+![Admin Page](https://github.com/user-attachments/assets/efd4d129-5f36-4ad5-b208-2db29066ebd5)
 
 **Functions:**
 - View system statistics (artists, tracks, queue)
@@ -114,8 +116,8 @@ Management interface for system configuration and media libraries.
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/haggardj2/web-karaoke-mvp.git
-   cd web-karaoke-mvp
+   git clone https://github.com/haggardj2/docker-karaoke-mvp.git
+   cd docker-karaoke
    ```
 
 2. **Copy the environment file:**
@@ -329,7 +331,6 @@ After starting the containers for the first time:
 5. Player page displays current song
 6. CDG files transcoded to MP4 in real-time if needed
 
-For detailed architecture diagrams, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 💻 Development
 
@@ -434,13 +435,6 @@ docker compose up -d
 ```
 
 **⚠️ Warning:** This will delete all data including your library configuration and queue history.
-
-## 📚 Additional Documentation
-
-- [QUICKSTART.md](QUICKSTART.md) - Quick reference card
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed architecture diagrams
-- [DEPLOYMENT.md](DEPLOYMENT.md) - Production deployment guide
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - Extended troubleshooting guide
 
 ## 🔐 Security Considerations
 
