@@ -31,9 +31,9 @@ services:
 
   api:
     image: haggardj2/karaoke-api:latest
+    container_name: karaoke-api
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://karaoke:karaoke@db:5432/karaoke}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme-admin}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
       ORIGIN: ${ORIGIN:-http://localhost:5173,http://127.0.0.1:5173}
       WEB_APP_URL: ${WEB_APP_URL:-http://localhost:5173}
@@ -48,6 +48,7 @@ services:
 
   web:
     image: haggardj2/karaoke-web:latest
+    container_name: karaoke-web
     environment:
       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:5174}
     depends_on:
