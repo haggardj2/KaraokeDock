@@ -9,7 +9,7 @@ A modern, full-featured web-based karaoke system with support for multiple media
 - [Web Pages Overview](#-web-pages-overview)
 - [Quick Start with Docker](#-quick-start-with-docker)
 - [First-Time Setup](#-first-time-setup)
-- [Architecture](#-architecture)
+- [Architecture](-architecture)
 - [Development](#-development)
 - [Troubleshooting](#-troubleshooting)
 
