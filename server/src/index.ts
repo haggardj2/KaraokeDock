@@ -49,8 +49,8 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 // Background task to process tracks with missing duration
-// Runs every 5 minutes to gradually fill in missing durations
-const DURATION_PROCESSING_INTERVAL = 5 * 60 * 1000; // 5 minutes
+// Runs every 30 seconds to gradually fill in missing durations
+const DURATION_PROCESSING_INTERVAL = 1 * 30 * 1000; // 30 seconds
 const DURATION_BATCH_SIZE = 10; // Process 10 tracks at a time
 const STARTUP_DELAY = 10000; // 10 seconds
 

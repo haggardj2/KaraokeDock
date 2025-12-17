@@ -1,20 +1,17 @@
-# 🎤 Web Karaoke
+# 🎤 Web Karaoke MVP
 
 A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
 
 
-![Requests Page](https://github.com/user-attachments/assets/a6c78d52-891a-4878-99d4-d3c5fd9f2c26)
-
 ## 📋 Table of Contents
 
-- [Features](#features)
-- [Web Pages Overview](#web-pages-overview)
-- [Quick Start with Docker](#quick-start-with-docker)
-- [Configuration](#configuration)
-- [First-Time Setup](#first-time-setup)
-- [Architecture](#architecture)
-- [Development](#development)
-- [Troubleshooting](#troubleshooting)
+- [Features]([#-features))
+- [Web Pages Overview](#-web-pages-overview)
+- [Quick Start with Docker](#-quick-start-with-docker)
+- [First-Time Setup](#-first-time-setup)
+- [Architecture](#-architecture)
+- [Development](#-development)
+- [Troubleshooting](#-troubleshooting)
 
 ## ✨ Features
 
@@ -35,7 +32,7 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 The main interface for guests to browse and request songs. Fully mobile-responsive and accessible via QR code.
 
-![Requests Page](https://github.com/user-attachments/assets/a6c78d52-891a-4878-99d4-d3c5fd9f2c26)
+![Requests Page](screenshots/requests-page.png)
 
 **Functions:**
 - Search local karaoke library
@@ -49,8 +46,7 @@ The main interface for guests to browse and request songs. Fully mobile-responsi
 
 Access thousands of online karaoke tracks from Karaoke Nerds directly within the app.
 
-
-![Karaoke Nerds Page](https://github.com/user-attachments/assets/14ccdb1a-bfc7-48d0-b727-ef9c39c92ced)
+![Karaoke Nerds Page](screenshots/karaoke-nerds-page.png)
 
 **Functions:**
 - Search online karaoke catalog
@@ -63,7 +59,7 @@ Access thousands of online karaoke tracks from Karaoke Nerds directly within the
 
 The control center for managing the karaoke session.
 
-![Host Page](https://github.com/user-attachments/assets/9af3cb06-b7c5-437f-8986-f58f0841ebdf)
+![Host Page](screenshots/host-page.png)
 
 **Functions:**
 - View real-time queue updates
@@ -79,7 +75,7 @@ The control center for managing the karaoke session.
 
 Full-screen karaoke player optimized for display on TVs or projectors.
 
-![Player Page](https://github.com/user-attachments/assets/538ab106-e027-42bd-8d80-b21027b7a0fa)
+![Player Page](screenshots/player-page.png)
 
 **Functions:**
 - Full-screen video playback
@@ -94,7 +90,7 @@ Full-screen karaoke player optimized for display on TVs or projectors.
 
 Management interface for system configuration and media libraries.
 
-![Admin Page](https://github.com/user-attachments/assets/efd4d129-5f36-4ad5-b208-2db29066ebd5)
+![Admin Page](screenshots/admin-page.png)
 
 **Functions:**
 - View system statistics (artists, tracks, queue)
@@ -116,8 +112,8 @@ Management interface for system configuration and media libraries.
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/haggardj2/docker-karaoke-mvp.git
-   cd docker-karaoke
+   git clone https://github.com/haggardj2/web-karaoke-mvp.git
+   cd web-karaoke-mvp
    ```
 
 2. **Copy the environment file:**
@@ -192,7 +188,7 @@ The application runs three Docker containers:
   - Mounts: `MEDIA_PATH` → `/media` inside container
 
 - **karaoke-db**: PostgreSQL 16 database
-  - Image: `postgres:16`
+  - Image: `postgres:18`
   - Exposed port: 5432
   - Persistent volume: `dbdata`
 
@@ -313,7 +309,7 @@ After starting the containers for the first time:
 **Infrastructure:**
 - Docker for containerization
 - Docker Compose for orchestration
-- Pre-built x64 image hosted on Docker Hub (ARM Comming Soon)
+- Pre-built images hosted on Docker Hub
 
 ### Supported File Formats
 
@@ -331,6 +327,7 @@ After starting the containers for the first time:
 5. Player page displays current song
 6. CDG files transcoded to MP4 in real-time if needed
 
+For detailed architecture diagrams, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 💻 Development
 
@@ -362,7 +359,7 @@ docker run -d \
   -e POSTGRES_USER=karaoke \
   -e POSTGRES_PASSWORD=karaoke \
   -p 5432:5432 \
-  postgres:16
+  postgres:18-alpine
 ```
 
 ### Building Docker Images
@@ -426,15 +423,10 @@ docker compose logs -f karaoke-web
 docker compose logs -f karaoke-db
 ```
 
-### Resetting the Database
+## 📚 Additional Documentation
 
-```bash
-docker compose down
-docker volume rm web-karaoke-mvp_dbdata
-docker compose up -d
-```
-
-**⚠️ Warning:** This will delete all data including your library configuration and queue history.
+- [QUICKSTART.md](QUICKSTART.md) - Quick reference card
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed architecture diagrams
 
 ## 🔐 Security Considerations
 

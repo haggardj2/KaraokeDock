@@ -1,5 +1,10 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react'
+import React, { useEffect, useState, useRef, useCallback, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
+
+const MIN_KEY_ADJUSTMENT = -6
+const MAX_KEY_ADJUSTMENT = 6
+const MOBILE_BREAKPOINT = 640
 
 type SearchRow = { 
   id: number; 
@@ -20,6 +25,7 @@ type KaraokeNerdsTrack = {
 export default function Requests() {
   const [q, setQ] = useState('')
   const [requestedBy, setRequestedBy] = useState('')
+  const [keyAdjustments, setKeyAdjustments] = useState<Map<string, number>>(new Map())
   const [searchMode, setSearchMode] = useState<'local' | 'karaoke-nerds'>('local')
   const [localRows, setLocalRows] = useState<SearchRow[]>([])
   const [karaokeNerdsRows, setKaraokeNerdsRows] = useState<KaraokeNerdsTrack[]>([])
@@ -30,8 +36,38 @@ export default function Requests() {
   const [showNamePrompt, setShowNamePrompt] = useState(false)
   const [kindFilter, setKindFilter] = useState<'all' | 'mp4' | 'cdgmp3'>('all')
   const [showFilters, setShowFilters] = useState(false)
+  const [actionMenuOpen, setActionMenuOpen] = useState<string | null>(null)
+  const [actionMenuAnchor, setActionMenuAnchor] = useState<{top: number, left: number, right: number, bottom: number, width: number} | null>(null)
+  const [actionMenuPosition, setActionMenuPosition] = useState<{top: number, left: number, width: number} | null>(null)
+  const [keyAdjustmentView, setKeyAdjustmentView] = useState<string | null>(null)
+  const [lyricsPopupOpen, setLyricsPopupOpen] = useState<string | null>(null)
+  const [lyricsData, setLyricsData] = useState<{[key: string]: {loading: boolean, lyrics: string | null, error: string | null}}>({})
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
+  const actionMenuRef = useRef<HTMLDivElement | null>(null)
+  const lyricsPopupRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    // Close popup when clicking outside
+    function handleDown(e: MouseEvent) {
+      if (actionMenuOpen) {
+        const el = actionMenuRef.current
+        if (el && !el.contains(e.target as Node)) {
+          setActionMenuOpen(null)
+          setActionMenuPosition(null)
+          setKeyAdjustmentView(null)
+        }
+      }
+      if (lyricsPopupOpen) {
+        const el = lyricsPopupRef.current
+        if (el && !el.contains(e.target as Node)) {
+          setLyricsPopupOpen(null)
+        }
+      }
+    }
+    document.addEventListener('mousedown', handleDown)
+    return () => document.removeEventListener('mousedown', handleDown)
+  }, [actionMenuOpen, lyricsPopupOpen])
 
   useEffect(() => {
     // Modern dark theme
@@ -81,12 +117,141 @@ export default function Requests() {
     };
   }, []);
 
+
+  useLayoutEffect(() => {
+    if (!actionMenuOpen) return
+    if (window.innerWidth <= MOBILE_BREAKPOINT) return
+    if (!actionMenuAnchor) return
+
+    // Wait a frame so the portal'd menu is in the DOM and measurable
+    requestAnimationFrame(() => {
+      const menuEl = actionMenuRef.current
+      if (!menuEl) return
+
+      const gap = 8
+      const menuRect = menuEl.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+
+      // 1) Prefer below the button...
+      let top = actionMenuAnchor.bottom + gap
+
+      // ...but if it overflows bottom, open above.
+      if (top + menuRect.height + gap > vh) {
+        top = actionMenuAnchor.top - menuRect.height - gap
+      }
+
+      // Clamp vertically into viewport
+      top = Math.max(gap, Math.min(top, vh - menuRect.height - gap))
+
+      // 2) Open to the LEFT of the button:
+      // align the menu's right edge with the button's right edge
+      let left = actionMenuAnchor.right - menuRect.width
+
+      // Clamp horizontally into viewport
+      left = Math.max(gap, Math.min(left, vw - menuRect.width - gap))
+
+      setActionMenuPosition({
+        top,
+        left,
+        width: actionMenuAnchor.width
+      })
+    })
+  }, [actionMenuOpen, actionMenuAnchor])
+
+
   // Save name to localStorage
   useEffect(() => {
     if (requestedBy. trim()) {
       localStorage.setItem('karaoke-name', requestedBy.trim())
     }
   }, [requestedBy])
+
+  // Helper function to adjust key
+  const adjustKey = useCallback((trackKey: string, delta: number) => {
+    setKeyAdjustments(prev => {
+      const next = new Map(prev)
+      const currentKey = next.get(trackKey) ?? 0
+      const newKey = currentKey + delta
+      if (newKey >= MIN_KEY_ADJUSTMENT && newKey <= MAX_KEY_ADJUSTMENT) {
+        next.set(trackKey, newKey)
+      }
+      return next
+    })
+  }, [])
+
+  // Helper function to calculate and set action menu position
+  const handleActionMenuToggle = useCallback((e: React.MouseEvent, trackKey: string, currentlyOpen: string | null) => {
+    e.stopPropagation()
+    const wasOpen = currentlyOpen === trackKey
+    if (!wasOpen) {
+      // Only calculate position for desktop
+      if (window.innerWidth > MOBILE_BREAKPOINT) {
+        const rect = e.currentTarget.getBoundingClientRect()
+
+        setActionMenuAnchor({
+          top: rect.top,
+          left: rect.left,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width
+        })
+
+        // Let useLayoutEffect measure the actual menu size and decide final placement
+        setActionMenuPosition({
+          top: rect.bottom + 8,
+          left: rect.left,
+          width: rect.width
+        })
+      } else {
+        setActionMenuAnchor(null)
+        setActionMenuPosition(null)
+      }
+    }
+    setActionMenuOpen(prev => prev === trackKey ? null : trackKey)
+    if (wasOpen) setActionMenuAnchor(null)
+  }, [])
+
+  // Function to fetch lyrics
+  const fetchLyrics = useCallback(async (trackKey: string, artist: string, title: string) => {
+    // Set loading state
+    setLyricsData(prev => ({
+      ...prev,
+      [trackKey]: { loading: true, lyrics: null, error: null }
+    }))
+    
+    try {
+      // Create an AbortController for timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+      
+      const response = await fetch(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`, {
+        signal: controller.signal
+      })
+      
+      clearTimeout(timeoutId)
+      
+      if (!response.ok) {
+        throw new Error('Lyrics not found')
+      }
+      
+      const data = await response.json()
+      
+      setLyricsData(prev => ({
+        ...prev,
+        [trackKey]: { loading: false, lyrics: data.lyrics || 'No lyrics available', error: null }
+      }))
+    } catch (err) {
+      const errorMessage = (err instanceof Error && err.name === 'AbortError') 
+        ? 'Request timeout - please try again' 
+        : 'Lyrics not found'
+      
+      setLyricsData(prev => ({
+        ...prev,
+        [trackKey]: { loading: false, lyrics: null, error: errorMessage }
+      }))
+    }
+  }, [])
 
   // Local library search
   const doLocalSearch = useCallback(async () => {
@@ -193,6 +358,9 @@ export default function Requests() {
       return
     }
     
+    const trackKey = `local-${id}`
+    const keyAdjustment = keyAdjustments.get(trackKey) ?? 0
+    
     setAddingLocal(id)
     try {
       await api('/api/queue', { 
@@ -200,12 +368,12 @@ export default function Requests() {
         headers: { 'Content-Type': 'application/json' }, 
         body: JSON.stringify({ 
           trackId: id,
-          requestedBy: name 
+          requestedBy: name,
+          keyAdjustment: keyAdjustment
         }) 
       })
       
       // Mark as recently added
-      const trackKey = `local-${id}`
       setRecentlyAdded(prev => new Set(prev).add(trackKey))
       setTimeout(() => {
         setRecentlyAdded(prev => {
@@ -215,7 +383,8 @@ export default function Requests() {
         })
       }, 3000)
       
-      showToast(`🎤 "${songTitle}" added for ${name}`)
+      const keyText = keyAdjustment !== 0 ? ` (Key: ${keyAdjustment > 0 ? '+' : ''}${keyAdjustment})` : ''
+      showToast(`🎤 "${songTitle}" added for ${name}${keyText}`)
     } catch (err) {
       showToast('Failed to add song.  Please try again.', 'error')
       console.error(err)
@@ -232,6 +401,9 @@ export default function Requests() {
       return
     }
     
+    const trackKey = `kn-${track.url}`
+    const keyAdjustment = keyAdjustments.get(trackKey) ?? 0
+    
     setAddingKaraokeNerds(track.url)
     try {
       await api('/api/karaoke-nerds/add', { 
@@ -241,12 +413,12 @@ export default function Requests() {
           title: track.title,
           artist: track.artist,
           url: track.url,
-          requestedBy: name 
+          requestedBy: name,
+          keyAdjustment: keyAdjustment
         }) 
       })
       
       // Mark as recently added
-      const trackKey = `kn-${track.url}`
       setRecentlyAdded(prev => new Set(prev).add(trackKey))
       setTimeout(() => {
         setRecentlyAdded(prev => {
@@ -256,7 +428,8 @@ export default function Requests() {
         })
       }, 3000)
       
-      showToast(`🎤 "${track.title}" added for ${name}`)
+      const keyText = keyAdjustment !== 0 ? ` (Key: ${keyAdjustment > 0 ? '+' : ''}${keyAdjustment})` : ''
+      showToast(`🎤 "${track.title}" added for ${name}${keyText}`)
     } catch (err) {
       showToast('Failed to add song. Please try again.', 'error')
       console.error(err)
@@ -426,11 +599,6 @@ export default function Requests() {
           color: var(--color-text-secondary);
           margin-bottom: 8px;
           transition: color 0.3s ease;
-        }
-
-        .input-label.required::after {
-          content: ' *';
-          color: var(--color-danger);
         }
 
         .input-wrapper {
@@ -811,7 +979,7 @@ export default function Requests() {
           margin-bottom: 12px;
           transition: all 0.3s ease;
           position: relative;
-          overflow: hidden;
+          overflow: visible;
           display: flex;
           align-items: center;
           gap: 12px;
@@ -957,6 +1125,483 @@ export default function Requests() {
           animation: spin 0.6s linear infinite;
         }
 
+        /* Button Container - Flex container for key button and add button */
+        .button-container {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          position: relative;
+        }
+
+        /* Action Menu Button - Single button to open menu */
+        .action-menu-button {
+          padding: 8px 16px;
+          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          border: none;
+          border-radius: 10px;
+          color: white;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.3s ease;
+          position: relative;
+          overflow: hidden;
+          white-space: nowrap;
+          min-width: 80px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+
+        .action-menu-button:hover:not(:disabled) {
+          transform: translateY(-2px);
+          box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+        }
+
+        .action-menu-button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+          transform: none;
+        }
+
+        .action-menu-button.karaoke-nerds {
+          background: linear-gradient(135deg, #7c3aed, #a855f7);
+        }
+
+        .action-menu-button.karaoke-nerds:hover:not(:disabled) {
+          box-shadow: 0 6px 20px rgba(124, 58, 237, 0.4);
+        }
+
+        .action-menu-button.success {
+          background: var(--color-success);
+          pointer-events: none;
+        }
+
+        /* Action Menu Overlay for mobile */
+        .action-menu-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.6);
+          z-index: 999;
+          animation: fadeIn 0.3s ease;
+          display: none;
+        }
+
+        @media (max-width: 640px) {
+          .action-menu-overlay {
+            display: block;
+          }
+        }
+
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+
+        /* Action Menu Container - Desktop popup */
+        .action-menu {
+          position: fixed;
+          background: var(--color-bg-card);
+          border: 1px solid var(--color-border);
+          border-radius: 12px;
+          padding: 8px;
+          min-width: 200px;
+          z-index: 1001;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+          animation: slideInDown 0.2s ease;
+        }
+
+        @keyframes slideInDown {
+          from {
+            opacity: 0;
+            transform: translateY(-10px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+
+        /* Mobile: Bottom sheet */
+        @media (max-width: 640px) {
+          .action-menu {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            top: auto;
+            border-radius: 20px 20px 0 0;
+            padding: 20px;
+            padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+            animation: slideInUp 0.3s ease;
+            max-width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+            z-index: 1001;
+          }
+
+          @keyframes slideInUp {
+            from {
+              transform: translateY(100%);
+            }
+            to {
+              transform: translateY(0);
+            }
+          }
+        }
+
+        .action-menu-header {
+          padding: 8px 12px;
+          border-bottom: 1px solid var(--color-border);
+          margin-bottom: 8px;
+        }
+
+        .action-menu-title {
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--color-text-primary);
+          margin: 0;
+        }
+
+        .action-menu-subtitle {
+          font-size: 12px;
+          color: var(--color-text-secondary);
+          margin: 4px 0 0 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .action-menu-items {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .action-menu-item {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 12px;
+          background: transparent;
+          border: none;
+          border-radius: 8px;
+          color: var(--color-text-primary);
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          text-align: left;
+          width: 100%;
+        }
+
+        .action-menu-item:hover {
+          background: var(--color-bg-hover);
+        }
+
+        .action-menu-item-icon {
+          font-size: 20px;
+          width: 24px;
+          text-align: center;
+        }
+
+        .action-menu-item-content {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .action-menu-item-label {
+          display: block;
+          font-weight: 600;
+        }
+
+        .action-menu-item-description {
+          display: block;
+          font-size: 12px;
+          color: var(--color-text-secondary);
+          margin-top: 2px;
+        }
+
+        .action-menu-item-value {
+          font-size: 12px;
+          color: var(--color-text-secondary);
+          white-space: nowrap;
+        }
+
+        .action-menu-item.primary {
+          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          color: white;
+        }
+
+        .action-menu-item.primary:hover {
+          background: linear-gradient(135deg, #7c7ff3, #9d6ff7);
+        }
+
+        .action-menu-item.primary .action-menu-item-description {
+          color: rgba(255, 255, 255, 0.8);
+        }
+
+        /* Key Adjustment View within Action Menu */
+        .key-adjustment-view {
+          padding: 16px 12px;
+          border-top: 1px solid var(--color-border);
+          margin-top: 4px;
+        }
+
+        .key-adjustment-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 16px;
+        }
+
+        .key-adjustment-back {
+          background: transparent;
+          border: none;
+          color: var(--color-text-secondary);
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 6px 10px;
+          border-radius: 6px;
+          transition: all 0.2s ease;
+        }
+
+        .key-adjustment-back:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text-primary);
+        }
+
+        .key-adjustment-title {
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--color-text-primary);
+        }
+
+        .key-adjustment-controls {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 16px;
+          padding: 20px 0;
+        }
+
+        .key-adjustment-button {
+          width: 52px;
+          height: 52px;
+          border-radius: 12px;
+          border: 2px solid var(--color-border);
+          background: var(--color-bg-secondary);
+          color: var(--color-text-primary);
+          font-size: 24px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .key-adjustment-button:hover:not(:disabled) {
+          background: var(--color-bg-hover);
+          border-color: var(--color-accent);
+          transform: scale(1.05);
+        }
+
+        .key-adjustment-button:disabled {
+          opacity: 0.3;
+          cursor: not-allowed;
+        }
+
+        .key-adjustment-display {
+          min-width: 100px;
+          text-align: center;
+        }
+
+        .key-adjustment-value {
+          font-weight: 700;
+          font-size: 24px;
+          color: var(--color-text-primary);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+        }
+
+        .key-adjustment-label {
+          font-size: 12px;
+          color: var(--color-text-secondary);
+          margin-top: 4px;
+        }
+
+        /* Mobile optimizations for action menu */
+        @media (max-width: 640px) {
+          .action-menu-item {
+            padding: 16px;
+          }
+
+          .action-menu-header {
+            padding: 12px 0;
+            margin-bottom: 12px;
+          }
+
+          .action-menu-title {
+            font-size: 16px;
+          }
+
+          .key-adjustment-controls {
+            padding: 24px 0;
+          }
+
+          .key-adjustment-button {
+            width: 60px;
+            height: 60px;
+            font-size: 28px;
+          }
+
+          .key-adjustment-value {
+            font-size: 28px;
+          }
+        }
+
+        /* Lyrics Button */
+        .lyrics-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 10px;
+          background: var(--color-bg-primary);
+          border: 1px solid var(--color-border);
+          border-radius: 8px;
+          color: var(--color-text-primary);
+          font-weight: 600;
+          cursor: pointer;
+          font-size: 14px;
+        }
+
+        .lyrics-button:hover {
+          background: var(--color-bg-hover);
+          border-color: var(--color-accent);
+        }
+
+        /* Lyrics Popup/Modal */
+        .lyrics-popup-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.8);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1200;
+          padding: 20px;
+          animation: fadeInUp 0.3s ease;
+        }
+
+        .lyrics-popup {
+          background: var(--color-bg-card);
+          border: 1px solid var(--color-border);
+          border-radius: 16px;
+          padding: 24px;
+          max-width: 600px;
+          width: 100%;
+          max-height: 80vh;
+          overflow-y: auto;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+          animation: slideIn 0.3s ease;
+          z-index: 1201;
+        }
+
+        .lyrics-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          margin-bottom: 20px;
+          padding-bottom: 16px;
+          border-bottom: 1px solid var(--color-border);
+        }
+
+        .lyrics-title-info {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .lyrics-popup-title {
+          font-size: 18px;
+          font-weight: 700;
+          color: var(--color-text-primary);
+          margin: 0 0 4px 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .lyrics-popup-artist {
+          font-size: 14px;
+          color: var(--color-text-secondary);
+          margin: 0;
+        }
+
+        .lyrics-close-button {
+          background: var(--color-bg-secondary);
+          border: 1px solid var(--color-border);
+          border-radius: 8px;
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          color: var(--color-text-primary);
+          font-size: 20px;
+          line-height: 1;
+          transition: all 0.3s ease;
+          flex-shrink: 0;
+          margin-left: 12px;
+        }
+
+        .lyrics-close-button:hover {
+          background: var(--color-bg-hover);
+          border-color: var(--color-accent);
+        }
+
+        .lyrics-content {
+          color: var(--color-text-primary);
+          font-size: 14px;
+          line-height: 1.8;
+          white-space: pre-wrap;
+          word-wrap: break-word;
+        }
+
+        .lyrics-loading {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 40px 20px;
+          gap: 16px;
+        }
+
+        .lyrics-error {
+          text-align: center;
+          padding: 40px 20px;
+          color: var(--color-text-secondary);
+        }
+
+        .lyrics-error-icon {
+          font-size: 48px;
+          margin-bottom: 12px;
+        }
+
         /* Empty State */
         .empty-state {
           text-align: center;
@@ -999,7 +1644,7 @@ export default function Requests() {
           gap: 12px;
           font-weight: 600;
           font-size: 14px;
-          z-index: 1000;
+          z-index: 1300;
           opacity: 0;
           transition: all 0.3s ease;
           max-width: calc(100vw - 48px);
@@ -1063,6 +1708,12 @@ export default function Requests() {
           }
 
           .add-button {
+            padding: 7px 14px;
+            font-size: 13px;
+            min-width: 70px;
+          }
+
+          .action-menu-button {
             padding: 7px 14px;
             font-size: 13px;
             min-width: 70px;
@@ -1271,6 +1922,7 @@ export default function Requests() {
                 {localRows. map((row, idx) => {
                 const trackKey = `local-${row.id}`
                 const isRecentlyAdded = recentlyAdded. has(trackKey)
+                const currentKey = keyAdjustments.get(trackKey) ?? 0
                 
                 return (
                   <div key={row.id} className="result-card">
@@ -1283,30 +1935,161 @@ export default function Requests() {
                         {row.kind && <span className="meta-tag">{row.kind. toUpperCase()}</span>}
                       </div>
                     </div>
-                    <button
-                      className={`add-button ${isRecentlyAdded ? 'success' : ''}`}
-                      onClick={() => enqueueLocal(row. id, row.title || 'Unknown')}
-                      disabled={addingLocal === row.id || isRecentlyAdded}
-                    >
-                      <div className="add-button-content">
-                        {addingLocal === row. id ? (
+                    <div className="button-container">
+                      {/* Single Action Menu Button */}
+                      <div style={{ position: 'relative', width: '100%' }}>
+                        <button
+                          className={`action-menu-button ${isRecentlyAdded ? 'success' : ''}`}
+                          onClick={(e) => {
+                            if (!isRecentlyAdded && addingLocal !== row.id) {
+                              handleActionMenuToggle(e, trackKey, actionMenuOpen)
+                            }
+                          }}
+                          disabled={addingLocal === row.id || isRecentlyAdded}
+                        >
+                          {addingLocal === row.id ? (
+                            <>
+                              <div className="button-spinner"></div>
+                              <span>Adding</span>
+                            </>
+                          ) : isRecentlyAdded ? (
+                            <>
+                              <span>✓</span>
+                              <span>Added</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>⋯</span>
+                              <span>Options</span>
+                            </>
+                          )}
+                        </button>
+
+                        {/* Action Menu */}
+                        {actionMenuOpen === trackKey && createPortal(
                           <>
-                            <div className="button-spinner"></div>
-                            <span>Adding</span>
-                          </>
-                        ) : isRecentlyAdded ? (
-                          <>
-                            <span>✓</span>
-                            <span>Added</span>
-                          </>
-                        ) : (
-                          <>
-                            <span>+</span>
-                            <span>Add</span>
-                          </>
+                            {/* Mobile overlay */}
+                            <div className="action-menu-overlay" onClick={() => setActionMenuOpen(null)} />
+                            
+                            <div
+                              className="action-menu"
+                              ref={actionMenuRef}
+                              onClick={(e) => e.stopPropagation()}
+                              style={actionMenuPosition ? {
+                                top: `${actionMenuPosition.top}px`,
+                                left: `${actionMenuPosition.left}px`,
+                                width: 'max-content',
+                                minWidth: `${actionMenuPosition.width}px`
+                              } : undefined}
+                            >
+                              <div className="action-menu-header">
+                                <h3 className="action-menu-title">{row.title || 'Unknown Title'}</h3>
+                                <p className="action-menu-subtitle">{row.artist || 'Unknown Artist'}</p>
+                              </div>
+                              
+                              {keyAdjustmentView === trackKey ? (
+                                // Key Adjustment View
+                                <div className="key-adjustment-view">
+                                  <div className="key-adjustment-header">
+                                    <button
+                                      className="key-adjustment-back"
+                                      onClick={() => setKeyAdjustmentView(null)}
+                                    >
+                                      <span>←</span>
+                                      <span>Back</span>
+                                    </button>
+                                    <span className="key-adjustment-title">Adjust Key</span>
+                                  </div>
+                                  
+                                  <div className="key-adjustment-controls">
+                                    <button
+                                      className="key-adjustment-button"
+                                      onClick={() => adjustKey(trackKey, -1)}
+                                      disabled={(keyAdjustments.get(trackKey) ?? 0) <= MIN_KEY_ADJUSTMENT}
+                                      aria-label="Lower key"
+                                    >
+                                      −
+                                    </button>
+                                    <div className="key-adjustment-display">
+                                      <div className="key-adjustment-value">
+                                        🎹 {currentKey > 0 ? `+${currentKey}` : currentKey}
+                                      </div>
+                                      <div className="key-adjustment-label">Semitones</div>
+                                    </div>
+                                    <button
+                                      className="key-adjustment-button"
+                                      onClick={() => adjustKey(trackKey, 1)}
+                                      disabled={(keyAdjustments.get(trackKey) ?? 0) >= MAX_KEY_ADJUSTMENT}
+                                      aria-label="Raise key"
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                // Main Menu Items
+                                <div className="action-menu-items">
+                                  {/* Add to Queue - Primary action */}
+                                  <button
+                                    className="action-menu-item primary"
+                                    onClick={() => {
+                                      setActionMenuOpen(null)
+                                      enqueueLocal(row.id, row.title || 'Unknown')
+                                    }}
+                                  >
+                                    <span className="action-menu-item-icon">+</span>
+                                    <div className="action-menu-item-content">
+                                      <span className="action-menu-item-label">Add to Queue</span>
+                                      <span className="action-menu-item-description">Request this song</span>
+                                    </div>
+                                  </button>
+
+                                  {/* Adjust Key */}
+                                  <button
+                                    className="action-menu-item"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setKeyAdjustmentView(trackKey)
+                                    }}
+                                  >
+                                    <span className="action-menu-item-icon">🎹</span>
+                                    <div className="action-menu-item-content">
+                                      <span className="action-menu-item-label">Adjust Key</span>
+                                      <span className="action-menu-item-description">Change pitch</span>
+                                    </div>
+                                    <span className="action-menu-item-value">
+                                      {currentKey > 0 ? `+${currentKey}` : currentKey}
+                                    </span>
+                                  </button>
+
+                                  {/* View Lyrics */}
+                                  <button
+                                    className="action-menu-item"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      const artist = row.artist || 'Unknown Artist'
+                                      const title = row.title || 'Unknown Title'
+                                      setActionMenuOpen(null)
+                                      setLyricsPopupOpen(trackKey)
+                                      if (!lyricsData[trackKey]) {
+                                        fetchLyrics(trackKey, artist, title)
+                                      }
+                                    }}
+                                  >
+                                    <span className="action-menu-item-icon">📄</span>
+                                    <div className="action-menu-item-content">
+                                      <span className="action-menu-item-label">View Lyrics</span>
+                                      <span className="action-menu-item-description">See song words</span>
+                                    </div>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </>,
+                          document.body
                         )}
                       </div>
-                    </button>
+                    </div>
                   </div>
                 )
               })}
@@ -1323,6 +2106,7 @@ export default function Requests() {
                 {karaokeNerdsRows. map((track, idx) => {
                 const trackKey = `kn-${track.url}`
                 const isRecentlyAdded = recentlyAdded.has(trackKey)
+                const currentKey = keyAdjustments.get(trackKey) ?? 0
                 
                 return (
                   <div key={track.url || idx} className="result-card">
@@ -1335,30 +2119,161 @@ export default function Requests() {
                         <span className="meta-tag">🌐 Online</span>
                       </div>
                     </div>
-                    <button
-                      className={`add-button karaoke-nerds ${isRecentlyAdded ?  'success' : ''}`}
-                      onClick={() => enqueueKaraokeNerds(track)}
-                      disabled={addingKaraokeNerds === track.url || isRecentlyAdded}
-                    >
-                      <div className="add-button-content">
-                        {addingKaraokeNerds === track.url ?  (
+                    <div className="button-container">
+                      {/* Single Action Menu Button */}
+                      <div style={{ position: 'relative', width: '100%' }}>
+                        <button
+                          className={`action-menu-button karaoke-nerds ${isRecentlyAdded ? 'success' : ''}`}
+                          onClick={(e) => {
+                            if (!isRecentlyAdded && addingKaraokeNerds !== track.url) {
+                              handleActionMenuToggle(e, trackKey, actionMenuOpen)
+                            }
+                          }}
+                          disabled={addingKaraokeNerds === track.url || isRecentlyAdded}
+                        >
+                          {addingKaraokeNerds === track.url ? (
+                            <>
+                              <div className="button-spinner"></div>
+                              <span>Adding</span>
+                            </>
+                          ) : isRecentlyAdded ? (
+                            <>
+                              <span>✓</span>
+                              <span>Added</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>⋯</span>
+                              <span>Options</span>
+                            </>
+                          )}
+                        </button>
+
+                        {/* Action Menu */}
+                        {actionMenuOpen === trackKey && createPortal(
                           <>
-                            <div className="button-spinner"></div>
-                            <span>Adding</span>
-                          </>
-                        ) : isRecentlyAdded ? (
-                          <>
-                            <span>✓</span>
-                            <span>Added</span>
-                          </>
-                        ) : (
-                          <>
-                            <span>+</span>
-                            <span>Add</span>
-                          </>
+                            {/* Mobile overlay */}
+                            <div className="action-menu-overlay" onClick={() => setActionMenuOpen(null)} />
+                            
+                            <div
+                              className="action-menu"
+                              ref={actionMenuRef}
+                              onClick={(e) => e.stopPropagation()}
+                              style={actionMenuPosition ? {
+                                top: `${actionMenuPosition.top}px`,
+                                left: `${actionMenuPosition.left}px`,
+                                width: 'max-content',
+                                minWidth: `${actionMenuPosition.width}px`
+                              } : undefined}
+                            >
+                              <div className="action-menu-header">
+                                <h3 className="action-menu-title">{track.title}</h3>
+                                <p className="action-menu-subtitle">{track.artist || 'Unknown Artist'}</p>
+                              </div>
+                              
+                              {keyAdjustmentView === trackKey ? (
+                                // Key Adjustment View
+                                <div className="key-adjustment-view">
+                                  <div className="key-adjustment-header">
+                                    <button
+                                      className="key-adjustment-back"
+                                      onClick={() => setKeyAdjustmentView(null)}
+                                    >
+                                      <span>←</span>
+                                      <span>Back</span>
+                                    </button>
+                                    <span className="key-adjustment-title">Adjust Key</span>
+                                  </div>
+                                  
+                                  <div className="key-adjustment-controls">
+                                    <button
+                                      className="key-adjustment-button"
+                                      onClick={() => adjustKey(trackKey, -1)}
+                                      disabled={(keyAdjustments.get(trackKey) ?? 0) <= MIN_KEY_ADJUSTMENT}
+                                      aria-label="Lower key"
+                                    >
+                                      −
+                                    </button>
+                                    <div className="key-adjustment-display">
+                                      <div className="key-adjustment-value">
+                                        🎹 {currentKey > 0 ? `+${currentKey}` : currentKey}
+                                      </div>
+                                      <div className="key-adjustment-label">Semitones</div>
+                                    </div>
+                                    <button
+                                      className="key-adjustment-button"
+                                      onClick={() => adjustKey(trackKey, 1)}
+                                      disabled={(keyAdjustments.get(trackKey) ?? 0) >= MAX_KEY_ADJUSTMENT}
+                                      aria-label="Raise key"
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                // Main Menu Items
+                                <div className="action-menu-items">
+                                  {/* Add to Queue - Primary action */}
+                                  <button
+                                    className="action-menu-item primary"
+                                    onClick={() => {
+                                      setActionMenuOpen(null)
+                                      enqueueKaraokeNerds(track)
+                                    }}
+                                  >
+                                    <span className="action-menu-item-icon">+</span>
+                                    <div className="action-menu-item-content">
+                                      <span className="action-menu-item-label">Add to Queue</span>
+                                      <span className="action-menu-item-description">Request this song</span>
+                                    </div>
+                                  </button>
+
+                                  {/* Adjust Key */}
+                                  <button
+                                    className="action-menu-item"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setKeyAdjustmentView(trackKey)
+                                    }}
+                                  >
+                                    <span className="action-menu-item-icon">🎹</span>
+                                    <div className="action-menu-item-content">
+                                      <span className="action-menu-item-label">Adjust Key</span>
+                                      <span className="action-menu-item-description">Change pitch</span>
+                                    </div>
+                                    <span className="action-menu-item-value">
+                                      {currentKey > 0 ? `+${currentKey}` : currentKey}
+                                    </span>
+                                  </button>
+
+                                  {/* View Lyrics */}
+                                  <button
+                                    className="action-menu-item"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      const artist = track.artist || 'Unknown Artist'
+                                      const title = track.title
+                                      setActionMenuOpen(null)
+                                      setLyricsPopupOpen(trackKey)
+                                      if (!lyricsData[trackKey]) {
+                                        fetchLyrics(trackKey, artist, title)
+                                      }
+                                    }}
+                                  >
+                                    <span className="action-menu-item-icon">📄</span>
+                                    <div className="action-menu-item-content">
+                                      <span className="action-menu-item-label">View Lyrics</span>
+                                      <span className="action-menu-item-description">See song words</span>
+                                    </div>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </>,
+                          document.body
                         )}
                       </div>
-                    </button>
+                    </div>
                   </div>
                 )
               })}
@@ -1387,6 +2302,65 @@ export default function Requests() {
           )}
         </div>
       </div>
+
+      {/* Lyrics Popup Modal */}
+      {lyricsPopupOpen && (() => {
+        // Find the track data for the popup
+        let artist = 'Unknown Artist'
+        let title = 'Unknown Title'
+        
+        if (lyricsPopupOpen.startsWith('local-')) {
+          const trackId = parseInt(lyricsPopupOpen.replace('local-', ''))
+          const track = localRows.find(r => r.id === trackId)
+          if (track) {
+            artist = track.artist || 'Unknown Artist'
+            title = track.title || 'Unknown Title'
+          }
+        } else if (lyricsPopupOpen.startsWith('kn-')) {
+          const trackUrl = lyricsPopupOpen.replace('kn-', '')
+          const track = karaokeNerdsRows.find(t => t.url === trackUrl)
+          if (track) {
+            artist = track.artist || 'Unknown Artist'
+            title = track.title
+          }
+        }
+        
+        const data = lyricsData[lyricsPopupOpen]
+        
+        return (
+          <div className="lyrics-popup-overlay" onClick={() => setLyricsPopupOpen(null)}>
+            <div className="lyrics-popup" ref={lyricsPopupRef} onClick={(e) => e.stopPropagation()}>
+              <div className="lyrics-header">
+                <div className="lyrics-title-info">
+                  <h2 className="lyrics-popup-title">{title}</h2>
+                  <p className="lyrics-popup-artist">{artist}</p>
+                </div>
+                <button 
+                  className="lyrics-close-button" 
+                  onClick={() => setLyricsPopupOpen(null)}
+                  aria-label="Close"
+                >
+                  ×
+                </button>
+              </div>
+              
+              {data?.loading ? (
+                <div className="lyrics-loading">
+                  <div className="loading-spinner"></div>
+                  <div className="loading-text">Loading lyrics...</div>
+                </div>
+              ) : data?.error ? (
+                <div className="lyrics-error">
+                  <div className="lyrics-error-icon">😔</div>
+                  <div>{data.error}</div>
+                </div>
+              ) : data?.lyrics ? (
+                <div className="lyrics-content">{data.lyrics}</div>
+              ) : null}
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

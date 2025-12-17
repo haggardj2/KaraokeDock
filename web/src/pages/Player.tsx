@@ -22,6 +22,7 @@ type QItem = {
   external_url?: string;
   source?: string;
   duration_ms?: number | null;
+  key_adjustment?: number;
 };
 
 // Helper function to extract YouTube video ID from URL
@@ -51,6 +52,8 @@ function isValidDuration(duration: number | null | undefined): boolean {
 
 // Constants
 const AUTOPLAY_UNMUTE_DELAY_MS = 100; // Delay before unmuting video after autoplay starts
+const MIN_PLAYBACK_RATE = 0.5; // Minimum playback rate (slowest/lowest pitch)
+const MAX_PLAYBACK_RATE = 2.0; // Maximum playback rate (fastest/highest pitch)
 
 export default function Player() {
   const [queue, setQueue] = useState<QItem[]>([]);
@@ -452,6 +455,21 @@ export default function Player() {
 
     playVideo();
   }, [mediaSrc, isYouTube, youtubeVideoId]);
+
+  // Apply pitch shifting based on key_adjustment
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || isYouTube) return;
+
+    const keyAdjustment = now?.key_adjustment || 0;
+    
+    // Calculate playback rate for pitch shift
+    // Formula: playbackRate = 2^(semitones/12)
+    const playbackRate = Math.pow(2, keyAdjustment / 12);
+    
+    // Clamp to safe playback rate range
+    v.playbackRate = Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, playbackRate));
+  }, [now?.key_adjustment, now?.id, isYouTube]); // Include now?.id to reset pitch when song changes
 
   // Helper function to send timing updates
   const sendTimingUpdate = useCallback(

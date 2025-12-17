@@ -25,7 +25,7 @@ export default function Admin() {
   const [browseError, setBrowseError] = useState<string>("");
 
   // Login state
-  const [loginUsername, setLoginUsername] = useState("admin");
+  const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
 

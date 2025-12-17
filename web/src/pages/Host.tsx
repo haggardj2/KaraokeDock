@@ -14,6 +14,7 @@ type Row = {
   disc_id?: string | null
   kind: 'mp4' | 'cdgmp3' | 'zip' | 'mp3'
   duration_ms?: number | null
+  key_adjustment?: number
 }
 
 const LOCAL_SEARCH_DELAY_MS = 300
@@ -22,6 +23,7 @@ const KARAOKE_NERDS_SEARCH_DELAY_MS = 500
 export default function Host() {
   const auth = useAuth()
   const [queue, setQueue] = useState<Row[]>([])
+  const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
   const [banner, setBanner] = useState<string>('')
@@ -103,7 +105,7 @@ export default function Host() {
       const result = await api('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: 'admin', password: loginPassword })
+        body: JSON.stringify({ username: loginUsername, password: loginPassword })
       })
       
       if (result.ok && result.sessionToken) {
@@ -602,6 +604,13 @@ export default function Host() {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     setBusy(true)
     try { await api('/api/queue/rename', { method:'POST', headers, body: JSON.stringify({ id, requestedBy }) }) }
+    finally { setBusy(false); await refreshQueue() }
+  }
+
+  async function updateKey(id: number, keyAdjustment: number) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setBusy(true)
+    try { await api('/api/queue/update-key', { method:'POST', headers, body: JSON.stringify({ id, keyAdjustment }) }) }
     finally { setBusy(false); await refreshQueue() }
   }
 
@@ -1188,42 +1197,83 @@ export default function Host() {
           <div className="banner">{banner}</div>
         )}
 
-        {! auth.isLoggedIn ? (
-          <div className="card" style={{maxWidth: 400, margin: '100px auto', overflow: 'hidden'}}>
-            <h1 style={{textAlign: 'center', marginBottom: 32}}>🎤 Host Login</h1>
+        {!auth.isLoggedIn ? (
+          <div
+            className="card"
+            style={{ maxWidth: 400, margin: '100px auto', overflow: 'hidden' }}
+          >
+            <h1 style={{ textAlign: 'center', marginBottom: 32 }}>
+              🎤 Host Login
+            </h1>
+
             <form onSubmit={handleLogin}>
+              {/* Username */}
+              <div className="form-group">
+                <label className="form-label">Username</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  value={loginUsername}
+                  onChange={e => setLoginUsername(e.target.value)}
+                  placeholder="Enter host username"
+                  autoComplete="username"
+                  required
+                  style={{
+                    width: '100%',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              {/* Password */}
               <div className="form-group">
                 <label className="form-label">Password</label>
-                <input 
+                <input
                   className="form-input"
                   type="password"
                   value={loginPassword}
                   onChange={e => setLoginPassword(e.target.value)}
                   placeholder="Enter host password"
                   autoComplete="current-password"
-                  autoFocus
                   required
+                  autoFocus
                   style={{
                     width: '100%',
-                    boxSizing: 'border-box'  // Add this to include padding in width calculation
+                    boxSizing: 'border-box'
                   }}
                 />
               </div>
+
               {loginError && <div className="error-msg">{loginError}</div>}
-              <button 
-                className="control-btn primary" 
-                type="submit" 
-                disabled={busy} 
+
+              <button
+                className="control-btn primary"
+                type="submit"
+                disabled={busy}
                 style={{
                   width: '100%',
-                  boxSizing: 'border-box'  // Add this too
+                  boxSizing: 'border-box'
                 }}
               >
-                {busy ? <><span className="loading-spinner"></span> Logging in...</> : 'Login'}
+                {busy ? (
+                  <>
+                    <span className="loading-spinner"></span> Logging in...
+                  </>
+                ) : (
+                  'Login'
+                )}
               </button>
             </form>
-            <p style={{ marginTop: 20, fontSize: 13, textAlign: 'center', color: 'var(--color-text-secondary)' }}>
-              Use the password configured in Admin settings
+
+            <p
+              style={{
+                marginTop: 20,
+                fontSize: 13,
+                textAlign: 'center',
+                color: 'var(--color-text-secondary)'
+              }}
+            >
+              Use the credentials configured in Admin settings
             </p>
           </div>
         ) : (
@@ -1359,6 +1409,19 @@ export default function Host() {
                         <div style={{marginLeft: 44, marginTop: 4, fontSize: 13}}>
                           Singer: <InlineEdit value={item.requested_by || ''} disabled={busy} onSave={val => rename(item.id, val)} />
                         </div>
+                        {item.key_adjustment !== undefined && item.key_adjustment !== 0 && (
+                          <div style={{
+                            marginLeft: 44,
+                            marginTop: 4,
+                            fontSize: 13,
+                            color: 'var(--color-text-secondary)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8
+                          }}>
+                            <span>Key: {item.key_adjustment > 0 ? '+' : ''}{item.key_adjustment} semitones</span>
+                          </div>
+                        )}
                         {item.status === 'playing' && (
                           <span style={{
                             marginLeft: 44,
@@ -1379,6 +1442,24 @@ export default function Host() {
                           <>
                             <button className="control-btn" onClick={() => playThis(item.id)} title="Play this song">
                               ▶
+                            </button>
+                            <button 
+                              className="control-btn" 
+                              onClick={() => {
+                                const currentKey = item.key_adjustment || 0
+                                const newKey = prompt(`Adjust key (semitones from -6 to +6).\nCurrent: ${currentKey}`, String(currentKey))
+                                if (newKey !== null) {
+                                  const parsed = parseInt(newKey)
+                                  if (!isNaN(parsed) && parsed >= -6 && parsed <= 6) {
+                                    updateKey(item.id, parsed)
+                                  } else {
+                                    alert('Please enter a number between -6 and 6')
+                                  }
+                                }
+                              }} 
+                              title="Adjust key"
+                            >
+                              🎹
                             </button>
                             <button className="control-btn" onClick={() => setReplacingId(item.id)} title="Replace song">
                               🔄

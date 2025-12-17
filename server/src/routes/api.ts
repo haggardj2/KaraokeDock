@@ -45,38 +45,14 @@ const sessionGuard: express.RequestHandler = async (req, res, next) => {
   }
 };
 
-// Legacy admin guard - kept for backward compatibility
-const adminGuard: express.RequestHandler = async (req, res, next) => {
-  const token = req.headers['x-admin-token'];
-  if (!token) {
-    res.status(403).send('Forbidden');
-    return;
-  }
-  
-  try {
-    // Check if token matches the database value
-    const storedToken = await getSetting('admin.token');
-    if (storedToken && token === storedToken) {
-      next();
-      return;
-    }
-    
-    // Fallback to env variable for backward compatibility (during migration)
-    if (process.env.ADMIN_TOKEN && token === process.env.ADMIN_TOKEN) {
-      next();
-      return;
-    }
-    
-    res.status(403).send('Forbidden');
-  } catch (err) {
-    console.error('adminGuard error:', err);
-    res.status(403).send('Forbidden');
-  }
-};
-
 const toInt = (v: any): number | null => {
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
+const validateKeyAdjustment = (keyAdjustment: number | null): boolean => {
+  if (keyAdjustment === null || keyAdjustment === undefined) return true; // null/undefined is valid (defaults to 0)
+  return keyAdjustment >= -6 && keyAdjustment <= 6;
 };
 
 apiRouter.get('/api/health', (req, res) => {
@@ -201,7 +177,7 @@ apiRouter.post(
   })
 );
 
-// Legacy admin login endpoint - kept for backward compatibility
+// Username/password admin login endpoint (session-based)
 apiRouter.post(
   '/admin/login',
   ah(async (req, res) => {
@@ -218,64 +194,6 @@ apiRouter.post(
     } else {
       res.status(401).json({ ok: false, message: 'Invalid credentials' });
     }
-  })
-);
-
-// Get current admin token (legacy - requires authentication)
-apiRouter.get(
-  '/admin/token',
-  adminGuard,
-  ah(async (_req, res) => {
-    const token = await getSetting('admin.token');
-    res.json({ token: token || '' });
-  })
-);
-
-// Set admin token (legacy - requires authentication via token OR username/password)
-apiRouter.post(
-  '/admin/token',
-  ah(async (req, res) => {
-    const { token, username, password } = req.body;
-    const adminTokenHeader = req.headers['x-admin-token'];
-    
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'Token is required' });
-    }
-    
-    // Check authentication - either via admin token OR username/password
-    let authenticated = false;
-    
-    // Method 1: Admin token authentication (for updates)
-    if (adminTokenHeader) {
-      try {
-        const storedToken = await getSetting('admin.token');
-        if (storedToken && adminTokenHeader === storedToken) {
-          authenticated = true;
-        } else if (process.env.ADMIN_TOKEN && adminTokenHeader === process.env.ADMIN_TOKEN) {
-          authenticated = true;
-        }
-      } catch (err) {
-        console.error('Token check error:', err);
-      }
-    }
-    
-    // Method 2: Username/password authentication (for initial setup)
-    if (!authenticated && username && password) {
-      const envUsername = process.env.ADMIN_USERNAME || 'admin';
-      const storedPassword = await getSetting('admin.password');
-      const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
-      
-      if (username === envUsername && password === envPassword) {
-        authenticated = true;
-      }
-    }
-    
-    if (!authenticated) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    
-    await setSetting('admin.token', token);
-    res.json({ ok: true });
   })
 );
 
@@ -552,7 +470,7 @@ apiRouter.get(
 apiRouter.post(
   '/karaoke-nerds/add',
   ah(async (req, res) => {
-    const { title, artist, url, requestedBy } = req.body;
+    const { title, artist, url, requestedBy, keyAdjustment } = req.body;
     
     if (!title || !url) {
       return res.status(400).send('title and url required');
@@ -590,15 +508,44 @@ apiRouter.post(
     const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
     const position = (posr.rows[0] as any).p;
 
-    const r = await query(
-      `INSERT INTO queue(track_id, requested_by, status, position)
-       VALUES ($1,$2,'queued',$3)
-       RETURNING id, track_id, requested_by, status, position, created_at`,
-      [track.id, requestedBy || null, position]
-    );
-    
-    res.json(r.rows[0]);
-    postQueueUpdate('queue.updated');
+    const keyAdj = toInt(keyAdjustment) ?? 0;
+    if (!validateKeyAdjustment(keyAdj)) {
+      return res.status(400).send('keyAdjustment must be between -6 and 6');
+    }
+
+    // Try to insert with key_adjustment if the column exists
+    try {
+      const r = await query(
+        `INSERT INTO queue(track_id, requested_by, status, position, key_adjustment)
+         VALUES ($1,$2,'queued',$3,$4)
+         RETURNING id, track_id, requested_by, status, position, key_adjustment, created_at`,
+        [track.id, requestedBy || null, position, keyAdj]
+      );
+      res.json(r.rows[0]);
+      postQueueUpdate('queue.updated');
+      return;
+    } catch (err: any) {
+      // If key_adjustment column doesn't exist, fall back to insert without it
+      // PostgreSQL error code 42703 = undefined_column
+      const isColumnNotFound = 
+        err?.code === '42703' || 
+        (err?.message?.includes('key_adjustment') && err?.message?.includes('does not exist'));
+      
+      if (isColumnNotFound) {
+        console.warn('key_adjustment column does not exist in queue table, inserting without it');
+        const r = await query(
+          `INSERT INTO queue(track_id, requested_by, status, position)
+           VALUES ($1,$2,'queued',$3)
+           RETURNING id, track_id, requested_by, status, position, created_at`,
+          [track.id, requestedBy || null, position]
+        );
+        res.json(r.rows[0]);
+        postQueueUpdate('queue.updated');
+        return;
+      }
+      // Re-throw if it's a different error
+      throw err;
+    }
   })
 );
 
@@ -711,6 +658,7 @@ apiRouter.get(
              q.requested_by,
              q.status,
              q.position,
+             q.key_adjustment,
              t.title,
              t.disc_id,
              t.duration_ms,
@@ -737,17 +685,46 @@ apiRouter.post(
   ah(async (req, res) => {
     const trackId = toInt(req.body?.trackId);
     const requestedBy = (req.body?.requestedBy ?? null) as string | null;
+    const keyAdjustment = toInt(req.body?.keyAdjustment) ?? 0;
     if (trackId == null) return res.status(400).send('trackId required');
+    if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
 
     const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
     const position = (posr.rows[0] as any).p;
 
-    const r = await query(
-      `INSERT INTO queue(track_id, requested_by, status, position)
-       VALUES ($1,$2,'queued',$3)
-       RETURNING id, track_id, requested_by, status, position, created_at`,
-      [trackId, requestedBy, position]
-    );
+    // Try to insert with key_adjustment if the column exists
+    try {
+      const r = await query(
+        `INSERT INTO queue(track_id, requested_by, status, position, key_adjustment)
+         VALUES ($1,$2,'queued',$3,$4)
+         RETURNING id, track_id, requested_by, status, position, key_adjustment, created_at`,
+        [trackId, requestedBy, position, keyAdjustment]
+      );
+      res.json(r.rows[0]);
+    } catch (err: any) {
+      // If key_adjustment column doesn't exist, fall back to insert without it
+      // PostgreSQL error code 42703 = undefined_column
+      const isColumnNotFound = 
+        err?.code === '42703' || 
+        (err?.message?.includes('key_adjustment') && err?.message?.includes('does not exist'));
+      
+      if (isColumnNotFound) {
+        console.warn('key_adjustment column does not exist in queue table, inserting without it');
+        const r = await query(
+          `INSERT INTO queue(track_id, requested_by, status, position)
+           VALUES ($1,$2,'queued',$3)
+           RETURNING id, track_id, requested_by, status, position, created_at`,
+          [trackId, requestedBy, position]
+        );
+        res.json(r.rows[0]);
+      } else {
+        // Re-throw if it's a different error
+        throw err;
+      }
+    }
+    
+    // Notify clients about the queue update
+    postQueueUpdate('queue.updated');
     
     // Get track details for pre-caching and duration extraction
     const trackInfo = await query(
@@ -808,9 +785,6 @@ apiRouter.post(
         }
       }
     }
-    
-    res.json(r.rows[0]);
-    postQueueUpdate('queue.updated');
   })
 );
 
@@ -854,6 +828,22 @@ apiRouter.post(
     if (id == null) return res.status(400).send('id required');
 
     await query(`UPDATE queue SET requested_by = $1 WHERE id = $2`, [requestedBy, id]);
+    res.json({ ok: true });
+    postQueueUpdate('queue.updated');
+  })
+);
+
+apiRouter.post(
+  '/queue/update-key',
+  sessionGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    const keyAdjustment = toInt(req.body?.keyAdjustment);
+    if (id == null) return res.status(400).send('id required');
+    if (keyAdjustment == null) return res.status(400).send('keyAdjustment required');
+    if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
+
+    await query(`UPDATE queue SET key_adjustment = $1 WHERE id = $2`, [keyAdjustment, id]);
     res.json({ ok: true });
     postQueueUpdate('queue.updated');
   })
