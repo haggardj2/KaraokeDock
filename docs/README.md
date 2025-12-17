@@ -5,7 +5,7 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 ## 📋 Table of Contents
 
-- [Features]([#-features))
+- [Features]([#-features)
 - [Web Pages Overview](#-web-pages-overview)
 - [Quick Start with Docker](#-quick-start-with-docker)
 - [First-Time Setup](#-first-time-setup)
