@@ -1,4 +1,4 @@
-# 🎤 Web Karaoke MVP
+# 🎤 Docker Web Karaoke
 
 A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
 
