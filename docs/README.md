@@ -128,6 +128,10 @@ Management interface for system configuration and media libraries.
 
    At minimum, update these variables:
    ```env
+
+   # Path to where you want the Postgres DB to be saved
+   DB_PATH=/home/user/web-karaoke-mvp/db
+   
    # Path to your karaoke files on the host machine
    MEDIA_PATH=./media/local
    
@@ -137,18 +141,12 @@ Management interface for system configuration and media libraries.
    ORIGIN=http://192.168.1.100:5173,http://localhost:5173
    ```
 
-4. **Create the media directory:**
-   ```bash
-   mkdir -p media/local
-   # Copy your karaoke files to media/local/
-   ```
-
-5. **Start the application:**
+6. **Start the application:**
    ```bash
    docker compose up -d
    ```
 
-6. **Check container status:**
+7. **Check container status:**
    ```bash
    docker compose ps
    ```
@@ -158,7 +156,7 @@ Management interface for system configuration and media libraries.
    - `karaoke-api` (API Server)
    - `karaoke-db` (PostgreSQL Database)
 
-7. **Access the application:**
+8. **Access the application:**
    - Web Interface: `http://localhost:5173` (or your server IP)
    - Admin Panel: `http://localhost:5173/admin`
    - Host Panel: `http://localhost:5173/host`
@@ -190,7 +188,6 @@ The application runs three Docker containers:
 - **karaoke-db**: PostgreSQL 16 database
   - Image: `postgres:18`
   - Exposed port: 5432
-  - Persistent volume: `dbdata`
 
 ### Managing the Application
 
