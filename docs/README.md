@@ -327,8 +327,6 @@ After starting the containers for the first time:
 5. Player page displays current song
 6. CDG files transcoded to MP4 in real-time if needed
 
-For detailed architecture diagrams, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
 ## 💻 Development
 
 ### Local Development (without Docker)
