@@ -1,17 +1,36 @@
 # docker-compose.build.yml
 # Use this file for local development and building images
-# Run with: docker-compose -f docker-compose.build.yml up
+# Run with: docker compose -f docker-compose.build.yml up --build
 
 services:
   db:
-    image: postgres:16
+    image: postgres:18
     container_name: karaoke-db
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-karaoke}
       POSTGRES_USER: ${POSTGRES_USER:-karaoke}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-karaoke}
+      POSTGRES_INITDB_ARGS: >-
+        --encoding=UTF8
+        --locale=C
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c random_page_cost=1.1
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c max_connections=100
+      -c log_min_duration_statement=100
+      -c autovacuum=on
+      -c autovacuum_vacuum_scale_factor=0.1
+      -c autovacuum_analyze_scale_factor=0.05
     volumes:
-      - dbdata:/var/lib/postgresql/data
+      - ${DB_PATH}:/var/lib/postgresql
+    restart: always
     ports:
       - "5432:5432"
 
@@ -19,7 +38,7 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
-    image: ${KARAOKE_API_IMAGE:-haggardj2/karaoke-api:latest}
+    image: ${KARAOKE_API_IMAGE:-haggardj2/karaoke-api:beta}
     container_name: karaoke-api
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://karaoke:karaoke@db:5432/karaoke}
@@ -29,8 +48,9 @@ services:
       PORT: ${PORT:-5174}
     depends_on:
       - db
+    restart: always
     volumes:
-      - ${MEDIA_PATH}:/media/local # Local files
+      - ${MEDIA_PATH:-./media}:/media/local
     ports:
       - "5174:5174"
     command: ["sh", "-c", "npm run migrate && npm start"]
@@ -39,16 +59,15 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-    image: ${KARAOKE_WEB_IMAGE:-haggardj2/karaoke-web:latest}
+    image: ${KARAOKE_WEB_IMAGE:-haggardj2/karaoke-web:beta}
     container_name: karaoke-web
     environment:
       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:5174}
     depends_on:
       - api
+    restart: always
     ports:
       - "5173:5173"
 
 volumes:
   dbdata:
-    # This creates a Docker volume. To mount a host directory instead,
-    # comment out this section and use a bind mount in the api service above

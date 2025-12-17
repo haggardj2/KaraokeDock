@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: karaoke-db
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-karaoke}
@@ -25,9 +25,9 @@ services:
       -c autovacuum_vacuum_scale_factor=0.1
       -c autovacuum_analyze_scale_factor=0.05
     volumes:
-      - ${DB_PATH}:/var/lib/postgresql/data
-    restart: unless-stopped
-
+      - ${DB_PATH}:/var/lib/postgresql
+    ports:
+      - "5432:5432"
 
   api:
     image: haggardj2/karaoke-api:latest
@@ -42,6 +42,7 @@ services:
       - db
     volumes:
       - "${MEDIA_PATH}:/media:ro"
+    restart: always
     ports:
       - "5174:5174"
     command: ["sh", "-c", "npm run migrate && npm start"]
@@ -53,10 +54,9 @@ services:
       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:5174}
     depends_on:
       - api
+    restart: always
     ports:
       - "5173:5173"
 
 volumes:
   dbdata:
-    # This creates a Docker volume. To mount a host directory instead,
-    # comment out this section and use a bind mount in the api service above
