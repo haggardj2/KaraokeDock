@@ -368,15 +368,12 @@ To build images locally:
 
 ```bash
 # Build all images
-docker compose -f docker-compose.build.yml build
+docker compose -f docker-compose.build.yml build --no-cache
 
 # Build specific service
-docker compose -f docker-compose.build.yml build api
-docker compose -f docker-compose.build.yml build web
+docker compose -f docker-compose.build.yml build api --no-cache
+docker compose -f docker-compose.build.yml build web --no-cache
 
-# Push to Docker Hub (requires authentication)
-docker push haggardj2/karaoke-api:latest
-docker push haggardj2/karaoke-web:latest
 ```
 
 ### Database Migrations
