@@ -83,7 +83,7 @@ Full-screen karaoke player optimized for display on TVs or projectors.
 - Show scrolling text when idle
 - QR code display for song requests
 - Automatic queue progression
-- Support for MP4, CDG+MP3, and external URLs
+- Support for MP4, CDG+MP3, and external URLs from KaraokeNerds.com
 
 ### Admin Dashboard
 **URL:** `http://your-server:5173/admin`
