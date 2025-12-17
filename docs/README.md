@@ -1,11 +1,11 @@
-# 🎤 Web Karaoke MVP
+# 🎤 Docker Web Karaoke
 
 A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
 
 
 ## 📋 Table of Contents
 
-- [Features]([#-features))
+- [Features](#-features)
 - [Web Pages Overview](#-web-pages-overview)
 - [Quick Start with Docker](#-quick-start-with-docker)
 - [First-Time Setup](#-first-time-setup)
@@ -83,7 +83,7 @@ Full-screen karaoke player optimized for display on TVs or projectors.
 - Show scrolling text when idle
 - QR code display for song requests
 - Automatic queue progression
-- Support for MP4, CDG+MP3, and external URLs
+- Support for MP4, CDG+MP3, and external URLs from KaraokeNerds.com
 
 ### Admin Dashboard
 **URL:** `http://your-server:5173/admin`
@@ -128,6 +128,10 @@ Management interface for system configuration and media libraries.
 
    At minimum, update these variables:
    ```env
+
+   # Path to where you want the Postgres DB to be saved
+   DB_PATH=/home/user/web-karaoke-mvp/db
+   
    # Path to your karaoke files on the host machine
    MEDIA_PATH=./media/local
    
@@ -137,18 +141,12 @@ Management interface for system configuration and media libraries.
    ORIGIN=http://192.168.1.100:5173,http://localhost:5173
    ```
 
-4. **Create the media directory:**
-   ```bash
-   mkdir -p media/local
-   # Copy your karaoke files to media/local/
-   ```
-
-5. **Start the application:**
+6. **Start the application:**
    ```bash
    docker compose up -d
    ```
 
-6. **Check container status:**
+7. **Check container status:**
    ```bash
    docker compose ps
    ```
@@ -158,7 +156,7 @@ Management interface for system configuration and media libraries.
    - `karaoke-api` (API Server)
    - `karaoke-db` (PostgreSQL Database)
 
-7. **Access the application:**
+8. **Access the application:**
    - Web Interface: `http://localhost:5173` (or your server IP)
    - Admin Panel: `http://localhost:5173/admin`
    - Host Panel: `http://localhost:5173/host`
@@ -190,7 +188,6 @@ The application runs three Docker containers:
 - **karaoke-db**: PostgreSQL 16 database
   - Image: `postgres:18`
   - Exposed port: 5432
-  - Persistent volume: `dbdata`
 
 ### Managing the Application
 
@@ -327,8 +324,6 @@ After starting the containers for the first time:
 5. Player page displays current song
 6. CDG files transcoded to MP4 in real-time if needed
 
-For detailed architecture diagrams, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
 ## 💻 Development
 
 ### Local Development (without Docker)
@@ -368,15 +363,12 @@ To build images locally:
 
 ```bash
 # Build all images
-docker compose -f docker-compose.build.yml build
+docker compose -f docker-compose.build.yml build --no-cache
 
 # Build specific service
-docker compose -f docker-compose.build.yml build api
-docker compose -f docker-compose.build.yml build web
+docker compose -f docker-compose.build.yml build api --no-cache
+docker compose -f docker-compose.build.yml build web --no-cache
 
-# Push to Docker Hub (requires authentication)
-docker push haggardj2/karaoke-api:latest
-docker push haggardj2/karaoke-web:latest
 ```
 
 ### Database Migrations
@@ -422,11 +414,6 @@ docker compose logs -f karaoke-api
 docker compose logs -f karaoke-web
 docker compose logs -f karaoke-db
 ```
-
-## 📚 Additional Documentation
-
-- [QUICKSTART.md](QUICKSTART.md) - Quick reference card
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed architecture diagrams
 
 ## 🔐 Security Considerations
 
