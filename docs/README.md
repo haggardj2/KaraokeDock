@@ -420,11 +420,6 @@ docker compose logs -f karaoke-web
 docker compose logs -f karaoke-db
 ```
 
-## 📚 Additional Documentation
-
-- [QUICKSTART.md](QUICKSTART.md) - Quick reference card
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed architecture diagrams
-
 ## 🔐 Security Considerations
 
 - **Change default passwords** immediately after first login
