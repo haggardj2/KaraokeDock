@@ -2171,7 +2171,8 @@ export default function Requests() {
                                 <p className="action-menu-subtitle">{track.artist || 'Unknown Artist'}</p>
                               </div>
                               
-                              {keyAdjustmentView === trackKey ? (
+                              {/* Key Adjustment View - Commented out: only works for local media, not YouTube iFrame */}
+                              {/* {keyAdjustmentView === trackKey ? (
                                 // Key Adjustment View
                                 <div className="key-adjustment-view">
                                   <div className="key-adjustment-header">
@@ -2210,8 +2211,8 @@ export default function Requests() {
                                     </button>
                                   </div>
                                 </div>
-                              ) : (
-                                // Main Menu Items
+                              ) : ( */}
+                                {/* Main Menu Items */}
                                 <div className="action-menu-items">
                                   {/* Add to Queue - Primary action */}
                                   <button
@@ -2228,8 +2229,8 @@ export default function Requests() {
                                     </div>
                                   </button>
 
-                                  {/* Adjust Key */}
-                                  <button
+                                  {/* Adjust Key - Commented out: only works for local media, not YouTube iFrame */}
+                                  {/* <button
                                     className="action-menu-item"
                                     onClick={(e) => {
                                       e.stopPropagation()
@@ -2244,7 +2245,7 @@ export default function Requests() {
                                     <span className="action-menu-item-value">
                                       {currentKey > 0 ? `+${currentKey}` : currentKey}
                                     </span>
-                                  </button>
+                                  </button> */}
 
                                   {/* View Lyrics */}
                                   <button
@@ -2267,7 +2268,6 @@ export default function Requests() {
                                     </div>
                                   </button>
                                 </div>
-                              )}
                             </div>
                           </>,
                           document.body

@@ -7,6 +7,57 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const yauzl = require('yauzl');
 
+function getPitchParams(req: express.Request) {
+  const pitchSemitones = Number(req.query.pitch || 0);
+  const hasPitch = Number.isFinite(pitchSemitones) && pitchSemitones !== 0;
+  const pitchRatio = hasPitch ? Math.pow(2, pitchSemitones / 12) : 1;
+  return { hasPitch, pitchRatio, pitchSemitones };
+}
+
+function buildPitchFilter(pitchRatio: number, pitchSemitones: number): string {
+  // rubberband pitch is a SCALE FACTOR (ratio), not semitones
+  // e.g. -2 semitones => 2^(-2/12) ~= 0.8908987
+  if (!Number.isFinite(pitchRatio) || Math.abs(pitchRatio - 1) < 1e-6) return '';
+
+  // Keep it stable/short for logs
+  const ratio = pitchRatio.toFixed(6);
+  return `rubberband=pitch=${ratio}`;
+}
+
+
+// Fallback filter for systems without rubberband (kept for reference)
+// This can be used if rubberband filter is not available in the FFmpeg build
+// To use: replace buildPitchFilter() call with buildPitchFilterFallback()
+// Uses asetrate to shift pitch, then atempo to restore original tempo
+function buildPitchFilterFallback(pitchRatio: number): string {
+  if (pitchRatio === 1) return '';
+  
+  // asetrate changes pitch AND tempo, so we need to compensate with atempo
+  // pitchRatio > 1 means higher pitch (faster), so we need to slow down with atempo < 1
+  // pitchRatio < 1 means lower pitch (slower), so we need to speed up with atempo > 1
+  const tempoCorrection = 1 / pitchRatio;
+  
+  // atempo filter has range [0.5, 2.0], so we may need to chain multiple filters
+  const atempoFilters: string[] = [];
+  let remainingTempo = tempoCorrection;
+  
+  // Chain atempo filters to handle values outside [0.5, 2.0] range
+  while (remainingTempo > 2.0) {
+    atempoFilters.push('atempo=2.0');
+    remainingTempo /= 2.0;
+  }
+  while (remainingTempo < 0.5) {
+    atempoFilters.push('atempo=0.5');
+    remainingTempo /= 0.5;
+  }
+  
+  // Add the final atempo adjustment
+  atempoFilters.push(`atempo=${remainingTempo.toFixed(6)}`);
+  
+  // Build the complete filter: asetrate to shift pitch, then atempo(s) to restore tempo
+  return `asetrate=44100*${pitchRatio.toFixed(6)},${atempoFilters.join(',')},aresample=44100`;
+}
+
 export const mediaRouter = express.Router();
 
 function isUnderMediaRoot(p: string) {
@@ -76,6 +127,7 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
   const file = (req.query.file as string) || '';
   const cdg = (req.query.cdg as string) || '';
   const mp3 = (req.query.mp3 as string) || '';
+  const { hasPitch, pitchRatio, pitchSemitones } = getPitchParams(req);
 
   if (!cdg || !mp3) return res.status(400).send('cdg and mp3 are required');
 
@@ -143,6 +195,7 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
       '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,tpad=stop=-1:stop_mode=clone',
       '-c:v', 'libx264',
       '-pix_fmt', 'yuv420p',
+      // Video codec options (must come after -c:v)
       '-preset', 'veryfast',       // Balance between speed and quality
       '-tune', 'animation',         // Better for CDG graphics
       '-profile:v', 'main',         
@@ -155,6 +208,7 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
       '-b_strategy', '1',
       // Audio settings
       '-c:a', 'aac',
+      ...(hasPitch ? ['-af', buildPitchFilter(pitchRatio, pitchSemitones)] : []),
       '-b:a', '128k',
       '-ar', '44100',
       '-shortest',                  // Stop when shortest stream ends (audio controls duration)
@@ -164,6 +218,8 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
       '-f', 'mp4',
       'pipe:1'
     ];
+
+    console.log('[mp4stream] pitchSemitones=', pitchSemitones, 'pitchRatio=', pitchRatio, 'af=', buildPitchFilter(pitchRatio, pitchSemitones));
     
     const ff = spawn('ffmpeg', args);
     res.setHeader('Content-Type', 'video/mp4');
@@ -196,9 +252,41 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
 // Simple MP4 serving without re-encoding
 mediaRouter.get('/mp4stream', (req, res) => {
   const mp4Path = (req.query.path as string) || '';
+  const { hasPitch, pitchRatio, pitchSemitones } = getPitchParams(req);
   
   if (!mp4Path || !isUnderMediaRoot(mp4Path)) {
     return res.status(400).send('Invalid path');
+  }
+
+  // If pitch shifting requested, re-encode audio with pitch adjustment
+  if (hasPitch) {
+    const args = [
+      '-loglevel', 'error',
+      '-y',
+      '-i', mp4Path,
+      '-map', '0:v?',
+      '-map', '0:a?',
+      '-c:v', 'copy',
+      '-af', buildPitchFilter(pitchRatio, pitchSemitones),
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+frag_keyframe+empty_moov+default_base_moof+faststart',
+      '-f', 'mp4',
+      'pipe:1'
+    ];
+
+    const ff = spawn('ffmpeg', args);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-cache, no-store');
+    ff.stdout.pipe(res);
+    ff.stderr.on('data', (data) => console.error(`FFmpeg error: ${data}`));
+    ff.on('close', (code) => {
+      if (code !== 0) console.error(`FFmpeg exited with code ${code}`);
+    });
+    req.on('close', () => {
+      try { ff.kill('SIGKILL'); } catch {}
+    });
+    return;
   }
 
   const stat = fs.statSync(mp4Path);

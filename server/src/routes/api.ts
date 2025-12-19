@@ -3,7 +3,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import { EventEmitter } from 'events';
-import { query, ensureHelpfulIndexes, getSetting, setSetting, createSession, validateSession, deleteSession, cleanupExpiredSessions } from '../db';
+import { query, ensureHelpfulIndexes, getSetting, setSetting, createSession, validateSession, deleteSession, cleanupExpiredSessions, hashPassword, verifyPassword } from '../db';
 import { scanPath, getMediaDuration, getZipMp3Duration, extractTrackDuration } from '../scanner';
 import QRCode from 'qrcode';
 import { searchKaraokeNerds } from '../karaoke-nerds';
@@ -80,8 +80,19 @@ apiRouter.post(
     const storedPassword = await getSetting('admin.password');
     const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
     
-    if (username === adminUsername && password === adminPassword) {
-      // Check if using default password
+    // Check username first
+    if (username !== adminUsername) {
+      res.status(401).json({ ok: false, message: 'Invalid credentials' });
+      return;
+    }
+    
+    // Verify password using bcrypt
+    const isPasswordValid = await verifyPassword(password, adminPassword);
+    
+    if (isPasswordValid) {
+      // Check if using default password by comparing hash
+      // The default password 'changeme-password' hashed with bcrypt will have a specific pattern
+      // We'll check if the stored password matches the plaintext default (for migration compatibility)
       const isDefaultPassword = adminPassword === 'changeme-password';
       
       // Create a session that expires in 30 days
@@ -138,12 +149,14 @@ apiRouter.post(
     const storedPassword = await getSetting('admin.password');
     const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
     
-    if (currentPassword !== envPassword) {
+    const isPasswordValid = await verifyPassword(currentPassword, envPassword);
+    if (!isPasswordValid) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
     
-    // Save new password
-    await setSetting('admin.password', newPassword);
+    // Hash and save new password
+    const hashedPassword = await hashPassword(newPassword);
+    await setSetting('admin.password', hashedPassword);
     res.json({ ok: true });
   })
 );
@@ -167,7 +180,8 @@ apiRouter.post(
     const storedPassword = await getSetting('admin.password');
     const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
     
-    if (currentPassword !== envPassword) {
+    const isPasswordValid = await verifyPassword(currentPassword, envPassword);
+    if (!isPasswordValid) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
     
@@ -189,7 +203,16 @@ apiRouter.post(
     const storedPassword = await getSetting('admin.password');
     const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
     
-    if (username === adminUsername && password === adminPassword) {
+    // Check username first
+    if (username !== adminUsername) {
+      res.status(401).json({ ok: false, message: 'Invalid credentials' });
+      return;
+    }
+    
+    // Verify password using bcrypt
+    const isPasswordValid = await verifyPassword(password, adminPassword);
+    
+    if (isPasswordValid) {
       res.json({ ok: true });
     } else {
       res.status(401).json({ ok: false, message: 'Invalid credentials' });
@@ -914,6 +937,59 @@ apiRouter.post(
   sessionGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id ?? null);
+    
+    // First, determine which track will be played and ensure duration_ms is populated
+    let trackToPlay: any = null;
+    if (id != null) {
+      const result = await query(`
+        SELECT q.id, q.track_id, q.key_adjustment, t.duration_ms, t.kind, t.file_mp4, t.file_mp3, t.file_cdg
+        FROM queue q
+        JOIN tracks t ON t.id = q.track_id
+        WHERE q.id = $1
+      `, [id]);
+      if (result.rows.length > 0) {
+        trackToPlay = result.rows[0];
+      }
+    } else {
+      // Get the top queued song
+      const result = await query(`
+        SELECT q.id, q.track_id, q.key_adjustment, t.duration_ms, t.kind, t.file_mp4, t.file_mp3, t.file_cdg
+        FROM queue q
+        JOIN tracks t ON t.id = q.track_id
+        ORDER BY q.position
+        LIMIT 1
+      `);
+      if (result.rows.length > 0) {
+        trackToPlay = result.rows[0];
+      }
+    }
+    
+    // If we have a track to play with pitch adjustment or missing duration, ensure duration is cached
+    if (trackToPlay) {
+      const hasPitchAdjustment = trackToPlay.key_adjustment && trackToPlay.key_adjustment !== 0;
+      const needsDuration = trackToPlay.duration_ms === null;
+      
+      // Extract duration if:
+      // 1. Duration is missing (null), OR
+      // 2. Pitch adjustment is applied (to ensure accurate duration is cached before re-encoding)
+      if (needsDuration || hasPitchAdjustment) {
+        console.log(`Track ${trackToPlay.track_id}: Ensuring duration is cached (hasPitch=${hasPitchAdjustment}, needsDuration=${needsDuration})`);
+        
+        const extractedDuration = await extractTrackDuration({
+          kind: trackToPlay.kind,
+          file_mp4: trackToPlay.file_mp4,
+          file_mp3: trackToPlay.file_mp3
+        });
+        
+        if (extractedDuration !== null && needsDuration) {
+          console.log(`Caching duration for track ${trackToPlay.track_id}: ${extractedDuration}ms (${Math.round(extractedDuration / 1000)}s)`);
+          await query('UPDATE tracks SET duration_ms = $1 WHERE id = $2', [extractedDuration, trackToPlay.track_id]);
+        } else if (extractedDuration !== null) {
+          console.log(`Duration already cached for track ${trackToPlay.track_id}: ${trackToPlay.duration_ms}ms (will be used for pitch-shifted playback)`);
+        }
+      }
+    }
+    
     await query('BEGIN');
     try {
       // Set all to queued

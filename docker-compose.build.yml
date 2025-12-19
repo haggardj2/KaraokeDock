@@ -39,7 +39,6 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
-    image: ${KARAOKE_API_IMAGE}
     container_name: karaoke-api
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
@@ -60,7 +59,6 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-    image: ${KARAOKE_WEB_IMAGE}
     container_name: karaoke-web
     environment:
       VITE_API_BASE: ${VITE_API_BASE}
@@ -69,6 +67,3 @@ services:
     restart: always
     ports:
       - "5173:5173"
-
-volumes:
-  dbdata:

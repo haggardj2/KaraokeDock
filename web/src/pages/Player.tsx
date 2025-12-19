@@ -50,10 +50,7 @@ function isValidDuration(duration: number | null | undefined): boolean {
   return duration != null && !isNaN(duration) && isFinite(duration) && duration > 0;
 }
 
-// Constants
 const AUTOPLAY_UNMUTE_DELAY_MS = 100; // Delay before unmuting video after autoplay starts
-const MIN_PLAYBACK_RATE = 0.5; // Minimum playback rate (slowest/lowest pitch)
-const MAX_PLAYBACK_RATE = 2.0; // Maximum playback rate (fastest/highest pitch)
 
 export default function Player() {
   const [queue, setQueue] = useState<QItem[]>([]);
@@ -352,6 +349,7 @@ export default function Player() {
   // Build the media URL - pure computation, no side effects
   const mediaSrc = useMemo(() => {
     if (!now) return "";
+    const keyAdjustment = now.key_adjustment ?? 0;
 
     // Handle external URLs (e.g., from Karaoke Nerds)
     if (now.external_url) {
@@ -366,7 +364,12 @@ export default function Player() {
 
     // Handle MP4 files
     if (now.kind === "mp4" && now.file_mp4) {
-      return `${API_BASE}/media/mp4stream?path=${encodeURIComponent(now.file_mp4)}`;
+      const params = new URLSearchParams();
+      params.set("path", now.file_mp4);
+      if (keyAdjustment) {
+        params.set("pitch", String(keyAdjustment));
+      }
+      return `${API_BASE}/media/mp4stream?${params.toString()}`;
     }
 
     // Handle CDG+MP3 files
@@ -398,6 +401,9 @@ export default function Player() {
         params.set("cdg", now.file_cdg);
         params.set("mp3", now.file_mp3);
       }
+      if (keyAdjustment) {
+        params.set("pitch", String(keyAdjustment));
+      }
 
       return `${API_BASE}/media/cdgmp4?${params.toString()}`;
     }
@@ -410,6 +416,7 @@ export default function Player() {
     now?.file_mp4,
     now?.file_cdg,
     now?.file_mp3,
+    now?.key_adjustment,
   ]);
 
   // Load video when mediaSrc changes or YouTube video changes
@@ -444,7 +451,6 @@ export default function Player() {
         // This prevents browsers from blocking autoplay after unmute
         await new Promise(resolve => setTimeout(resolve, AUTOPLAY_UNMUTE_DELAY_MS));
         
-        // Unmute after video has started playing
         v.muted = false;
       } catch (err) {
         // If even muted play fails, we need user interaction
@@ -455,21 +461,6 @@ export default function Player() {
 
     playVideo();
   }, [mediaSrc, isYouTube, youtubeVideoId]);
-
-  // Apply pitch shifting based on key_adjustment
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v || isYouTube) return;
-
-    const keyAdjustment = now?.key_adjustment || 0;
-    
-    // Calculate playback rate for pitch shift
-    // Formula: playbackRate = 2^(semitones/12)
-    const playbackRate = Math.pow(2, keyAdjustment / 12);
-    
-    // Clamp to safe playback rate range
-    v.playbackRate = Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, playbackRate));
-  }, [now?.key_adjustment, now?.id, isYouTube]); // Include now?.id to reset pitch when song changes
 
   // Helper function to send timing updates
   const sendTimingUpdate = useCallback(
@@ -502,14 +493,17 @@ export default function Player() {
       setIsPlaying(false);
 
       // Send final timing update when video ends
-      // For CDG files, prioritize database duration over video element duration
+      // Prioritize database duration when:
+      // 1. It's a CDG file (fragmented MP4 streams may report incorrect durations), OR
+      // 2. Pitch adjustment is applied (re-encoding creates fragmented streams)
       let duration: number | undefined;
+      const hasPitchAdjustment = now.key_adjustment !== undefined && now.key_adjustment !== 0;
       
-      if (now.kind === 'cdgmp3' && now.duration_ms && now.duration_ms > 0) {
-        // For CDG files, always use database duration if available
+      if ((now.kind === 'cdgmp3' || hasPitchAdjustment) && now.duration_ms && now.duration_ms > 0) {
+        // For CDG files or pitch-shifted tracks, always use database duration
         duration = now.duration_ms / 1000;
       } else {
-        // For non-CDG files, try video element duration first
+        // For regular MP4 files without pitch adjustment, try video element first
         duration = v.duration;
         if (!isValidDuration(duration)) {
           if (now.duration_ms) {
@@ -550,15 +544,18 @@ export default function Player() {
     const intervalId = setInterval(() => {
       const currentTime = v.currentTime || 0;
 
-      // For CDG files, prioritize database duration over video element duration
-      // because fragmented MP4 streams may report incorrect or changing duration values
+      // Prioritize database duration over video element duration when:
+      // 1. It's a CDG file (fragmented MP4 streams may report incorrect durations), OR
+      // 2. Pitch adjustment is applied (re-encoding creates fragmented streams)
       let duration: number | undefined;
+      const hasPitchAdjustment = now.key_adjustment !== undefined && now.key_adjustment !== 0;
       
-      if (now.kind === 'cdgmp3' && now.duration_ms && now.duration_ms > 0) {
-        // For CDG files, always use database duration if available
+      if ((now.kind === 'cdgmp3' || hasPitchAdjustment) && now.duration_ms && now.duration_ms > 0) {
+        // For CDG files or pitch-shifted tracks, always use database duration if available
+        // because re-encoded streams produce fragmented MP4s with unreliable duration
         duration = now.duration_ms / 1000; // Convert ms to seconds
       } else {
-        // For non-CDG files, try to get duration from video element first
+        // For regular MP4 files without pitch adjustment, try video element first
         duration = v.duration;
         
         // Fall back to database duration if video element can't provide it

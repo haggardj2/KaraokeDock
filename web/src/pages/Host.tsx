@@ -490,6 +490,13 @@ export default function Host() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
+
+
+function closeDetails(e: React.SyntheticEvent) {
+  const el = e.currentTarget as HTMLElement
+  const details = el.closest('details') as HTMLDetailsElement | null
+  if (details) details.removeAttribute('open')
+}
   const handleDragStart = (e: React.DragEvent, item: Row) => {
     setDraggedItem(item)
     e.dataTransfer.effectAllowed = 'move'
@@ -766,6 +773,21 @@ export default function Host() {
           gap: 12px;
         }
 
+        .controls-grid .control-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          line-height: 1;
+        }
+
+        .controls-grid .control-btn span {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+
         .control-btn {
           padding: 14px;
           background: var(--color-bg-secondary);
@@ -888,6 +910,15 @@ export default function Host() {
           border-color: var(--color-accent);
         }
 
+        .queue-item-singer,
+        .queue-item-title,
+        .queue-item-artist {
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+
         .modal-backdrop {
           position: fixed;
           top: 0;
@@ -897,6 +928,87 @@ export default function Host() {
           background: rgba(0, 0, 0, 0.8);
           backdrop-filter: blur(4px);
           z-index: 999;
+        }
+
+        /* Queue item actions: desktop buttons vs mobile context menu */
+        .queue-item-row {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .queue-item-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
+
+        .queue-item-singer {
+          font-size: 0.9rem;
+          font-weight: 600;
+          opacity: 0.95;
+          margin-bottom: 2px;
+        }
+
+        .queue-item-title {
+          font-size: 1.05rem;
+          font-weight: 500;
+          opacity: 0.9;
+          line-height: 1.2;
+        }
+
+        .queue-item-artist {
+          font-size: 0.85rem;
+          font-weight: 400;
+          opacity: 0.7;
+          margin-top: 2px;
+        }
+
+        .queue-item.playing .queue-item-title {
+          color: #a5b4fc;
+          font-weight: 600;
+        }
+
+
+        .queue-item-actions.mobile {
+          display: none;
+        }
+
+        .mobile-actions-menu {
+          position: relative;
+        }
+
+        .mobile-actions-menu > summary {
+          list-style: none;
+        }
+        .mobile-actions-menu > summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .mobile-actions-dropdown {
+          position: absolute;
+          right: 0;
+          bottom: calc(100% + 12px);
+          display: flex;
+          gap: 8px;
+          padding: 10px;
+          border-radius: 14px;
+          border: 1px solid var(--color-border);
+          background: var(--color-bg-secondary);
+          box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+          z-index: 50;
+        }
+
+        @media (max-width: 640px) {
+          .queue-item-actions.desktop {
+            display: none;
+          }
+          .queue-item-actions.mobile {
+            display: flex;
+            justify-content: flex-end;
+          }
         }
 
         .modal {
@@ -1125,38 +1237,41 @@ export default function Host() {
           font-weight: 500;
         }
 
-        /* Mobile-specific host controls - FIXED */
         @media (max-width: 768px) {
-          /* Make controls horizontal on mobile */
+            .controls-grid .control-btn .btn-label { display: none !important; }
+            .controls-grid .control-btn .btn-icon  { font-size: 20px !important; }
+          
           .controls-grid {
             display: flex !important;
             flex-direction: row !important;
-            gap: 6px ! important;
+            gap: 6px !important;
             grid-template-columns: none !important;
+            justify-content: space-between !important;
+            align-items: center !important;
           }
 
-          /* Make buttons square and icon-only on mobile */
           .controls-grid .control-btn {
-            min-width: 44px !important;
             width: 44px !important;
             height: 44px !important;
+            min-width: 0 !important;
             padding: 0 !important;
-            flex: 1 1 auto !important;
+            flex: 1 1 0 !important;
             border-radius: 10px;
-            position: relative;
-            font-size: 0 !important; /* Hide text content */
+
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+
+            line-height: 1 !important;
           }
 
-          /* Keep icons visible */
-          .controls-grid .control-btn span {
-            font-size: 20px !important;
-            display:  inline-flex !important;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            height: 100%;
+          .controls-grid .control-btn > * {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
           }
         }
+
 
         /* Even smaller screens */
         @media (max-width:  480px) {
@@ -1207,7 +1322,6 @@ export default function Host() {
             </h1>
 
             <form onSubmit={handleLogin}>
-              {/* Username */}
               <div className="form-group">
                 <label className="form-label">Username</label>
                 <input
@@ -1224,8 +1338,6 @@ export default function Host() {
                   }}
                 />
               </div>
-
-              {/* Password */}
               <div className="form-group">
                 <label className="form-label">Password</label>
                 <input
@@ -1243,9 +1355,7 @@ export default function Host() {
                   }}
                 />
               </div>
-
               {loginError && <div className="error-msg">{loginError}</div>}
-
               <button
                 className="control-btn primary"
                 type="submit"
@@ -1264,7 +1374,6 @@ export default function Host() {
                 )}
               </button>
             </form>
-
             <p
               style={{
                 marginTop: 20,
@@ -1329,22 +1438,28 @@ export default function Host() {
             <div className="card">
               <div className="controls-grid">
                 <button className="control-btn success" onClick={playTop} disabled={busy}>
-                  <span>▶</span> Play
+                  <span className="btn-icon">▶</span>
+                  <span className="btn-label">Play</span>
                 </button>
                 <button className="control-btn primary" onClick={next} disabled={busy}>
-                  <span>⏭</span> Next
+                  <span className="btn-icon">⏭</span>
+                  <span className="btn-label">Next</span>                  
                 </button>
                 <button className="control-btn danger" onClick={stop} disabled={busy}>
-                  <span>⏹</span> Stop
+                  <span className="btn-icon">⏹</span>
+                  <span className="btn-label">Stop</span>
                 </button>
                 <button className="control-btn" onClick={refreshQueue} disabled={busy}>
-                  <span>🔄</span> Refresh
+                  <span className="btn-icon">🔄</span>
+                  <span className="btn-label">Refresh</span>
                 </button>
                 <button className="control-btn danger" onClick={clearAll} disabled={busy}>
-                  <span>🗑</span> Clear All
+                  <span className="btn-icon">🗑</span>
+                  <span className="btn-label">Clear All</span>
                 </button>
                 <button className="control-btn" onClick={() => setShowPlayerWindowControl(true)}>
-                  <span>🎛️</span> Settings
+                  <span className="btn-icon">🎛️</span>
+                  <span className="btn-label">Settings</span>
                 </button>
               </div>
             </div>
@@ -1382,32 +1497,48 @@ export default function Host() {
                     onDrop={e => handleDrop(e, item.position)}
                     style={{ opacity: draggedItem?. id === item.id ? 0.5 : 1 }}
                   >
-                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12}}>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'left', flexWrap: 'wrap', gap: 12}}>
                       <div style={{flex: 1, minWidth: 0}}>
-                        <div style={{display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4}}>
-                          <span style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: 32,
-                            height: 32,
-                            background: 'var(--color-accent)',
-                            borderRadius: 8,
-                            fontWeight: 700,
-                            fontSize: 14,
-                            color: 'white'
-                          }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, minWidth: 0 }}>
+                          {/* position badge */}
+                          <span
+                            className="queue-item-position"
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              width: 32,
+                              height: 32,
+                              borderRadius: 8,
+                              background: 'rgba(99, 102, 241, 0.9)',
+                              color: 'white',
+                              fontWeight: 700,
+                              flex: '0 0 auto',
+                              marginTop: 2,
+                            }}
+                          >
                             {item.position}
                           </span>
-                          <span style={{fontWeight: 600, fontSize: 16}}>
-                            {item. title || 'Unknown Title'}
-                          </span>
-                        </div>
-                        <div style={{marginLeft: 44, fontSize: 14, color: 'var(--color-text-secondary)'}}>
-                          {item.artist || 'Unknown Artist'}
-                        </div>
-                        <div style={{marginLeft: 44, marginTop: 4, fontSize: 13}}>
-                          Singer: <InlineEdit value={item.requested_by || ''} disabled={busy} onSave={val => rename(item.id, val)} />
+
+                          {/* shared text column (Name, Song, Artist all start here) */}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {/* Requested By (bold, no "Singer:" label) */}
+                            <div className="queue-item-singer">
+                              <InlineEdit
+                                value={item.requested_by || ''}
+                                disabled={busy}
+                                onSave={(val) => rename(item.id, val)}
+                              />
+                            </div>
+                            {/* Song */}
+                            <div className="queue-item-title">
+                              {item.title || 'Unknown Title'}
+                            </div>
+                            {/* Artist */}
+                            <div className="queue-item-artist">
+                              {item.artist || 'Unknown Artist'}
+                            </div>
+                          </div>
                         </div>
                         {item.key_adjustment !== undefined && item.key_adjustment !== 0 && (
                           <div style={{
@@ -1437,39 +1568,101 @@ export default function Host() {
                           </span>
                         )}
                       </div>
-                      <div style={{display: 'flex', gap: 8}}>
-                        {item.status === 'queued' && (
-                          <>
-                            <button className="control-btn" onClick={() => playThis(item.id)} title="Play this song">
-                              ▶
-                            </button>
-                            <button 
-                              className="control-btn" 
-                              onClick={() => {
-                                const currentKey = item.key_adjustment || 0
-                                const newKey = prompt(`Adjust key (semitones from -6 to +6).\nCurrent: ${currentKey}`, String(currentKey))
-                                if (newKey !== null) {
-                                  const parsed = parseInt(newKey)
-                                  if (!isNaN(parsed) && parsed >= -6 && parsed <= 6) {
-                                    updateKey(item.id, parsed)
-                                  } else {
-                                    alert('Please enter a number between -6 and 6')
-                                  }
+                    <div className="queue-item-actions desktop">
+                      {item.status === 'queued' && (
+                        <>
+                          <button className="control-btn" onClick={() => playThis(item.id)} title="Play this song">
+                            ▶
+                          </button>
+                          <button
+                            className="control-btn"
+                            onClick={() => {
+                              const currentKey = item.key_adjustment || 0
+                              const newKey = prompt(
+                                `Adjust key (semitones from -6 to +6).\nCurrent: ${currentKey}`,
+                                String(currentKey)
+                              )
+                              if (newKey !== null) {
+                                const parsed = parseInt(newKey)
+                                if (!isNaN(parsed) && parsed >= -6 && parsed <= 6) {
+                                  updateKey(item.id, parsed)
+                                } else {
+                                  alert('Please enter a number between -6 and 6')
                                 }
-                              }} 
-                              title="Adjust key"
-                            >
-                              🎹
-                            </button>
-                            <button className="control-btn" onClick={() => setReplacingId(item.id)} title="Replace song">
-                              🔄
-                            </button>
-                          </>
-                        )}
-                        <button className="control-btn danger" onClick={() => remove(item. id)} title="Remove">
-                          ✕
-                        </button>
-                      </div>
+                              }
+                            }}
+                            title="Adjust key"
+                          >
+                            🎹
+                          </button>
+                          <button className="control-btn" onClick={() => setReplacingId(item.id)} title="Replace song">
+                            🔄
+                          </button>
+                        </>
+                      )}
+                      <button className="control-btn danger" onClick={() => remove(item.id)} title="Remove">
+                        ✕
+                      </button>
+                    </div>
+
+                    <div className="queue-item-actions mobile">
+                      <details className="mobile-actions-menu">
+                        <summary className="control-btn" title="Options" aria-label="Options">⋯</summary>
+                        <div className="mobile-actions-dropdown">
+                          {item.status === 'queued' && (
+                            <>
+                              <button
+                                type="button"
+                                className="control-btn"
+                                onClick={(e) => { closeDetails(e); playThis(item.id) }}
+                                title="Play this song"
+                              >
+                                ▶
+                              </button>
+                              <button
+                                type="button"
+                                className="control-btn"
+                                onClick={(e) => {
+                                  closeDetails(e)
+                                  const currentKey = item.key_adjustment || 0
+                                  const newKey = prompt(
+                                    `Adjust key (semitones from -6 to +6).\nCurrent: ${currentKey}`,
+                                    String(currentKey)
+                                  )
+                                  if (newKey !== null) {
+                                    const parsed = parseInt(newKey)
+                                    if (!isNaN(parsed) && parsed >= -6 && parsed <= 6) {
+                                      updateKey(item.id, parsed)
+                                    } else {
+                                      alert('Please enter a number between -6 and 6')
+                                    }
+                                  }
+                                }}
+                                title="Adjust key"
+                              >
+                                🎹
+                              </button>
+                              <button
+                                type="button"
+                                className="control-btn"
+                                onClick={(e) => { closeDetails(e); setReplacingId(item.id) }}
+                                title="Replace song"
+                              >
+                                🔄
+                              </button>
+                            </>
+                          )}
+                          <button
+                            type="button"
+                            className="control-btn danger"
+                            onClick={(e) => { closeDetails(e); remove(item.id) }}
+                            title="Remove"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </details>
+                    </div>
                     </div>
                   </div>
                 ))
@@ -2051,7 +2244,6 @@ function InlineEdit({ value, onSave, disabled }: { value: string; onSave: (v: st
         onClick={() => !disabled && setEditing(true)} 
         style={{ 
           cursor: disabled ? 'default' : 'pointer',
-          padding: '2px 6px',
           borderRadius: 4,
           textDecoration: 'underline',
           textDecorationStyle: 'dotted',

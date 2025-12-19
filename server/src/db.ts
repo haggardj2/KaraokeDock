@@ -1,6 +1,7 @@
 // server/src/db.ts
 import { Pool } from 'pg';
 import crypto from 'crypto';
+import bcrypt from 'bcrypt';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -275,4 +276,42 @@ export async function cleanupExpiredSessions(): Promise<void> {
  */
 function generateToken(): string {
   return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * Password hashing and verification functions
+ */
+
+// Number of salt rounds for bcrypt (10 is a good balance of security and performance)
+const SALT_ROUNDS = 10;
+
+// Regex to detect bcrypt hashes (starts with $2a$, $2b$, or $2y$ followed by cost factor)
+const BCRYPT_HASH_REGEX = /^\$2[aby]\$\d{2}\$/;
+
+/**
+ * Hash a password using bcrypt
+ */
+export async function hashPassword(password: string): Promise<string> {
+  return await bcrypt.hash(password, SALT_ROUNDS);
+}
+
+/**
+ * Verify a password against a hashed password
+ * This function handles both bcrypt hashes and plaintext passwords for backward compatibility
+ * during the migration period. Once all passwords are hashed, only bcrypt comparison will be used.
+ */
+export async function verifyPassword(password: string, hashedPassword: string): Promise<boolean> {
+  // Check if the stored password is a bcrypt hash
+  // Bcrypt hashes always start with $2a$, $2b$, or $2y$ followed by the cost factor
+  const isBcryptHash = BCRYPT_HASH_REGEX.test(hashedPassword);
+  
+  if (isBcryptHash) {
+    // Password is hashed, use bcrypt to verify
+    return await bcrypt.compare(password, hashedPassword);
+  } else {
+    // Password is in plaintext (legacy/migration state), do direct comparison
+    // This should only occur during migration or when using environment variables
+    console.warn('WARNING: Plaintext password detected. Please run "npm run migrate-passwords" to encrypt passwords.');
+    return password === hashedPassword;
+  }
 }
