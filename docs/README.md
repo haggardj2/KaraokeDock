@@ -167,11 +167,11 @@ Management interface for system configuration and media libraries.
 The application runs three Docker containers:
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   karaoke-web   │────▶│   karaoke-api   │────▶│   karaoke-db    │
-│   (Frontend)    │     │   (Backend)     │     │  (PostgreSQL)   │
-│   Port: 5173    │     │   Port: 5174    │     │   Port: 5432    │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+----------------     --------------------     ------------------
+|  karaoke-web |     |    karaoke-api   |     |   karaoke-db   |
+|  (Frontend)  |---> |    (Backend)     |---> |  (PostgreSQL)  | 
+|  Port: 5173  |     |    Port: 5174    |     |   Port: 5432   | 
+----------------     --------------------     ------------------ 
 ```
 
 **Container Details:**
