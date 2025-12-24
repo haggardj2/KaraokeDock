@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Consolidated Database Initialization Script
 -- ============================================================================
--- This file combines all migrations (001-009) into a single initialization
+-- This file combines all migrations (001-011) into a single initialization
 -- script for creating a fresh database from scratch.
 --
 -- It includes:
@@ -9,6 +9,7 @@
 -- - All indexes and constraints from later migrations
 -- - All default settings
 -- - Sessions table for authentication
+-- - yt-dlp and background task settings
 --
 -- This script is idempotent and can be run multiple times safely.
 -- ============================================================================
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 
--- Default settings from migrations 001, 002, 007, 008
+-- Default settings from migrations 001, 002, 007, 008, 011
 INSERT INTO settings (key, value) VALUES
 ('parsing.templates', '["discID - Artist - Title","Artist - Title"]'::jsonb),
 ('player.queueOverlayEnabled', 'true'::jsonb),
@@ -32,7 +33,13 @@ INSERT INTO settings (key, value) VALUES
 ('ui.branding', '{"title":"Web Karaoke"}'::jsonb),
 ('host.crossfadeMs', '0'::jsonb),
 ('admin.token', '""'::jsonb),
-('admin.password', '"changeme-password"'::jsonb)
+('admin.password', '"changeme-password"'::jsonb),
+('ytdlp.download_location', '"/media/downloads"'::jsonb),
+('ytdlp.allow_downloads', 'true'::jsonb),
+('requests.acceptance', '"local"'::jsonb),
+('admin.background_tasks_enabled', 'true'::jsonb),
+('libraries.local_enabled', 'true'::jsonb),
+('libraries.external_enabled', 'true'::jsonb)
 ON CONFLICT (key) DO NOTHING;
 
 
@@ -162,4 +169,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 
 -- ============================================================================
 -- Initialization Complete
+-- ============================================================================
+-- Note: Password encryption (migration 010) is handled by the application code.
+-- Passwords should be hashed using bcrypt. The migrate-passwords script can
+-- be used to hash existing plaintext passwords if needed.
 -- ============================================================================

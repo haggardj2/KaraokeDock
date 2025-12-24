@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { api, wsUrl } from '../api'
 import { useAuth } from '../auth-context'
+import { parseBooleanSetting } from '../utils/settings'
 
 type Row = {
   id: number
@@ -30,13 +31,16 @@ export default function Host() {
   const [busy, setBusy] = useState(false)
   const [autoPlay, setAutoPlay] = useState(false)
   const [autoPlayDelay, setAutoPlayDelay] = useState(5)
-  const [downloadsEnabled, setDownloadsEnabled] = useState(true)
   const [currentTime, setCurrentTime] = useState(0)
   const [actualDuration, setActualDuration] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<any[]>([])
   const [replacingId, setReplacingId] = useState<number | null>(null)
-  const [replaceSearchMode, setReplaceSearchMode] = useState<'local' | 'karaoke-nerds'>('local')
+  const [replaceSearchMode, setReplaceSearchMode] = useState<'local' | 'karaoke-nerds' | 'url'>('local')
+  const [replaceUrl, setReplaceUrl] = useState('')
+  const [replaceTitle, setReplaceTitle] = useState('')
+  const [replaceArtist, setReplaceArtist] = useState('')
+  const [replaceDiscId, setReplaceDiscId] = useState('')
   const [draggedItem, setDraggedItem] = useState<Row | null>(null)
   const [dragOverPosition, setDragOverPosition] = useState<number | null>(null)
   const [overlayVisible, setOverlayVisible] = useState(true)
@@ -45,10 +49,30 @@ export default function Host() {
   const [customMessage, setCustomMessage] = useState('')
   const [showPlayerWindowControl, setShowPlayerWindowControl] = useState(false)
   
+  // Manual request modal state
+  const [showManualRequest, setShowManualRequest] = useState(false)
+  const [manualRequestMode, setManualRequestMode] = useState<'local' | 'external' | 'url'>('local')
+  const [manualRequestQuery, setManualRequestQuery] = useState('')
+  const [manualRequestResults, setManualRequestResults] = useState<any[]>([])
+  const [manualRequestName, setManualRequestName] = useState('')
+  const [manualRequestUrl, setManualRequestUrl] = useState('')
+  const [manualRequestTitle, setManualRequestTitle] = useState('')
+  const [manualRequestArtist, setManualRequestArtist] = useState('')
+  const [manualRequestDiscId, setManualRequestDiscId] = useState('')
+  
+  // Library availability settings
+  const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true)
+  const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true)
+  
+  // Download settings
+  const [allowDownloads, setAllowDownloads] = useState(true)
+  const [downloadingTrack, setDownloadingTrack] = useState<string | null>(null)
+  
   const wsRef = useRef<WebSocket | null>(null)
   const autoPlayTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>()
   const songTimerRef = useRef<ReturnType<typeof setInterval> | undefined>()
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
+  const manualRequestSearchTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
   const autoPlayDelayRef = useRef<number>(autoPlayDelay)
   const autoPlayEnabledRef = useRef<boolean>(autoPlay)
   const lastWebSocketUpdateRef = useRef<number>(0)
@@ -94,6 +118,7 @@ export default function Host() {
       document.documentElement.style.cssText = ''
       document.body.style.cssText = ''
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+      if (manualRequestSearchTimeoutRef.current) clearTimeout(manualRequestSearchTimeoutRef.current)
     }
   }, [])
 
@@ -159,6 +184,39 @@ export default function Host() {
     validateSession()
   }, [auth.sessionToken])
 
+  // Load library availability settings
+  useEffect(() => {
+    async function loadSettings() {
+      // Only load settings if authenticated
+      if (!auth.sessionToken || !auth.isLoggedIn) {
+        return;
+      }
+      
+      try {
+        const settings = await api('/api/admin/settings', { headers });
+        const localEnabled = parseBooleanSetting(settings['libraries.local_enabled']);
+        const externalEnabled = parseBooleanSetting(settings['libraries.external_enabled']);
+        const downloadsAllowed = parseBooleanSetting(settings['ytdlp.allow_downloads']);
+        
+        setLocalLibraryEnabled(localEnabled);
+        setExternalLibraryEnabled(externalEnabled);
+        setAllowDownloads(downloadsAllowed);
+        
+        // Switch to an enabled mode, preferring local
+        if (localEnabled) {
+          setReplaceSearchMode('local');
+        } else if (externalEnabled) {
+          setReplaceSearchMode('karaoke-nerds');
+        }
+        // If both are disabled, leave current mode (it won't be used anyway)
+      } catch (err) {
+        console.error('Failed to load settings:', err);
+      }
+    }
+    
+    loadSettings();
+  }, [auth.sessionToken, auth.isLoggedIn, headers])
+
   // Update refs when state changes
   useEffect(() => {
     autoPlayDelayRef.current = autoPlayDelay
@@ -210,34 +268,6 @@ export default function Host() {
       })
       .catch(() => {})
   }, [])
-
-  // Fetch initial downloads settings
-  useEffect(() => {
-    api('/api/downloads/settings')
-      .then((settings: { enabled: boolean }) => {
-        setDownloadsEnabled(settings.enabled)
-        // If downloads are disabled and we're in karaoke-nerds mode, switch to local
-        if (!settings.enabled && replaceSearchMode === 'karaoke-nerds') {
-          setReplaceSearchMode('local')
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch downloads settings:', err)
-      })
-  }, [])
-
-  async function updateDownloadsSettings(enabled: boolean) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
-    try {
-      await api('/api/downloads/settings', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ enabled })
-      })
-    } catch (err) {
-      console.error('Failed to update downloads settings:', err)
-    }
-  }
 
   async function updateOverlaySettings(visible: boolean, height: number, qrSizeVal: number, message?: string) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
@@ -310,14 +340,6 @@ export default function Host() {
               }
               if (typeof msg.delay === 'number') {
                 setAutoPlayDelay(msg.delay)
-              }
-            } else if (msg.type === 'downloads.settings') {
-              if (typeof msg.enabled === 'boolean') {
-                setDownloadsEnabled(msg.enabled)
-                // If downloads are disabled and we're in karaoke-nerds mode, switch to local
-                if (!msg.enabled) {
-                  setReplaceSearchMode('local')
-                }
               }
             }
           } catch {}
@@ -439,7 +461,7 @@ export default function Host() {
 
   useEffect(() => {
     if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef. current)
+      clearTimeout(searchTimeoutRef.current)
     }
     
     const searchDelay = replaceSearchMode === 'local' ? LOCAL_SEARCH_DELAY_MS : KARAOKE_NERDS_SEARCH_DELAY_MS
@@ -447,10 +469,32 @@ export default function Host() {
     
     return () => {
       if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef. current)
+        clearTimeout(searchTimeoutRef.current)
       }
     }
   }, [searchQuery, replaceSearchMode])
+
+  // Auto-fetch video title when URL is entered in replace mode
+  useEffect(() => {
+    if (replaceSearchMode === 'url' && replaceUrl.trim() && !replaceTitle) {
+      const timer = setTimeout(async () => {
+        const title = await fetchVideoTitle(replaceUrl)
+        setReplaceTitle(title)
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [replaceUrl, replaceSearchMode, replaceTitle])
+
+  // Auto-fetch video title when URL is entered in manual request mode
+  useEffect(() => {
+    if (manualRequestMode === 'url' && manualRequestUrl.trim() && !manualRequestTitle) {
+      const timer = setTimeout(async () => {
+        const title = await fetchVideoTitle(manualRequestUrl)
+        setManualRequestTitle(title)
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [manualRequestUrl, manualRequestMode, manualRequestTitle])
 
   async function replaceSong(queueId: number, newTrackId: number) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
@@ -501,7 +545,7 @@ export default function Host() {
       
       await api('/api/karaoke-nerds/add', { 
         method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
+        headers, 
         body: JSON.stringify({ 
           title: track.title,
           artist: track.artist,
@@ -527,7 +571,227 @@ export default function Host() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
+  // Manual request search functionality
+  async function searchManualRequest(query: string) {
+    if (!query.trim()) {
+      setManualRequestResults([])
+      return
+    }
+    
+    try {
+      if (manualRequestMode === 'local') {
+        const results = await api(`/api/search?q=${encodeURIComponent(query)}`)
+        setManualRequestResults(results || [])
+      } else if (manualRequestMode === 'external') {
+        const results = await api(`/api/karaoke-nerds/search?q=${encodeURIComponent(query)}`)
+        setManualRequestResults(results || [])
+      }
+    } catch {
+      setManualRequestResults([])
+    }
+  }
 
+  // Effect to handle manual request search with debouncing
+  useEffect(() => {
+    if (manualRequestMode === 'url') {
+      setManualRequestResults([])
+      return
+    }
+    
+    if (manualRequestSearchTimeoutRef.current) {
+      clearTimeout(manualRequestSearchTimeoutRef.current)
+    }
+    
+    const searchDelay = manualRequestMode === 'local' ? LOCAL_SEARCH_DELAY_MS : KARAOKE_NERDS_SEARCH_DELAY_MS
+    manualRequestSearchTimeoutRef.current = setTimeout(() => searchManualRequest(manualRequestQuery), searchDelay)
+    
+    return () => {
+      if (manualRequestSearchTimeoutRef.current) {
+        clearTimeout(manualRequestSearchTimeoutRef.current)
+      }
+    }
+  }, [manualRequestQuery, manualRequestMode])
+
+  // Add manual request to queue - Local track
+  async function addManualRequestLocal(trackId: number) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    
+    setBusy(true)
+    try {
+      await api('/api/queue', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          trackId,
+          requestedBy: manualRequestName || null
+        })
+      })
+      
+      // Close modal and reset state
+      setShowManualRequest(false)
+      setManualRequestQuery('')
+      setManualRequestResults([])
+      setManualRequestName('')
+      setManualRequestMode('local')
+    } finally {
+      setBusy(false)
+      await refreshQueue()
+    }
+  }
+
+  // Add manual request to queue - External (Karaoke Nerds) track
+  async function addManualRequestExternal(track: { title: string; artist: string; url: string }) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    
+    setBusy(true)
+    try {
+      await api('/api/karaoke-nerds/add', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          title: track.title,
+          artist: track.artist,
+          url: track.url,
+          requestedBy: manualRequestName || null
+        })
+      })
+      
+      // Close modal and reset state
+      setShowManualRequest(false)
+      setManualRequestQuery('')
+      setManualRequestResults([])
+      setManualRequestName('')
+      setManualRequestMode('local')
+    } finally {
+      setBusy(false)
+      await refreshQueue()
+    }
+  }
+
+  // Fetch video title from URL
+  async function fetchVideoTitle(url: string): Promise<string> {
+    try {
+      const response = await api(`/api/video-metadata?url=${encodeURIComponent(url)}`)
+      return response.title || url.split('/').pop()?.split('?')[0] || 'Video'
+    } catch (err) {
+      console.error('Failed to fetch video title:', err)
+      return url.split('/').pop()?.split('?')[0] || 'Video'
+    }
+  }
+
+  // Replace song with custom URL
+  async function replaceSongWithUrl(queueId: number, url: string, title: string, artist: string) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    
+    const queueItem = queue.find(r => r.id === queueId)
+    if (!queueItem) return
+    
+    setBusy(true)
+    try {
+      await api('/api/queue/delete', { 
+        method: 'POST', 
+        headers, 
+        body: JSON.stringify({ id: queueId }) 
+      })
+      
+      await api('/api/karaoke-nerds/add', { 
+        method: 'POST', 
+        headers, 
+        body: JSON.stringify({ 
+          title: title || 'Video',
+          artist: artist || 'Unknown',
+          url,
+          requestedBy: queueItem.requested_by
+        }) 
+      })
+      
+      setReplacingId(null)
+      setSearchQuery('')
+      setSearchResults([])
+      setReplaceUrl('')
+      setReplaceTitle('')
+      setReplaceArtist('')
+      setReplaceSearchMode('local')
+    } finally { 
+      setBusy(false)
+      await refreshQueue()
+    }
+  }
+
+  // Add manual request to queue - Manual URL
+  async function addManualRequestUrl() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!manualRequestUrl.trim()) return
+    
+    setBusy(true)
+    try {
+      await api('/api/karaoke-nerds/add', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          title: manualRequestTitle || 'Video',
+          artist: manualRequestArtist || 'Unknown',
+          url: manualRequestUrl,
+          requestedBy: manualRequestName || null
+        })
+      })
+      
+      // Close modal and reset state
+      setShowManualRequest(false)
+      setManualRequestQuery('')
+      setManualRequestResults([])
+      setManualRequestName('')
+      setManualRequestUrl('')
+      setManualRequestTitle('')
+      setManualRequestArtist('')
+      setManualRequestMode('local')
+    } finally {
+      setBusy(false)
+      await refreshQueue()
+    }
+  }
+
+  // Download video from external source
+  async function downloadVideo(url: string, title: string, artist: string, brand?: string, discId?: string) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!allowDownloads) {
+      alert('Downloads are disabled')
+      return
+    }
+    
+    const trackKey = `${url}`
+    setDownloadingTrack(trackKey)
+    setBusy(true)
+    
+    try {
+      const response = await api('/api/admin/ytdlp/download', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          url,
+          title,
+          artist,
+          brand: brand || null,
+          discId: discId || null
+        })
+      })
+      
+      if (response.ok) {
+        setBanner(`✔ Downloaded: ${artist} - ${title}`)
+        setTimeout(() => setBanner(''), 5000)
+      } else {
+        setBanner(`⚠️ Download failed: ${response.error || 'Unknown error'}`)
+        setTimeout(() => setBanner(''), 5000)
+      }
+    } catch (err: any) {
+      console.error('Download failed:', err)
+      setBanner(`⚠️ Download failed: ${err.message || 'Unknown error'}`)
+      setTimeout(() => setBanner(''), 5000)
+    } finally {
+      setBusy(false)
+      setDownloadingTrack(null)
+    }
+  }
 
 function closeDetails(e: React.SyntheticEvent) {
   const el = e.currentTarget as HTMLElement
@@ -865,7 +1129,7 @@ function closeDetails(e: React.SyntheticEvent) {
           color: white;
         }
 
-        . control-btn.success {
+        .control-btn.success {
           background: linear-gradient(135deg, #10b981, #059669);
           border: none;
           color: white;
@@ -1502,15 +1766,24 @@ function closeDetails(e: React.SyntheticEvent) {
             </div>
 
             <div className="card">
-              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20}}>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12}}>
                 <h2 style={{margin: 0}}>🎵 Queue</h2>
-                <div style={{display: 'flex', gap: 12}}>
+                <div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
                   <span className="stat-pill">
                     {queue.filter(r => r.status === 'queued').length} queued
                   </span>
                   <span className="stat-pill">
-                    {queue. length} total
+                    {queue.length} total
                   </span>
+                  <button 
+                    className="control-btn primary" 
+                    onClick={() => setShowManualRequest(true)}
+                    disabled={busy}
+                    title="Manually add a song to the queue"
+                    style={{ padding: '8px 16px', fontSize: '14px' }}
+                  >
+                    <span>➕ Add</span>
+                  </button>
                 </div>
               </div>
 
@@ -1845,79 +2118,6 @@ function closeDetails(e: React.SyntheticEvent) {
                     )}
                   </div>
 
-                  {/* Downloads Settings */}
-                  <div className="settings-section">
-                    <div className="settings-title">External Songs Settings</div>
-                    <div style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'space-between',
-                      padding: '12px 0'
-                    }}>
-                      <span style={{ fontSize: '15px', fontWeight: '500' }}>Enable External Songs (YouTube)</span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        {/* Toggle Switch with Inline Styles */}
-                        <label style={{ 
-                          position: 'relative', 
-                          display: 'inline-block', 
-                          width: '48px', 
-                          height: '24px' 
-                        }}>
-                          <input 
-                            type="checkbox" 
-                            checked={downloadsEnabled} 
-                            onChange={e => {
-                              const newEnabled = e.target.checked
-                              setDownloadsEnabled(newEnabled)
-                              updateDownloadsSettings(newEnabled)
-                            }}
-                            style={{ opacity: 0, width: 0, height: 0 }}
-                          />
-                          <span style={{
-                            position: 'absolute',
-                            cursor: 'pointer',
-                            top: 0,
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            backgroundColor: downloadsEnabled ? '#10b981' : '#374151',
-                            transition: '.4s',
-                            borderRadius: '34px'
-                          }}>
-                            <span style={{
-                              position: 'absolute',
-                              content: '',
-                              height: '16px',
-                              width: '16px',
-                              left: downloadsEnabled ? '28px' : '4px',
-                              bottom: '4px',
-                              backgroundColor: 'white',
-                              transition: '.4s',
-                              borderRadius: '50%'
-                            }}></span>
-                          </span>
-                        </label>
-                        <span style={{ 
-                          color: downloadsEnabled ? 'var(--color-success)' : 'var(--color-text-secondary)', 
-                          fontSize: '14px',
-                          fontWeight: '500',
-                          minWidth: '60px'
-                        }}>
-                          {downloadsEnabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                      </div>
-                    </div>
-                    <p style={{ 
-                      margin: '8px 0 0 0', 
-                      fontSize: '13px', 
-                      color: 'var(--color-text-secondary)',
-                      lineHeight: '1.5'
-                    }}>
-                      When enabled, allows adding songs from external sources like Karaoke Nerds (YouTube). 
-                      When disabled, only local library songs can be added.
-                    </p>
-                  </div>
-
                   {/* Overlay Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Overlay Settings</div>
@@ -2120,7 +2320,16 @@ function closeDetails(e: React.SyntheticEvent) {
             {/* Replace Song Modal - CLEANED UP */}
             {replacingId !== null && (
               <>
-                <div className="modal-backdrop" onClick={() => { setReplacingId(null); setSearchQuery(''); setSearchResults([]) }} />
+                <div className="modal-backdrop" onClick={() => { 
+                  setReplacingId(null); 
+                  setSearchQuery(''); 
+                  setSearchResults([]); 
+                  setReplaceUrl(''); 
+                  setReplaceTitle(''); 
+                  setReplaceArtist('');
+                  setReplaceDiscId('');
+                  setReplaceSearchMode('local');
+                }} />
                 <div className="modal">
                   <div className="modal-header">
                     <h3 style={{ margin: 0 }}>🔄 Replace Song</h3>
@@ -2142,15 +2351,24 @@ function closeDetails(e: React.SyntheticEvent) {
                       }}
                       onMouseEnter={e => e.currentTarget.style.background = 'var(--color-bg-hover)'}
                       onMouseLeave={e => e.currentTarget. style.background = 'transparent'}
-                      onClick={() => { setReplacingId(null); setSearchQuery(''); setSearchResults([]) }}
+                      onClick={() => { 
+                        setReplacingId(null); 
+                        setSearchQuery(''); 
+                        setSearchResults([]); 
+                        setReplaceUrl(''); 
+                        setReplaceTitle(''); 
+                        setReplaceArtist('');
+                        setReplaceDiscId('');
+                        setReplaceSearchMode('local');
+                      }}
                     >
                       ✕
                     </button>
                   </div>
                   
                   {/* Search Mode Toggle - Updated to not clear search */}
-                  {downloadsEnabled && (
-                    <div className="search-mode-toggle">
+                  <div className="search-mode-toggle">
+                    {localLibraryEnabled && (
                       <button 
                         className={`mode-button ${replaceSearchMode === 'local' ? 'active' : ''}`}
                         onClick={() => setReplaceSearchMode('local')}
@@ -2163,7 +2381,9 @@ function closeDetails(e: React.SyntheticEvent) {
                         />
                         Local Library
                       </button>
+                    )}
 
+                    {externalLibraryEnabled && (
                       <button 
                         className={`mode-button ${replaceSearchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
                         onClick={() => setReplaceSearchMode('karaoke-nerds')}
@@ -2172,54 +2392,159 @@ function closeDetails(e: React.SyntheticEvent) {
                           src="https://karaokenerds.com/Content/Icons/favicon.ico"
                           alt="Karaoke Nerds"
                           className="mode-icon"
-                        style={{ width: "20px", height: "20px", marginRight: "6px" }}
-                      />
-                      Karaoke Nerds
+                          style={{ width: "20px", height: "20px", marginRight: "6px" }}
+                        />
+                        Karaoke Nerds
+                      </button>
+                    )}
+
+                    <button 
+                      className={`mode-button ${replaceSearchMode === 'url' ? 'active' : ''}`}
+                      onClick={() => setReplaceSearchMode('url')}
+                    >
+                      🔗 URL
                     </button>
                   </div>
-                  )}
 
-                  <input
-                    className="search-input"
-                    placeholder={downloadsEnabled && replaceSearchMode === 'karaoke-nerds' ? "Search Karaoke Nerds..." : "Search local library..."}
-                    value={searchQuery}
-                    onChange={e => setSearchQuery(e.target.value)}
-                    autoFocus
-                    style={{
-                      width: '100%',
-                      boxSizing: 'border-box'
-                    }}
-                  />
-                  
-                  <div className="search-results" style={{
-                    minHeight: '200px',
-                    maxHeight: '400px',
-                    marginBottom: '16px'
-                  }}>
-                    {searchResults.length === 0 ?  (
-                      <div style={{ 
-                        padding: '40px 20px', 
-                        textAlign: 'center', 
-                        color: 'var(--color-text-secondary)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        minHeight: '200px'
-                      }}>
-                        {searchQuery ? (
+                  {/* Search or URL Input */}
+                  {replaceSearchMode === 'url' ? (
+                    <>
+                      <div className="form-group">
+                        <label className="form-label">Video URL</label>
+                        <input
+                          className="form-input"
+                          placeholder="Enter YouTube or video URL..."
+                          value={replaceUrl}
+                          onChange={e => setReplaceUrl(e.target.value)}
+                          autoFocus
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Song Title</label>
+                        <input
+                          className="form-input"
+                          placeholder="Title (auto-filled from URL)"
+                          value={replaceTitle}
+                          onChange={e => setReplaceTitle(e.target.value)}
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Artist Name</label>
+                        <input
+                          className="form-input"
+                          placeholder="Enter artist name..."
+                          value={replaceArtist}
+                          onChange={e => setReplaceArtist(e.target.value)}
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Disc ID (Optional)</label>
+                        <input
+                          className="form-input"
+                          placeholder="Enter disc ID (e.g., SC123)..."
+                          value={replaceDiscId}
+                          onChange={e => setReplaceDiscId(e.target.value)}
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <button 
+                        className="control-btn primary" 
+                        style={{ width: '100%', marginBottom: '16px' }}
+                        onClick={() => replaceSongWithUrl(replacingId, replaceUrl, replaceTitle, replaceArtist)}
+                        disabled={busy || !replaceUrl.trim() || !replaceTitle.trim()}
+                      >
+                        {busy ? (
                           <>
-                            <div style={{ fontSize: '24px', marginBottom: '12px', opacity: 0.5 }}>🔍</div>
-                            <div style={{ fontSize: '14px' }}>
-                              {replaceSearchMode === 'local' ? 'No local results found' : 'No Karaoke Nerds results found'}
-                            </div>
-                            <div style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
-                              Try a different search term
-                            </div>
+                            <span className="loading-spinner"></span> Replacing...
                           </>
                         ) : (
-                          <>
-                            <div style={{ fontSize: '32px', marginBottom: '12px', opacity: 0.3 }}>🎵</div>
+                          'Replace with URL'
+                        )}
+                      </button>
+
+                      {allowDownloads && (
+                        <button 
+                          className="control-btn success" 
+                          style={{ width: '100%', marginBottom: '16px' }}
+                          onClick={() => downloadVideo(replaceUrl, replaceTitle, replaceArtist, undefined, replaceDiscId)} // brand=undefined, discId from user input
+                          disabled={busy || !replaceUrl.trim() || !replaceTitle.trim() || downloadingTrack === replaceUrl}
+                        >
+                          {downloadingTrack === replaceUrl ? (
+                            <>
+                              <span className="loading-spinner"></span> Downloading...
+                            </>
+                          ) : (
+                            <>📥 Download to Library</>
+                          )}
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        className="search-input"
+                        placeholder={replaceSearchMode === 'local' ? "Search local library..." : "Search Karaoke Nerds..."}
+                        value={searchQuery}
+                        onChange={e => setSearchQuery(e.target.value)}
+                        autoFocus
+                        style={{
+                          width: '100%',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                      
+                      <div className="search-results" style={{
+                        minHeight: '200px',
+                        maxHeight: '400px',
+                        marginBottom: '16px'
+                      }}>
+                        {searchResults.length === 0 ?  (
+                          <div style={{ 
+                            padding: '40px 20px', 
+                            textAlign: 'center', 
+                            color: 'var(--color-text-secondary)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            minHeight: '200px'
+                          }}>
+                            {searchQuery ? (
+                              <>
+                                <div style={{ fontSize: '24px', marginBottom: '12px', opacity: 0.5 }}>🔍</div>
+                                <div style={{ fontSize: '14px' }}>
+                                  {replaceSearchMode === 'local' ? 'No local results found' : 'No Karaoke Nerds results found'}
+                                </div>
+                                <div style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
+                                  Try a different search term
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div style={{ fontSize: '32px', marginBottom: '12px', opacity: 0.3 }}>🎵</div>
                             <div style={{ fontSize: '14px' }}>
                               Start typing to search {replaceSearchMode === 'local' ? 'local library' : 'Karaoke Nerds'}
                             </div>
@@ -2300,27 +2625,51 @@ function closeDetails(e: React.SyntheticEvent) {
                                   )}
                                 </div>
                               </div>
-                              <button 
-                                className="control-btn" 
-                                style={{ 
-                                  padding: '6px 14px',
-                                  fontSize: '13px',
-                                  minWidth: '70px',
-                                  background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
-                                }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  replaceSongWithKaraokeNerds(replacingId, track);
-                                }}
-                              >
-                                Select
-                              </button>
+                              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                                {allowDownloads && (
+                                  <button 
+                                    className="control-btn" 
+                                    style={{ 
+                                      padding: '6px 14px',
+                                      fontSize: '13px',
+                                      minWidth: '70px',
+                                      background: downloadingTrack === track.url ? 'var(--color-bg-secondary)' : 'linear-gradient(135deg, #10b981, #059669)',
+                                      color: 'white'
+                                    }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      downloadVideo(track.url, track.title, track.artist, track.brand);
+                                    }}
+                                    disabled={busy || downloadingTrack === track.url}
+                                    title="Download to local library"
+                                  >
+                                    {downloadingTrack === track.url ? '⏳' : '📥'} Download
+                                  </button>
+                                )}
+                                <button 
+                                  className="control-btn" 
+                                  style={{ 
+                                    padding: '6px 14px',
+                                    fontSize: '13px',
+                                    minWidth: '70px',
+                                    background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
+                                  }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    replaceSongWithKaraokeNerds(replacingId, track);
+                                  }}
+                                >
+                                  Select
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
                       </>
                     )}
                   </div>
+                    </>
+                  )}
                   
                   <button 
                     className="control-btn" 
@@ -2329,7 +2678,414 @@ function closeDetails(e: React.SyntheticEvent) {
                       background: 'transparent',
                       border: '2px solid var(--color-border)'
                     }}
-                    onClick={() => { setReplacingId(null); setSearchQuery(''); setSearchResults([]); setReplaceSearchMode('local') }}
+                    onClick={() => { 
+                      setReplacingId(null); 
+                      setSearchQuery(''); 
+                      setSearchResults([]); 
+                      setReplaceUrl(''); 
+                      setReplaceTitle(''); 
+                      setReplaceArtist('');
+                      setReplaceDiscId('');
+                      setReplaceSearchMode('local');
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Manual Request Modal */}
+            {showManualRequest && (
+              <>
+                <div className="modal-backdrop" onClick={() => { 
+                  setShowManualRequest(false); 
+                  setManualRequestQuery(''); 
+                  setManualRequestResults([]); 
+                  setManualRequestName(''); 
+                  setManualRequestUrl('');
+                  setManualRequestTitle('');
+                  setManualRequestArtist('');
+                  setManualRequestDiscId('');
+                  setManualRequestMode('local');
+                }} />
+                <div className="modal">
+                  <div className="modal-header">
+                    <h3 style={{ margin: 0 }}>➕ Add to Queue</h3>
+                    <button 
+                      style={{ 
+                        background: 'transparent', 
+                        border: 'none', 
+                        color: 'var(--color-text-secondary)', 
+                        fontSize: 24, 
+                        cursor: 'pointer',
+                        padding: '4px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '8px',
+                        transition: 'all 0.3s ease'
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--color-bg-hover)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                      onClick={() => { 
+                        setShowManualRequest(false); 
+                        setManualRequestQuery(''); 
+                        setManualRequestResults([]); 
+                        setManualRequestName(''); 
+                        setManualRequestUrl('');
+                        setManualRequestTitle('');
+                        setManualRequestArtist('');
+                        setManualRequestDiscId('');
+                        setManualRequestMode('local');
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  
+                  {/* Singer Name Field */}
+                  <div className="form-group">
+                    <label className="form-label">Singer Name (Optional)</label>
+                    <input
+                      className="form-input"
+                      placeholder="Enter singer name..."
+                      value={manualRequestName}
+                      onChange={e => setManualRequestName(e.target.value)}
+                      style={{
+                        width: '100%',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  {/* Mode Toggle */}
+                  <div className="search-mode-toggle">
+                    {localLibraryEnabled && (
+                      <button 
+                        className={`mode-button ${manualRequestMode === 'local' ? 'active' : ''}`}
+                        onClick={() => setManualRequestMode('local')}
+                      >
+                        <img
+                          src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
+                          alt="Local Library"
+                          className="mode-icon"
+                          style={{ width: "20px", height: "20px", marginRight: "6px" }}
+                        />
+                        Local
+                      </button>
+                    )}
+
+                    {externalLibraryEnabled && (
+                      <button 
+                        className={`mode-button ${manualRequestMode === 'external' ? 'active karaoke-nerds' : ''}`}
+                        onClick={() => setManualRequestMode('external')}
+                      >
+                        <img
+                          src="https://karaokenerds.com/Content/Icons/favicon.ico"
+                          alt="Karaoke Nerds"
+                          className="mode-icon"
+                          style={{ width: "20px", height: "20px", marginRight: "6px" }}
+                        />
+                        External
+                      </button>
+                    )}
+
+                    <button 
+                      className={`mode-button ${manualRequestMode === 'url' ? 'active' : ''}`}
+                      onClick={() => setManualRequestMode('url')}
+                    >
+                      🔗 URL
+                    </button>
+                  </div>
+
+                  {/* Search or URL Input */}
+                  {manualRequestMode === 'url' ? (
+                    <>
+                      <div className="form-group">
+                        <label className="form-label">Video URL</label>
+                        <input
+                          className="form-input"
+                          placeholder="Enter YouTube or video URL..."
+                          value={manualRequestUrl}
+                          onChange={e => setManualRequestUrl(e.target.value)}
+                          autoFocus
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Song Title</label>
+                        <input
+                          className="form-input"
+                          placeholder="Title (auto-filled from URL)"
+                          value={manualRequestTitle}
+                          onChange={e => setManualRequestTitle(e.target.value)}
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Artist Name</label>
+                        <input
+                          className="form-input"
+                          placeholder="Enter artist name..."
+                          value={manualRequestArtist}
+                          onChange={e => setManualRequestArtist(e.target.value)}
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Disc ID (Optional)</label>
+                        <input
+                          className="form-input"
+                          placeholder="Enter disc ID (e.g., SC123)..."
+                          value={manualRequestDiscId}
+                          onChange={e => setManualRequestDiscId(e.target.value)}
+                          style={{
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            marginBottom: '16px'
+                          }}
+                        />
+                      </div>
+
+                      <button 
+                        className="control-btn primary" 
+                        style={{ width: '100%', marginBottom: '16px' }}
+                        onClick={addManualRequestUrl}
+                        disabled={busy || !manualRequestUrl.trim() || !manualRequestTitle.trim()}
+                      >
+                        {busy ? (
+                          <>
+                            <span className="loading-spinner"></span> Adding...
+                          </>
+                        ) : (
+                          'Add to Queue'
+                        )}
+                      </button>
+
+                      {allowDownloads && (
+                        <button 
+                          className="control-btn success" 
+                          style={{ width: '100%', marginBottom: '16px' }}
+                          onClick={() => downloadVideo(manualRequestUrl, manualRequestTitle, manualRequestArtist, undefined, manualRequestDiscId)} // brand=undefined, discId from user input
+                          disabled={busy || !manualRequestUrl.trim() || !manualRequestTitle.trim() || downloadingTrack === manualRequestUrl}
+                        >
+                          {downloadingTrack === manualRequestUrl ? (
+                            <>
+                              <span className="loading-spinner"></span> Downloading...
+                            </>
+                          ) : (
+                            <>📥 Download to Library</>
+                          )}
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        className="search-input"
+                        placeholder={manualRequestMode === 'local' ? "Search local library..." : "Search Karaoke Nerds..."}
+                        value={manualRequestQuery}
+                        onChange={e => setManualRequestQuery(e.target.value)}
+                        autoFocus
+                        style={{
+                          width: '100%',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                      
+                      <div className="search-results" style={{
+                        minHeight: '200px',
+                        maxHeight: '400px',
+                        marginBottom: '16px'
+                      }}>
+                        {manualRequestResults.length === 0 ? (
+                          <div style={{ 
+                            padding: '40px 20px', 
+                            textAlign: 'center', 
+                            color: 'var(--color-text-secondary)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            minHeight: '200px'
+                          }}>
+                            {manualRequestQuery ? (
+                              <>
+                                <div style={{ fontSize: '24px', marginBottom: '12px', opacity: 0.5 }}>🔍</div>
+                                <div style={{ fontSize: '14px' }}>
+                                  {manualRequestMode === 'local' ? 'No local results found' : 'No external results found'}
+                                </div>
+                                <div style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
+                                  Try a different search term
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div style={{ fontSize: '32px', marginBottom: '12px', opacity: 0.3 }}>🎵</div>
+                                <div style={{ fontSize: '14px' }}>
+                                  Start typing to search {manualRequestMode === 'local' ? 'local library' : 'external library'}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ) : (
+                          <>
+                            {manualRequestMode === 'local' ? (
+                              // Local library results
+                              manualRequestResults.map((track: any) => (
+                                <div
+                                  key={track.id}
+                                  className="search-result"
+                                  onClick={() => addManualRequestLocal(track.id)}
+                                >
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {track.title || 'Unknown'}
+                                    </div>
+                                    <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {track.artist || 'Unknown'}
+                                      {track.disc_id && (
+                                        <span style={{ 
+                                          marginLeft: 8, 
+                                          fontSize: 11,
+                                          padding: '1px 6px',
+                                          background: 'var(--color-bg-primary)',
+                                          borderRadius: '4px',
+                                          opacity: 0.8
+                                        }}>
+                                          {track.disc_id}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <button 
+                                    className="control-btn primary" 
+                                    style={{ 
+                                      padding: '6px 14px',
+                                      fontSize: '13px',
+                                      minWidth: '70px'
+                                    }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      addManualRequestLocal(track.id);
+                                    }}
+                                    disabled={busy}
+                                  >
+                                    {busy ? '...' : 'Add'}
+                                  </button>
+                                </div>
+                              ))
+                            ) : (
+                              // External results
+                              manualRequestResults.map((track: any, idx: number) => (
+                                <div
+                                  key={track.url || idx}
+                                  className="search-result"
+                                  onClick={() => addManualRequestExternal(track)}
+                                >
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {track.title || 'Unknown'}
+                                    </div>
+                                    <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {track.artist || 'Unknown'}
+                                      {track.brand && (
+                                        <span style={{ 
+                                          marginLeft: 8,
+                                          fontSize: 11,
+                                          padding: '1px 6px',
+                                          background: 'linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(168, 85, 247, 0.2))',
+                                          borderRadius: '4px',
+                                          color: '#a855f7'
+                                        }}>
+                                          {track.brand}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                                    {allowDownloads && (
+                                      <button 
+                                        className="control-btn" 
+                                        style={{ 
+                                          padding: '6px 14px',
+                                          fontSize: '13px',
+                                          minWidth: '90px',
+                                          background: downloadingTrack === track.url ? 'var(--color-bg-secondary)' : 'linear-gradient(135deg, #10b981, #059669)',
+                                          color: 'white'
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          downloadVideo(track.url, track.title, track.artist, track.brand);
+                                        }}
+                                        disabled={busy || downloadingTrack === track.url}
+                                        title="Download to local library"
+                                      >
+                                        {downloadingTrack === track.url ? '⏳ Downloading...' : '📥 Download'}
+                                      </button>
+                                    )}
+                                    <button 
+                                      className="control-btn" 
+                                      style={{ 
+                                        padding: '6px 14px',
+                                        fontSize: '13px',
+                                        minWidth: '70px',
+                                        background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        addManualRequestExternal(track);
+                                      }}
+                                      disabled={busy}
+                                    >
+                                      {busy ? '...' : 'Add'}
+                                    </button>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  
+                  <button 
+                    className="control-btn" 
+                    style={{ 
+                      width: '100%',
+                      background: 'transparent',
+                      border: '2px solid var(--color-border)'
+                    }}
+                    onClick={() => { 
+                      setShowManualRequest(false); 
+                      setManualRequestQuery(''); 
+                      setManualRequestResults([]); 
+                      setManualRequestName(''); 
+                      setManualRequestUrl('');
+                      setManualRequestTitle('');
+                      setManualRequestArtist('');
+                      setManualRequestDiscId('');
+                      setManualRequestMode('local');
+                    }}
                   >
                     Cancel
                   </button>

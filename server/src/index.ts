@@ -53,14 +53,20 @@ server.on('upgrade', (req, socket, head) => {
 const DURATION_PROCESSING_INTERVAL = 1 * 30 * 1000; // 30 seconds
 const DURATION_BATCH_SIZE = 10; // Process 10 tracks at a time
 const STARTUP_DELAY = 10000; // 10 seconds
-const BACKGROUND_TASKS_ENABLED = process.env.BACKGROUND_TASKS_ENABLED !== 'false'; // Default to enabled
+
+let durationProcessingInterval: NodeJS.Timeout | null = null;
 
 async function runDurationProcessing() {
-  if (!BACKGROUND_TASKS_ENABLED) {
-    return; // Silently skip if disabled
-  }
-  
   try {
+    // Import getSetting dynamically to avoid circular dependencies
+    const { getSetting } = await import('./db.js');
+    const backgroundTasksEnabled = await getSetting('admin.background_tasks_enabled');
+    
+    // Check if background tasks are enabled (default to true)
+    if (backgroundTasksEnabled === false) {
+      return;
+    }
+    
     const processed = await processMissingDurations(DURATION_BATCH_SIZE);
     if (processed > 0) {
       console.log(`Background task: Processed ${processed} tracks with missing duration`);
@@ -71,15 +77,11 @@ async function runDurationProcessing() {
 }
 
 // Start the background task after a short delay to allow the server to fully start
-if (BACKGROUND_TASKS_ENABLED) {
-  setTimeout(() => {
-    console.log('Starting background duration processing task...');
-    runDurationProcessing(); // Run immediately on startup
-    setInterval(runDurationProcessing, DURATION_PROCESSING_INTERVAL);
-  }, STARTUP_DELAY);
-} else {
-  console.log('Background tasks disabled (BACKGROUND_TASKS_ENABLED=false)');
-}
+setTimeout(() => {
+  console.log('Starting background duration processing task...');
+  runDurationProcessing(); // Run immediately on startup
+  durationProcessingInterval = setInterval(runDurationProcessing, DURATION_PROCESSING_INTERVAL);
+}, STARTUP_DELAY);
 
 // keep process alive, log crashes
 process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));

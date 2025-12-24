@@ -79,12 +79,14 @@ export async function getMediaDuration(filePath: string): Promise<number | null>
         ]);
       } catch (err) {
         // Handle synchronous spawn errors (e.g., EMFILE)
+        console.error(`Failed to spawn ffprobe for ${filePath}:`, err);
         resolve(null);
         return;
       }
 
       // Handle spawn errors where process is returned but is invalid
       if (!ffprobe || !ffprobe.stdout) {
+        console.error(`Invalid ffprobe process for ${filePath}`);
         resolve(null);
         return;
       }
@@ -108,11 +110,13 @@ export async function getMediaDuration(filePath: string): Promise<number | null>
         }
       });
 
-      ffprobe.on('error', () => {
+      ffprobe.on('error', (err) => {
+        console.error(`ffprobe error for ${filePath}:`, err);
         resolve(null);
       });
     });
-  } catch {
+  } catch (err) {
+    console.error(`Exception in getMediaDuration for ${filePath}:`, err);
     return null;
   } finally {
     ffprobeSemaphore.release();
@@ -161,40 +165,61 @@ export async function extractTrackDuration(track: {
  * Get duration of MP3 inside a ZIP file
  */
 export async function getZipMp3Duration(zipPath: string, mp3Name: string): Promise<number | null> {
+  let tmpFile: string | null = null;
+  let zipFile: any = null;
+  
   try {
-    return new Promise((resolve) => {
-      yauzl.open(zipPath, { lazyEntries: true }, (err: any, zipFile: any) => {
-        if (err || !zipFile) {
+    return await new Promise((resolve) => {
+      yauzl.open(zipPath, { lazyEntries: true }, (err: any, zf: any) => {
+        if (err || !zf) {
           resolve(null);
           return;
         }
 
+        zipFile = zf;
         zipFile.readEntry();
         
         zipFile.on('entry', (entry: any) => {
           if (entry.fileName === mp3Name) {
             // Extract MP3 to temp file to analyze duration
-            const tmpFile = path.join('/tmp', `temp_${Date.now()}.mp3`);
+            tmpFile = path.join('/tmp', `temp_${Date.now()}_${Math.random().toString(36).substring(7)}.mp3`);
             const writeStream = require('fs').createWriteStream(tmpFile);
             
             zipFile.openReadStream(entry, (err2: any, readStream: any) => {
               if (err2 || !readStream) {
+                writeStream.destroy();
+                zipFile.close();
                 resolve(null);
                 return;
               }
               
+              readStream.on('error', () => {
+                writeStream.destroy();
+                zipFile.close();
+                resolve(null);
+              });
+              
               readStream.pipe(writeStream);
               
               writeStream.on('finish', async () => {
-                const duration = await getMediaDuration(tmpFile);
-                // Clean up temp file
                 try {
-                  await fs.unlink(tmpFile);
-                } catch {}
-                resolve(duration);
+                  const duration = await getMediaDuration(tmpFile!);
+                  resolve(duration);
+                } catch (err) {
+                  resolve(null);
+                } finally {
+                  // Close ZIP file handle
+                  try {
+                    zipFile.close();
+                  } catch {}
+                }
               });
               
               writeStream.on('error', () => {
+                writeStream.destroy();
+                try {
+                  zipFile.close();
+                } catch {}
                 resolve(null);
               });
             });
@@ -214,6 +239,18 @@ export async function getZipMp3Duration(zipPath: string, mp3Name: string): Promi
     });
   } catch {
     return null;
+  } finally {
+    // Always clean up temp file and close ZIP file handle
+    if (tmpFile) {
+      try {
+        await fs.unlink(tmpFile);
+      } catch {}
+    }
+    if (zipFile) {
+      try {
+        zipFile.close();
+      } catch {}
+    }
   }
 }
 
@@ -439,6 +476,7 @@ export async function processMissingDurations(batchSize: number = 10): Promise<n
   console.log(`Processing ${result.rows.length} tracks with missing duration...`);
   let processed = 0;
   
+  // Process tracks sequentially with a delay to prevent file descriptor exhaustion
   for (const track of result.rows) {
     try {
       const extractedDuration = await extractTrackDuration(track);
@@ -454,6 +492,10 @@ export async function processMissingDurations(batchSize: number = 10): Promise<n
     } catch (err) {
       console.error(`Error processing track ${track.id}:`, err);
     }
+    
+    // Add a small delay between tracks to allow file descriptors to be released
+    // This prevents EMFILE errors when processing many tracks
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
   
   return processed;

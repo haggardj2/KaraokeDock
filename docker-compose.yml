@@ -43,6 +43,7 @@ services:
       - db
     volumes:
       - "${MEDIA_PATH}:/media:ro"
+      - "${DOWNLOAD_PATH}:/media/downloads"
     restart: always
     ports:
       - "5174:5174"

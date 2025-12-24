@@ -96,6 +96,58 @@ export async function getYouTubeDuration(url: string): Promise<number | null> {
 }
 
 /**
+ * Get YouTube video title by scraping the page
+ * Returns the video title or null if it cannot be extracted
+ */
+export async function getYouTubeTitle(url: string): Promise<string | null> {
+  try {
+    const videoId = extractYouTubeVideoId(url);
+    if (!videoId) return null;
+    
+    // Fetch the YouTube page with a current User-Agent
+    const response = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+      timeout: 10000
+    });
+    
+    const html = response.data;
+    
+    // Try to extract title from JSON-LD structured data
+    const jsonLdMatch = html.match(/<script type="application\/ld\+json">(.+?)<\/script>/s);
+    if (jsonLdMatch) {
+      try {
+        const jsonLd = JSON.parse(jsonLdMatch[1]);
+        if (jsonLd.name) {
+          return jsonLd.name;
+        }
+      } catch {}
+    }
+    
+    // Fallback: try to extract from meta tags
+    const $ = cheerio.load(html);
+    const ogTitle = $('meta[property="og:title"]').attr('content');
+    if (ogTitle) {
+      return ogTitle;
+    }
+    
+    // Fallback: try to extract from title tag
+    const titleTag = $('title').text();
+    if (titleTag) {
+      // Remove " - YouTube" suffix if present
+      return titleTag.replace(/ - YouTube$/, '').trim();
+    }
+    
+    console.warn('Could not extract YouTube title for video:', videoId);
+    return null;
+  } catch (error: any) {
+    console.error('Error getting YouTube title:', error.message);
+    return null;
+  }
+}
+
+/**
  * Search Karaoke Nerds for songs using their JSON API
  * 
  * This uses the official JSON API endpoint which is much more reliable

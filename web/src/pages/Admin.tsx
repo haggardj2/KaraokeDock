@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth-context";
+import { parseBooleanSetting } from "../utils/settings";
 
 type Library = { id: number; name: string; path: string };
 type Stats = {
@@ -44,6 +45,22 @@ export default function Admin() {
   const [newUsername, setNewUsername] = useState("");
   const [usernamePassword, setUsernamePassword] = useState("");
   const [usernameError, setUsernameError] = useState("");
+
+  // yt-dlp state
+  const [ytdlpVersion, setYtdlpVersion] = useState<string | null>(null);
+  const [ytdlpUpdating, setYtdlpUpdating] = useState(false);
+  const [downloadLocation, setDownloadLocation] = useState("/media/downloads");
+  const [backgroundTasksEnabled, setBackgroundTasksEnabled] = useState(true);
+  const [requestAcceptance, setRequestAcceptance] = useState<"local" | "external" | "disabled">("local");
+  const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
+  const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [allowDownloads, setAllowDownloads] = useState(true);
+  const [showDownloadBrowser, setShowDownloadBrowser] = useState(false);
+  
+  // Collapsible card states
+  const [mediaLibrariesExpanded, setMediaLibrariesExpanded] = useState(true);
+  const [systemSettingsExpanded, setSystemSettingsExpanded] = useState(true);
 
   const sessionHeaders = useMemo(
     () => ({
@@ -360,6 +377,189 @@ export default function Admin() {
       currentBrowsePath. split("/").slice(0, -1).join("/") || "/";
     browseFolders(parentPath);
   };
+
+  // yt-dlp functions
+  async function fetchYtdlpVersion() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return;
+    try {
+      const result = await api("/api/admin/ytdlp/version", { headers: sessionHeaders });
+      setYtdlpVersion(result.version);
+    } catch (err) {
+      console.error("Failed to fetch yt-dlp version:", err);
+    }
+  }
+
+  async function updateYtdlp() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return alert("Please login first");
+    setYtdlpUpdating(true);
+    setBanner("Updating yt-dlp...");
+    try {
+      const result = await api("/api/admin/ytdlp/update", {
+        method: "POST",
+        headers: sessionHeaders,
+      });
+      if (result.success) {
+        setBanner(`✔ ${result.message}${result.version ? ` (v${result.version})` : ""}`);
+        setYtdlpVersion(result.version || null);
+      } else {
+        setBanner(`⚠️ ${result.message}`);
+      }
+      setTimeout(() => setBanner(""), 5000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update yt-dlp: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+    } finally {
+      setYtdlpUpdating(false);
+    }
+  }
+
+  // Settings functions
+  async function loadSettings() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return;
+    try {
+      const settings = await api("/api/admin/settings", { headers: sessionHeaders });
+      setDownloadLocation(settings["ytdlp.download_location"] || "/media/downloads");
+      setBackgroundTasksEnabled(parseBooleanSetting(settings["admin.background_tasks_enabled"]));
+      setRequestAcceptance(settings["requests.acceptance"] || "local");
+      setLocalLibraryEnabled(parseBooleanSetting(settings["libraries.local_enabled"]));
+      setExternalLibraryEnabled(parseBooleanSetting(settings["libraries.external_enabled"]));
+      setAllowDownloads(parseBooleanSetting(settings["ytdlp.allow_downloads"]));
+    } catch (err) {
+      console.error("Failed to load settings:", err);
+    }
+  }
+
+  async function saveSetting(key: string, value: any) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return;
+    try {
+      await api(`/api/admin/settings/${key}`, {
+        method: "PUT",
+        headers: sessionHeaders,
+        body: JSON.stringify({ value }),
+      });
+    } catch (err) {
+      console.error(`Failed to save setting ${key}:`, err);
+      throw err;
+    }
+  }
+
+  async function handleDownloadLocationChange() {
+    try {
+      await saveSetting("ytdlp.download_location", downloadLocation);
+      setBanner("✔ Download location updated");
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update download location: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+    }
+  }
+
+  async function handleBackgroundTasksToggle(enabled: boolean) {
+    setBackgroundTasksEnabled(enabled);
+    try {
+      await saveSetting("admin.background_tasks_enabled", enabled);
+      setBanner(`✔ Background tasks ${enabled ? "enabled" : "disabled"}`);
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update background tasks: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+      setBackgroundTasksEnabled(!enabled); // Revert on error
+    }
+  }
+
+  async function handleRequestAcceptanceChange(value: "local" | "external" | "disabled") {
+    setRequestAcceptance(value);
+    try {
+      await saveSetting("requests.acceptance", value);
+      setBanner(`✔ Request acceptance set to ${value}`);
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update request acceptance: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+    }
+  }
+
+  async function handleLibraryToggle(type: "local" | "external", enabled: boolean) {
+    if (type === "local") {
+      setLocalLibraryEnabled(enabled);
+      try {
+        await saveSetting("libraries.local_enabled", enabled);
+        setBanner(`✔ Local library ${enabled ? "enabled" : "disabled"}`);
+        setTimeout(() => setBanner(""), 3000);
+      } catch (err: any) {
+        setBanner(`⚠️ Failed to update local library: ${err.message}`);
+        setTimeout(() => setBanner(""), 5000);
+        setLocalLibraryEnabled(!enabled);
+      }
+    } else {
+      setExternalLibraryEnabled(enabled);
+      try {
+        await saveSetting("libraries.external_enabled", enabled);
+        setBanner(`✔ External library ${enabled ? "enabled" : "disabled"}`);
+        setTimeout(() => setBanner(""), 3000);
+      } catch (err: any) {
+        setBanner(`⚠️ Failed to update external library: ${err.message}`);
+        setTimeout(() => setBanner(""), 5000);
+        setExternalLibraryEnabled(!enabled);
+      }
+    }
+  }
+
+  async function handleAllowDownloadsToggle(enabled: boolean) {
+    setAllowDownloads(enabled);
+    try {
+      await saveSetting("ytdlp.allow_downloads", enabled);
+      setBanner(`✔ Downloads ${enabled ? "enabled" : "disabled"}`);
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update downloads setting: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+      setAllowDownloads(!enabled);
+    }
+  }
+
+  const openDownloadBrowser = () => {
+    setShowDownloadBrowser(true);
+    setCurrentBrowsePath(downloadLocation || "/media/downloads");
+    browseFolders(downloadLocation || "/media/downloads");
+  };
+
+  const selectDownloadFolder = (folderPath: string) => {
+    setDownloadLocation(folderPath);
+    setShowDownloadBrowser(false);
+  };
+
+  async function scanDownloadLocation() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return alert("Please login first");
+    setBusy(true);
+    setBanner("Scanning download location...");
+    try {
+      const result = await api("/api/admin/ytdlp/scan", {
+        method: "POST",
+        headers: sessionHeaders,
+      });
+      if (result.success) {
+        setBanner(`✔ ${result.message}`);
+        await refreshStats();
+      } else {
+        setBanner(`⚠️ ${result.message}`);
+      }
+      setTimeout(() => setBanner(""), 5000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to scan download location: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Load yt-dlp version and settings on login
+  useEffect(() => {
+    if (auth.isLoggedIn) {
+      fetchYtdlpVersion();
+      loadSettings();
+    }
+  }, [auth.isLoggedIn]);
 
   return (
     <div className="admin-page">
@@ -839,6 +1039,75 @@ export default function Admin() {
           opacity: 0.7;
         }
 
+        /* Collapsible Card Header */
+        .card-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          cursor: pointer;
+          user-select: none;
+          margin-bottom: 20px;
+        }
+
+        .card-header h2 {
+          margin: 0;
+          font-size: 20px;
+        }
+
+        .card-toggle {
+          background: var(--color-bg-secondary);
+          border: 1px solid var(--color-border);
+          border-radius: 8px;
+          padding: 6px 12px;
+          color: var(--color-text-secondary);
+          font-size: 14px;
+          cursor: pointer;
+          transition: all 0.3s ease;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .card-toggle:hover {
+          background: var(--color-bg-hover);
+          border-color: var(--color-accent);
+          color: var(--color-text-primary);
+        }
+
+        .card-content {
+          overflow: hidden;
+          transition: max-height 0.3s ease, opacity 0.3s ease;
+        }
+
+        .card-content.collapsed {
+          max-height: 0;
+          opacity: 0;
+          pointer-events: none;
+        }
+
+        .card-content.expanded {
+          max-height: none;
+          opacity: 1;
+        }
+
+        .disabled-overlay {
+          position: relative;
+          opacity: 0.4;
+          pointer-events: none;
+        }
+
+        .disabled-overlay::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: var(--color-bg-card);
+          opacity: 0.7;
+          pointer-events: none;
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
           .admin-page {
@@ -992,33 +1261,39 @@ export default function Admin() {
 
             {/* Media Libraries Card */}
             <div className="card">
-              <h2 style={{ margin: "0 0 20px", fontSize: 20 }}>📚 Media Libraries</h2>
+              <div className="card-header" onClick={() => setMediaLibrariesExpanded(!mediaLibrariesExpanded)}>
+                <h2>📚 Media Libraries</h2>
+                <button className="card-toggle" type="button">
+                  {mediaLibrariesExpanded ? '▼ Collapse' : '▶ Expand'}
+                </button>
+              </div>
               
-              {/* Add Library Form */}
-              <div style={{
-                background: "var(--color-bg-secondary)",
-                border: "1px solid var(--color-border)",
-                borderRadius: 12,
-                padding: 16,
-                marginBottom: 20
-              }}>
-                <div className="form-group">
-                  <label className="form-label">Library Name</label>
-                  <input
-                    className="form-input"
-                    placeholder="e.g., Main Collection"
-                    value={name}
-                    onChange={(e) => setName(e.target. value)}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Folder Path</label>
-                  <div style={{ display: "flex", gap: 8 }}>
+              <div className={`card-content ${mediaLibrariesExpanded ? 'expanded' : 'collapsed'}`}>
+                {/* Add Library Form */}
+                <div style={{
+                  background: "var(--color-bg-secondary)",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 20
+                }}>
+                  <div className="form-group">
+                    <label className="form-label">Library Name</label>
                     <input
                       className="form-input"
-                      placeholder="e.g., /media/karaoke"
-                      value={path}
+                      placeholder="e.g., Main Collection"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Folder Path</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        className="form-input"
+                        placeholder="e.g., /media/karaoke"
+                        value={path}
                       onChange={(e) => setPath(e.target.value)}
                     />
                     <button
@@ -1086,6 +1361,189 @@ export default function Admin() {
                   <div className="empty-subtext">Add a media library above to get started</div>
                 </div>
               )}
+              </div>
+            </div>
+
+            {/* System Settings Card */}
+            <div className="card">
+              <div className="card-header" onClick={() => setSystemSettingsExpanded(!systemSettingsExpanded)}>
+                <h2>⚙️ System Settings</h2>
+                <button className="card-toggle" type="button">
+                  {systemSettingsExpanded ? '▼ Collapse' : '▶ Expand'}
+                </button>
+              </div>
+              
+              <div className={`card-content ${systemSettingsExpanded ? 'expanded' : 'collapsed'}`}>
+                {/* Combined Library & Request Settings */}
+                <div style={{
+                  background: "var(--color-bg-secondary)",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 16
+                }}>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>📚 Library Availability & Requests</h3>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!localLibraryEnabled && !externalLibraryEnabled}
+                        onChange={(e) => {
+                          const disabled = e.target.checked;
+                          if (disabled) {
+                            handleLibraryToggle("local", false);
+                            handleLibraryToggle("external", false);
+                          } else {
+                            // When unchecking disabled, enable local library by default
+                            handleLibraryToggle("local", true);
+                          }
+                        }}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <span style={{ fontSize: 14 }}>Disabled (no guest requests)</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={localLibraryEnabled}
+                        onChange={(e) => handleLibraryToggle("local", e.target.checked)}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <span style={{ fontSize: 14 }}>Enable Local Library</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={externalLibraryEnabled}
+                        onChange={(e) => handleLibraryToggle("external", e.target.checked)}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <span style={{ fontSize: 14 }}>Enable External Library (Karaoke Nerds)</span>
+                    </label>
+                  </div>
+                  <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+                    Control which libraries are available for searching and requesting. When both are disabled, guests cannot request songs. Host can always add songs manually.
+                  </p>
+                </div>
+
+                {/* yt-dlp Section */}
+                <div style={{
+                  background: "var(--color-bg-secondary)",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 16
+                }}>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>📥 yt-dlp Integration</h3>
+                  
+                  {/* Allow Downloads Toggle */}
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={allowDownloads}
+                        onChange={(e) => handleAllowDownloadsToggle(e.target.checked)}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <span style={{ fontSize: 14, fontWeight: 500 }}>Allow Downloads</span>
+                    </label>
+                    <p style={{ margin: "4px 0 0 26px", fontSize: 13, color: "var(--color-text-muted)" }}>
+                      Enable downloading of external content using yt-dlp
+                    </p>
+                  </div>
+
+                  {/* yt-dlp content - disabled if downloads not allowed */}
+                  <div className={!allowDownloads ? 'disabled-overlay' : ''}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                      <span style={{ color: "var(--color-text-secondary)", fontSize: 14 }}>
+                        Version: {ytdlpVersion || "Checking..."}
+                      </span>
+                      <button
+                        className="btn primary"
+                        onClick={updateYtdlp}
+                        disabled={ytdlpUpdating || !auth.sessionToken || !auth.isLoggedIn || !allowDownloads}
+                      >
+                        {ytdlpUpdating ? (
+                          <>
+                            <span className="loading-spinner" /> Updating...
+                          </>
+                        ) : (
+                          <>
+                            <span>🔄</span> Update yt-dlp
+                      </>
+                    )}
+                  </button>
+                </div>
+                
+                <div className="form-group">
+                  <label className="form-label">Download Location</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      className="form-input"
+                      placeholder="/media/downloads"
+                      value={downloadLocation}
+                      onChange={(e) => setDownloadLocation(e.target.value)}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn || !allowDownloads}
+                    />
+                    <button
+                      className="btn"
+                      onClick={openDownloadBrowser}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn || !allowDownloads}
+                      title="Browse folders"
+                      style={{ whiteSpace: "nowrap" }}
+                    >
+                      <span>📁</span> Browse
+                    </button>
+                    <button
+                      className="btn primary"
+                      onClick={scanDownloadLocation}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn || !allowDownloads}
+                      title="Scan download location for new files and remove missing ones"
+                      style={{ whiteSpace: "nowrap" }}
+                    >
+                      <span>🔍</span> Scan
+                    </button>
+                    <button
+                      className="btn success"
+                      onClick={handleDownloadLocationChange}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn || !allowDownloads}
+                    >
+                      <span>✓</span> Save
+                    </button>
+                  </div>
+                </div>
+                  </div>
+              </div>
+
+              {/* Background Tasks */}
+              <div style={{
+                background: "var(--color-bg-secondary)",
+                border: "1px solid var(--color-border)",
+                borderRadius: 12,
+                padding: 16
+              }}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>🔄 Background Tasks</h3>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={backgroundTasksEnabled}
+                      onChange={(e) => handleBackgroundTasksToggle(e.target.checked)}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn}
+                      style={{ width: 18, height: 18 }}
+                    />
+                    <span style={{ fontSize: 14 }}>Enable duration processing task</span>
+                  </label>
+                </div>
+                <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+                  When enabled, the server will automatically process tracks with missing durations in the background.
+                </p>
+              </div>
+              </div>
             </div>
 
             {/* Folder Browser Modal */}
@@ -1130,7 +1588,7 @@ export default function Admin() {
                               >
                                 {part}
                               </span>
-                            </React. Fragment>
+                            </React.Fragment>
                           );
                         })}
                     </div>
@@ -1162,7 +1620,7 @@ export default function Admin() {
                         </div>
                       ))}
 
-                    {folderContents. filter((item) => item.isDirectory). length ===
+                    {folderContents.filter((item) => item.isDirectory).length ===
                       0 &&
                       !browseError && (
                         <div className="empty-state" style={{ padding: 40 }}>
@@ -1196,6 +1654,114 @@ export default function Admin() {
               </>
             )}
 
+            {/* Download Location Folder Browser Modal */}
+            {showDownloadBrowser && (
+              <>
+                <div
+                  className="modal-backdrop"
+                  onClick={() => setShowDownloadBrowser(false)}
+                />
+                <div className="modal">
+                  <div className="modal-header">
+                    <h3 className="modal-title">📁 Select Download Folder</h3>
+                    <button
+                      className="btn ghost"
+                      onClick={() => setShowDownloadBrowser(false)}
+                      style={{ padding: "4px 12px" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="browser-path">
+                    <span>📍</span>
+                    <div className="breadcrumb">
+                      <span
+                        className="breadcrumb-part"
+                        onClick={() => browseFolders("/")}
+                      >
+                        /
+                      </span>
+                      {currentBrowsePath
+                        .split("/")
+                        .filter(Boolean)
+                        .map((part, idx, arr) => {
+                          const partPath = "/" + arr.slice(0, idx + 1).join("/");
+                          return (
+                            <React.Fragment key={idx}>
+                              <span className="breadcrumb-sep">/</span>
+                              <span
+                                className="breadcrumb-part"
+                                onClick={() => browseFolders(partPath)}
+                              >
+                                {part}
+                              </span>
+                            </React.Fragment>
+                          );
+                        })}
+                    </div>
+                  </div>
+
+                  {browseError && (
+                    <div className="error-msg">⚠️ {browseError}</div>
+                  )}
+
+                  <div className="browser-container">
+                    {currentBrowsePath !== "/" && (
+                      <div className="folder-item" onClick={navigateUp}>
+                        <span className="folder-icon">⬆️</span>
+                        <span className="folder-name">..</span>
+                        <span style={{ opacity: 0.5, fontSize: 13 }}>(parent directory)</span>
+                      </div>
+                    )}
+
+                    {folderContents
+                      .filter((item) => item.isDirectory)
+                      .map((item) => (
+                        <div
+                          key={item.path}
+                          className="folder-item"
+                          onClick={() => browseFolders(item.path)}
+                        >
+                          <span className="folder-icon">📁</span>
+                          <span className="folder-name">{item.name}</span>
+                        </div>
+                      ))}
+
+                    {folderContents.filter((item) => item.isDirectory).length ===
+                      0 &&
+                      !browseError && (
+                        <div className="empty-state" style={{ padding: 40 }}>
+                          <div className="empty-icon" style={{ fontSize: 48 }}>📂</div>
+                          <div className="empty-text" style={{ fontSize: 14 }}>No subfolders in this directory</div>
+                        </div>
+                      )}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <input
+                      className="form-input"
+                      value={currentBrowsePath}
+                      readOnly
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="btn success"
+                      onClick={() => selectDownloadFolder(currentBrowsePath)}
+                    >
+                      <span>✓</span> Select This Folder
+                    </button>
+                    <button
+                      className="btn ghost"
+                      onClick={() => setShowDownloadBrowser(false)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
             {/* Account Management Modal */}
             {showAccountManagement && (
               <>
@@ -1218,7 +1784,7 @@ export default function Admin() {
                     </div>
                   )}
 
-                  <p style={{ color: 'var(--color-text-secondary)', marginBottom: 20, fontSize: 14 }}>
+                  <p style={{ color: "var(--color-text-secondary)", marginBottom: 20, fontSize: 14 }}>
                     Change your admin username and password. These credentials are used for both the Admin and Host pages.
                   </p>
 

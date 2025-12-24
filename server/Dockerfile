@@ -10,7 +10,12 @@ RUN apk add --no-cache \
     zip \
     unzip \
     postgresql-client \
-    font-dejavu
+    font-dejavu \
+    python3 \
+    py3-pip
+
+# Install yt-dlp
+RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
 COPY --from=ffmpeg /opt/ffmpeg /opt/ffmpeg
 ENV PATH="/opt/ffmpeg/bin:${PATH}"

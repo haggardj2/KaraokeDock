@@ -47,6 +47,11 @@ export default function Requests() {
   const actionMenuRef = useRef<HTMLDivElement | null>(null)
   const lyricsPopupRef = useRef<HTMLDivElement | null>(null)
 
+  // Request acceptance settings
+  const [requestAcceptance, setRequestAcceptance] = useState<'local' | 'external' | 'disabled'>('local')
+  const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true)
+  const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true)
+
   useEffect(() => {
     // Close popup when clicking outside
     function handleDown(e: MouseEvent) {
@@ -105,8 +110,34 @@ export default function Requests() {
     if (nav) (nav as HTMLElement).style.display = 'none';
     
     // Load saved name
-    const savedName = localStorage. getItem('karaoke-name')
+    const savedName = localStorage.getItem('karaoke-name')
     if (savedName) setRequestedBy(savedName)
+    
+    // Load settings for request acceptance
+    async function loadSettings() {
+      try {
+        const settings = await api('/api/settings/public');
+        const acceptance = settings['requests.acceptance'] || 'local';
+        const localEnabled = settings['libraries.local_enabled'] !== false;
+        const externalEnabled = settings['libraries.external_enabled'] !== false;
+        
+        setRequestAcceptance(acceptance);
+        setLocalLibraryEnabled(localEnabled);
+        setExternalLibraryEnabled(externalEnabled);
+        
+        // Set initial search mode based on what's enabled
+        if (localEnabled) {
+          setSearchMode('local');
+        } else if (externalEnabled) {
+          setSearchMode('karaoke-nerds');
+        }
+      } catch (err) {
+        console.error('Failed to load settings:', err);
+        // Default to allowing everything if we can't load settings
+      }
+    }
+    
+    loadSettings();
     
     return () => {
       document.documentElement.style.cssText = '';
@@ -1814,46 +1845,63 @@ export default function Requests() {
         {/* Search Card */}
         <div className="card">
           {/* Search Mode Toggle - Cleaner Design */}
-          <div className="search-mode-toggle">
-            <button
-              className={`mode-button ${searchMode === 'local' ? 'active local' : ''}`}
-              onClick={() => setSearchMode('local')}
-            >
-              <img
-                src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
-                alt="Local Library"
-                className="mode-icon"
-                style={{ width: "20px", height: "20px", marginRight: "6px" }}
-              />
-              <span>Local Library</span>
-            </button>
-            <button
-              className={`mode-button ${searchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
-              onClick={() => setSearchMode('karaoke-nerds')}
-            >
-              <img 
-                src="https://karaokenerds.com/Content/Icons/favicon.ico" 
-                alt="Karaoke Nerds"
-                style={{ width: "20px", height: "20px", marginRight: "6px" }}
-              />
-              <span>Karaoke Nerds</span>
-            </button>
-          </div>
+          {(localLibraryEnabled || externalLibraryEnabled) && (
+            <div className="search-mode-toggle">
+              {localLibraryEnabled && (
+                <button
+                  className={`mode-button ${searchMode === 'local' ? 'active local' : ''}`}
+                  onClick={() => setSearchMode('local')}
+                >
+                  <img
+                    src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
+                    alt="Local Library"
+                    className="mode-icon"
+                    style={{ width: "20px", height: "20px", marginRight: "6px" }}
+                  />
+                  <span>Local Library</span>
+                </button>
+              )}
+              {externalLibraryEnabled && (
+                <button
+                  className={`mode-button ${searchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
+                  onClick={() => setSearchMode('karaoke-nerds')}
+                >
+                  <img 
+                    src="https://karaokenerds.com/Content/Icons/favicon.ico" 
+                    alt="Karaoke Nerds"
+                    style={{ width: "20px", height: "20px", marginRight: "6px" }}
+                  />
+                  <span>Karaoke Nerds</span>
+                </button>
+              )}
+            </div>
+          )}
 
-          {/* Search Input - Fixed with Clear Button Inside */}
-          <div className="search-wrapper">
-            <input
-              className="search-input"
-              type="search"
-              placeholder={searchMode === 'local' ? 'Search local songs...' : 'Search online catalog...'}
-              value={q}
-              onChange={(e) => setQ(e. target.value)}
-              autoComplete="off"
-              autoCorrect="off"
-              spellCheck="false"
-            />
-            <span className="search-icon">🔍</span>
-          </div>
+          {(!localLibraryEnabled && !externalLibraryEnabled) ? (
+            <div style={{
+              padding: '40px',
+              textAlign: 'center',
+              color: 'var(--color-text-secondary)'
+            }}>
+              <div style={{ fontSize: '48px', marginBottom: '16px' }}>🎤</div>
+              <div style={{ fontSize: '18px', fontWeight: 500 }}>We are not accepting requests at this time.</div>
+            </div>
+          ) : (
+            <>
+              {/* Search Input - Fixed with Clear Button Inside */}
+              <div className="search-wrapper">
+                <input
+                  className="search-input"
+                  type="search"
+                  placeholder={searchMode === 'local' ? 'Search local songs...' : 'Search online catalog...'}
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck="false"
+                />
+                <span className="search-icon">🔍</span>
+              </div>
 
           {/* Search Filters (Local only) */}
           {searchMode === 'local' && (
@@ -2299,6 +2347,8 @@ export default function Requests() {
                   : 'Search our local karaoke library'}
               </div>
             </div>
+          )}
+          </>
           )}
         </div>
       </div>

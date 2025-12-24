@@ -20,5 +20,7 @@ psql "$DATABASE_URL" -f migrations/init.sql
 # psql "$DATABASE_URL" -f migrations/007_add_admin_credentials.sql || true
 # psql "$DATABASE_URL" -f migrations/008_add_sessions.sql || true
 # psql "$DATABASE_URL" -f migrations/009_add_key_adjustment.sql || true
+# psql "$DATABASE_URL" -f migrations/010_add_cover_art.sql || true
+# psql "$DATABASE_URL" -f migrations/011_add_ytdlp_settings.sql || true
 
 echo "Migrations completed successfully"

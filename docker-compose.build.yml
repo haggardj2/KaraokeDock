@@ -50,7 +50,8 @@ services:
       - db
     restart: always
     volumes:
-      - ${MEDIA_PATH}:/media/local
+      - ${MEDIA_PATH}:/media/library
+      - ${DOWNLOAD_PATH}:/media/downloads
     ports:
       - "5174:5174"
     command: ["sh", "-c", "npm run migrate && npm start"]

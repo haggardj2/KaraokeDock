@@ -13,6 +13,13 @@ ensureHelpfulIndexes().catch(e => console.error('ensureHelpfulIndexes failed', e
 
 export const apiRouter = express.Router();
 
+// Type for public settings that don't require authentication
+interface PublicSettings {
+  'libraries.local_enabled': boolean;
+  'libraries.external_enabled': boolean;
+  'requests.acceptance': 'local' | 'external' | 'disabled';
+}
+
 let postQueueUpdate: (type?: string, data?: any) => void = () => {};
 export function setPostQueueUpdate(fn: (type?: string, data?: any) => void) {
   postQueueUpdate = typeof fn === 'function' ? fn : () => {};
@@ -367,6 +374,12 @@ apiRouter.get(
 apiRouter.get(
   '/search',
   ah(async (req, res) => {
+    // Check if local library is enabled
+    const localLibraryEnabled = await getSetting('libraries.local_enabled');
+    if (localLibraryEnabled === false) {
+      return res.status(403).json({ error: 'Local library search is disabled' });
+    }
+    
     const q = String(req.query.q ?? '').trim();
     const kindFilter = req.query.kind as string | undefined;
     const libraryIdFilter = req.query.library_id ? Number(req.query.library_id) : undefined;
@@ -481,6 +494,12 @@ apiRouter.get(
 apiRouter.get(
   '/karaoke-nerds/search',
   ah(async (req, res) => {
+    // Check if external library is enabled
+    const externalLibraryEnabled = await getSetting('libraries.external_enabled');
+    if (externalLibraryEnabled === false) {
+      return res.status(403).json({ error: 'External library search is disabled' });
+    }
+    
     const q = String(req.query.q ?? '').trim();
     if (!q) return res.json([]);
 
@@ -493,6 +512,12 @@ apiRouter.get(
 apiRouter.post(
   '/karaoke-nerds/add',
   ah(async (req, res) => {
+    // Check if external library is enabled
+    const externalLibraryEnabled = await getSetting('libraries.external_enabled');
+    if (externalLibraryEnabled === false) {
+      return res.status(403).json({ error: 'External library is disabled' });
+    }
+    
     const { title, artist, url, requestedBy, keyAdjustment } = req.body;
     
     if (!title || !url) {
@@ -568,6 +593,35 @@ apiRouter.post(
       }
       // Re-throw if it's a different error
       throw err;
+    }
+  })
+);
+
+// Get video metadata from URL (title, etc.)
+apiRouter.get(
+  '/video-metadata',
+  ah(async (req, res) => {
+    const url = String(req.query.url ?? '').trim();
+    if (!url) {
+      return res.status(400).json({ error: 'url parameter required' });
+    }
+
+    try {
+      const { getYouTubeTitle } = await import('../karaoke-nerds');
+      const title = await getYouTubeTitle(url);
+      
+      if (title) {
+        res.json({ title });
+      } else {
+        // Fallback: extract from URL
+        const fallbackTitle = url.split('/').pop()?.split('?')[0] || 'Video';
+        res.json({ title: fallbackTitle });
+      }
+    } catch (err) {
+      console.error('Error fetching video metadata:', err);
+      // Fallback: extract from URL
+      const fallbackTitle = url.split('/').pop()?.split('?')[0] || 'Video';
+      res.json({ title: fallbackTitle });
     }
   })
 );
@@ -712,6 +766,32 @@ apiRouter.post(
     if (trackId == null) return res.status(400).send('trackId required');
     if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
 
+    // Check if the track is from local library or external
+    const trackInfo = await query<{ source: string | null }>(
+      'SELECT source FROM tracks WHERE id = $1',
+      [trackId]
+    );
+    
+    if (trackInfo.rows.length === 0) {
+      return res.status(404).send('Track not found');
+    }
+    
+    const track = trackInfo.rows[0];
+    const isExternal = track.source && track.source !== 'local';
+    
+    // Check library settings
+    if (isExternal) {
+      const externalLibraryEnabled = await getSetting('libraries.external_enabled');
+      if (externalLibraryEnabled === false) {
+        return res.status(403).json({ error: 'External library is disabled' });
+      }
+    } else {
+      const localLibraryEnabled = await getSetting('libraries.local_enabled');
+      if (localLibraryEnabled === false) {
+        return res.status(403).json({ error: 'Local library is disabled' });
+      }
+    }
+
     const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
     const position = (posr.rows[0] as any).p;
 
@@ -750,7 +830,7 @@ apiRouter.post(
     postQueueUpdate('queue.updated');
     
     // Get track details for pre-caching and duration extraction
-    const trackInfo = await query(
+    const trackDetails = await query(
       `SELECT t.id, t.title, t.kind, t.file_mp4, t.file_mp3, t.file_cdg, t.path, t.duration_ms, a.name AS artist
        FROM tracks t
        LEFT JOIN artists a ON a.id = t.artist_id
@@ -758,8 +838,8 @@ apiRouter.post(
       [trackId]
     );
     
-    if (trackInfo.rows.length) {
-      const track = trackInfo.rows[0];
+    if (trackDetails.rows.length) {
+      const track = trackDetails.rows[0];
       
       // If duration_ms is missing, try to extract it
       if (track.duration_ms === null) {
@@ -1469,41 +1549,6 @@ apiRouter.post(
   })
 );
 
-// ===================== DOWNLOADS SETTINGS =====================
-
-// Get downloads settings
-apiRouter.get(
-  '/downloads/settings',
-  ah(async (_req, res) => {
-    const enabled = await getSetting('downloads.enabled');
-    res.json({
-      enabled: enabled === null ? true : enabled === 'true'  // Default to enabled
-    });
-  })
-);
-
-// Update downloads settings (requires admin)
-apiRouter.post(
-  '/downloads/settings',
-  sessionGuard,
-  ah(async (req, res) => {
-    const { enabled } = req.body;
-    
-    if (typeof enabled === 'boolean') {
-      await setSetting('downloads.enabled', String(enabled));
-    }
-    
-    // Broadcast settings update to all clients
-    const currentEnabled = await getSetting('downloads.enabled');
-    
-    postQueueUpdate('downloads.settings', {
-      enabled: currentEnabled === null ? true : currentEnabled === 'true'
-    });
-    
-    res.json({ ok: true });
-  })
-);
-
 // ===================== CLEAR DATABASE (FK-safe, verifiable) =====================
 
 apiRouter.post(
@@ -1535,6 +1580,163 @@ apiRouter.post(
     });
 
     postQueueUpdate('queue.updated');
+  })
+);
+
+// ===================== YT-DLP OPERATIONS =====================
+
+// Get yt-dlp version
+apiRouter.get(
+  '/admin/ytdlp/version',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { getYtDlpVersion } = await import('../ytdlp');
+    const version = await getYtDlpVersion();
+    res.json({ version });
+  })
+);
+
+// Update yt-dlp
+apiRouter.post(
+  '/admin/ytdlp/update',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { updateYtDlp } = await import('../ytdlp');
+    const result = await updateYtDlp();
+    res.json(result);
+  })
+);
+
+// Download video using yt-dlp
+apiRouter.post(
+  '/admin/ytdlp/download',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { url, format, title, artist, brand, discId } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    
+    // Check if downloads are allowed
+    const allowDownloads = await getSetting('ytdlp.allow_downloads');
+    if (allowDownloads === false) {
+      return res.status(403).json({ error: 'Downloads are disabled' });
+    }
+    
+    const { downloadVideo, addDownloadedFileToDatabase } = await import('../ytdlp');
+    
+    // Download the video
+    const result = await downloadVideo(url, { format, title, artist, brand, discId });
+    
+    if (result.success && result.filePath) {
+      // Add the downloaded file to the database
+      const dbResult = await addDownloadedFileToDatabase(result.filePath);
+      
+      res.json({ 
+        ok: true, 
+        filePath: result.filePath,
+        parsed: result.parsed,
+        trackId: dbResult.trackId,
+        message: result.message,
+        dbMessage: dbResult.message
+      });
+    } else {
+      res.status(500).json({ error: result.message });
+    }
+  })
+);
+
+// Scan download location
+apiRouter.post(
+  '/admin/ytdlp/scan',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { scanDownloadLocation } = await import('../ytdlp');
+    const result = await scanDownloadLocation();
+    res.json(result);
+  })
+);
+
+// Get video info
+apiRouter.post(
+  '/admin/ytdlp/info',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { url } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    
+    const { getVideoInfo } = await import('../ytdlp');
+    try {
+      const info = await getVideoInfo(url);
+      res.json({ ok: true, info });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  })
+);
+
+// ===================== SETTINGS MANAGEMENT =====================
+
+// Get public settings (no authentication required - for guest features like Requests page)
+apiRouter.get(
+  '/settings/public',
+  ah(async (req, res) => {
+    // Only return settings that are safe for public access
+    const publicKeys: Array<keyof PublicSettings> = [
+      'libraries.local_enabled',
+      'libraries.external_enabled',
+      'requests.acceptance'
+    ];
+    
+    const result = await query('SELECT key, value FROM settings WHERE key = ANY($1)', [publicKeys]);
+    const settings: Partial<PublicSettings> = {};
+    for (const row of result.rows) {
+      settings[row.key as keyof PublicSettings] = row.value;
+    }
+    
+    // Set defaults for missing settings
+    const completeSettings: PublicSettings = {
+      'libraries.local_enabled': settings['libraries.local_enabled'] ?? true,
+      'libraries.external_enabled': settings['libraries.external_enabled'] ?? true,
+      'requests.acceptance': settings['requests.acceptance'] ?? 'local'
+    };
+    
+    res.json(completeSettings);
+  })
+);
+
+// Get all settings (admin only)
+apiRouter.get(
+  '/admin/settings',
+  sessionGuard,
+  ah(async (req, res) => {
+    const result = await query('SELECT key, value FROM settings ORDER BY key');
+    const settings: Record<string, any> = {};
+    for (const row of result.rows) {
+      settings[row.key] = row.value;
+    }
+    res.json(settings);
+  })
+);
+
+// Update a setting (admin only)
+apiRouter.put(
+  '/admin/settings/:key',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { key } = req.params;
+    const { value } = req.body;
+    
+    if (!key) {
+      return res.status(400).json({ error: 'Setting key is required' });
+    }
+    
+    await setSetting(key, value);
+    res.json({ ok: true });
   })
 );
 
