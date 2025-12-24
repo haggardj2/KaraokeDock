@@ -30,6 +30,7 @@ export default function Host() {
   const [busy, setBusy] = useState(false)
   const [autoPlay, setAutoPlay] = useState(false)
   const [autoPlayDelay, setAutoPlayDelay] = useState(5)
+  const [downloadsEnabled, setDownloadsEnabled] = useState(true)
   const [currentTime, setCurrentTime] = useState(0)
   const [actualDuration, setActualDuration] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -210,6 +211,34 @@ export default function Host() {
       .catch(() => {})
   }, [])
 
+  // Fetch initial downloads settings
+  useEffect(() => {
+    api('/api/downloads/settings')
+      .then((settings: { enabled: boolean }) => {
+        setDownloadsEnabled(settings.enabled)
+        // If downloads are disabled and we're in karaoke-nerds mode, switch to local
+        if (!settings.enabled && replaceSearchMode === 'karaoke-nerds') {
+          setReplaceSearchMode('local')
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch downloads settings:', err)
+      })
+  }, [])
+
+  async function updateDownloadsSettings(enabled: boolean) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    try {
+      await api('/api/downloads/settings', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ enabled })
+      })
+    } catch (err) {
+      console.error('Failed to update downloads settings:', err)
+    }
+  }
+
   async function updateOverlaySettings(visible: boolean, height: number, qrSizeVal: number, message?: string) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     try {
@@ -281,6 +310,14 @@ export default function Host() {
               }
               if (typeof msg.delay === 'number') {
                 setAutoPlayDelay(msg.delay)
+              }
+            } else if (msg.type === 'downloads.settings') {
+              if (typeof msg.enabled === 'boolean') {
+                setDownloadsEnabled(msg.enabled)
+                // If downloads are disabled and we're in karaoke-nerds mode, switch to local
+                if (!msg.enabled) {
+                  setReplaceSearchMode('local')
+                }
               }
             }
           } catch {}
@@ -1808,6 +1845,79 @@ function closeDetails(e: React.SyntheticEvent) {
                     )}
                   </div>
 
+                  {/* Downloads Settings */}
+                  <div className="settings-section">
+                    <div className="settings-title">External Songs Settings</div>
+                    <div style={{ 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'space-between',
+                      padding: '12px 0'
+                    }}>
+                      <span style={{ fontSize: '15px', fontWeight: '500' }}>Enable External Songs (YouTube)</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        {/* Toggle Switch with Inline Styles */}
+                        <label style={{ 
+                          position: 'relative', 
+                          display: 'inline-block', 
+                          width: '48px', 
+                          height: '24px' 
+                        }}>
+                          <input 
+                            type="checkbox" 
+                            checked={downloadsEnabled} 
+                            onChange={e => {
+                              const newEnabled = e.target.checked
+                              setDownloadsEnabled(newEnabled)
+                              updateDownloadsSettings(newEnabled)
+                            }}
+                            style={{ opacity: 0, width: 0, height: 0 }}
+                          />
+                          <span style={{
+                            position: 'absolute',
+                            cursor: 'pointer',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            backgroundColor: downloadsEnabled ? '#10b981' : '#374151',
+                            transition: '.4s',
+                            borderRadius: '34px'
+                          }}>
+                            <span style={{
+                              position: 'absolute',
+                              content: '',
+                              height: '16px',
+                              width: '16px',
+                              left: downloadsEnabled ? '28px' : '4px',
+                              bottom: '4px',
+                              backgroundColor: 'white',
+                              transition: '.4s',
+                              borderRadius: '50%'
+                            }}></span>
+                          </span>
+                        </label>
+                        <span style={{ 
+                          color: downloadsEnabled ? 'var(--color-success)' : 'var(--color-text-secondary)', 
+                          fontSize: '14px',
+                          fontWeight: '500',
+                          minWidth: '60px'
+                        }}>
+                          {downloadsEnabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </div>
+                    </div>
+                    <p style={{ 
+                      margin: '8px 0 0 0', 
+                      fontSize: '13px', 
+                      color: 'var(--color-text-secondary)',
+                      lineHeight: '1.5'
+                    }}>
+                      When enabled, allows adding songs from external sources like Karaoke Nerds (YouTube). 
+                      When disabled, only local library songs can be added.
+                    </p>
+                  </div>
+
                   {/* Overlay Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Overlay Settings</div>
@@ -2039,37 +2149,39 @@ function closeDetails(e: React.SyntheticEvent) {
                   </div>
                   
                   {/* Search Mode Toggle - Updated to not clear search */}
-                  <div className="search-mode-toggle">
-                    <button 
-                      className={`mode-button ${replaceSearchMode === 'local' ? 'active' : ''}`}
-                      onClick={() => setReplaceSearchMode('local')}
-                    >
-                      <img
-                        src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
-                        alt="Local Library"
-                        className="mode-icon"
-                        style={{ width: "20px", height: "20px", marginRight: "6px" }}
-                      />
-                      Local Library
-                    </button>
+                  {downloadsEnabled && (
+                    <div className="search-mode-toggle">
+                      <button 
+                        className={`mode-button ${replaceSearchMode === 'local' ? 'active' : ''}`}
+                        onClick={() => setReplaceSearchMode('local')}
+                      >
+                        <img
+                          src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
+                          alt="Local Library"
+                          className="mode-icon"
+                          style={{ width: "20px", height: "20px", marginRight: "6px" }}
+                        />
+                        Local Library
+                      </button>
 
-                    <button 
-                      className={`mode-button ${replaceSearchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
-                      onClick={() => setReplaceSearchMode('karaoke-nerds')}
-                    >
-                      <img
-                        src="https://karaokenerds.com/Content/Icons/favicon.ico"
-                        alt="Karaoke Nerds"
-                        className="mode-icon"
+                      <button 
+                        className={`mode-button ${replaceSearchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
+                        onClick={() => setReplaceSearchMode('karaoke-nerds')}
+                      >
+                        <img
+                          src="https://karaokenerds.com/Content/Icons/favicon.ico"
+                          alt="Karaoke Nerds"
+                          className="mode-icon"
                         style={{ width: "20px", height: "20px", marginRight: "6px" }}
                       />
                       Karaoke Nerds
                     </button>
                   </div>
+                  )}
 
                   <input
                     className="search-input"
-                    placeholder={replaceSearchMode === 'local' ? "Search local library..." : "Search Karaoke Nerds..."}
+                    placeholder={downloadsEnabled && replaceSearchMode === 'karaoke-nerds' ? "Search Karaoke Nerds..." : "Search local library..."}
                     value={searchQuery}
                     onChange={e => setSearchQuery(e.target.value)}
                     autoFocus
