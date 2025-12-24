@@ -216,8 +216,14 @@ export default function Host() {
     api('/api/downloads/settings')
       .then((settings: { enabled: boolean }) => {
         setDownloadsEnabled(settings.enabled)
+        // If downloads are disabled and we're in karaoke-nerds mode, switch to local
+        if (!settings.enabled && replaceSearchMode === 'karaoke-nerds') {
+          setReplaceSearchMode('local')
+        }
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.error('Failed to fetch downloads settings:', err)
+      })
   }, [])
 
   async function updateDownloadsSettings(enabled: boolean) {
@@ -308,6 +314,10 @@ export default function Host() {
             } else if (msg.type === 'downloads.settings') {
               if (typeof msg.enabled === 'boolean') {
                 setDownloadsEnabled(msg.enabled)
+                // If downloads are disabled and we're in karaoke-nerds mode, switch to local
+                if (!msg.enabled) {
+                  setReplaceSearchMode('local')
+                }
               }
             }
           } catch {}

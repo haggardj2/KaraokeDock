@@ -19,7 +19,7 @@ export function parseFromFilename(basename: string): ParsedMeta {
   // First normalize to standard " - " format
   const normalized = base
     .replace(/\s*[–—]\s*/g, ' - ')  // Replace en/em dashes with standard dash
-    .replace(/\s+-\s+/g, ' - ');     // Normalize spacing around dashes
+    .replace(/\s*-\s*/g, ' - ');     // Normalize spacing around regular hyphens
   const parts = normalized.split(' - ').map(p => p.trim()).filter(Boolean);
 
   let discId: string | null = null;
