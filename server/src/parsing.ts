@@ -15,7 +15,12 @@ export type ParsedMeta = {
  */
 export function parseFromFilename(basename: string): ParsedMeta {
   const base = basename.replace(/\.[^.]+$/i, '').trim(); // remove extension
-  const parts = base.split(' - ').map(p => p.trim()).filter(Boolean);
+  // Handle various dash types: hyphen-minus (-), en dash (–), em dash (—)
+  // First normalize to standard " - " format
+  const normalized = base
+    .replace(/\s*[–—]\s*/g, ' - ')  // Replace en/em dashes with standard dash
+    .replace(/\s+-\s+/g, ' - ');     // Normalize spacing around dashes
+  const parts = normalized.split(' - ').map(p => p.trim()).filter(Boolean);
 
   let discId: string | null = null;
   let artist: string | null = null;
@@ -50,7 +55,12 @@ export function parseFromFilename(basename: string): ParsedMeta {
       'Pioneer',
       'DK',
       'Nutech',
-      'All Star'
+      'All Star',
+      'Punk Media Karaoke',
+      'Media Karaoke',
+      'Punk',
+      'Stellar',
+      'Party Tyme'
     ];
     
     const looksLikeLabel = knownLabels.some(label => 

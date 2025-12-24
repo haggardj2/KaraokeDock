@@ -1469,6 +1469,41 @@ apiRouter.post(
   })
 );
 
+// ===================== DOWNLOADS SETTINGS =====================
+
+// Get downloads settings
+apiRouter.get(
+  '/downloads/settings',
+  ah(async (_req, res) => {
+    const enabled = await getSetting('downloads.enabled');
+    res.json({
+      enabled: enabled === null ? true : enabled === 'true'  // Default to enabled
+    });
+  })
+);
+
+// Update downloads settings (requires admin)
+apiRouter.post(
+  '/downloads/settings',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { enabled } = req.body;
+    
+    if (typeof enabled === 'boolean') {
+      await setSetting('downloads.enabled', String(enabled));
+    }
+    
+    // Broadcast settings update to all clients
+    const currentEnabled = await getSetting('downloads.enabled');
+    
+    postQueueUpdate('downloads.settings', {
+      enabled: currentEnabled === null ? true : currentEnabled === 'true'
+    });
+    
+    res.json({ ok: true });
+  })
+);
+
 // ===================== CLEAR DATABASE (FK-safe, verifiable) =====================
 
 apiRouter.post(
