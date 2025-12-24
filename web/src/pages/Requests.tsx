@@ -27,7 +27,6 @@ export default function Requests() {
   const [requestedBy, setRequestedBy] = useState('')
   const [keyAdjustments, setKeyAdjustments] = useState<Map<string, number>>(new Map())
   const [searchMode, setSearchMode] = useState<'local' | 'karaoke-nerds'>('local')
-  const [downloadsEnabled, setDownloadsEnabled] = useState(true)
   const [localRows, setLocalRows] = useState<SearchRow[]>([])
   const [karaokeNerdsRows, setKaraokeNerdsRows] = useState<KaraokeNerdsTrack[]>([])
   const [busy, setBusy] = useState(false)
@@ -117,19 +116,6 @@ export default function Requests() {
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, []);
-
-  // Fetch downloads settings
-  useEffect(() => {
-    api('/api/downloads/settings')
-      .then((settings: { enabled: boolean }) => {
-        setDownloadsEnabled(settings.enabled)
-        // If downloads are disabled and we're in karaoke-nerds mode, switch to local
-        if (!settings.enabled && searchMode === 'karaoke-nerds') {
-          setSearchMode('local')
-        }
-      })
-      .catch(() => {})
-  }, [])
 
 
   useLayoutEffect(() => {
@@ -1841,19 +1827,17 @@ export default function Requests() {
               />
               <span>Local Library</span>
             </button>
-            {downloadsEnabled && (
-              <button
-                className={`mode-button ${searchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
-                onClick={() => setSearchMode('karaoke-nerds')}
-              >
-                <img 
-                  src="https://karaokenerds.com/Content/Icons/favicon.ico" 
-                  alt="Karaoke Nerds"
-                  style={{ width: "20px", height: "20px", marginRight: "6px" }}
-                />
-                <span>Karaoke Nerds</span>
-              </button>
-            )}
+            <button
+              className={`mode-button ${searchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
+              onClick={() => setSearchMode('karaoke-nerds')}
+            >
+              <img 
+                src="https://karaokenerds.com/Content/Icons/favicon.ico" 
+                alt="Karaoke Nerds"
+                style={{ width: "20px", height: "20px", marginRight: "6px" }}
+              />
+              <span>Karaoke Nerds</span>
+            </button>
           </div>
 
           {/* Search Input - Fixed with Clear Button Inside */}
