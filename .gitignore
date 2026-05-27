@@ -1,13 +1,2 @@
-media/
-server/node_modules/
-
-dist/
-*.log
-.env
-
-# Compiled JavaScript files from TypeScript (tsx -> js)
-# Only ignore in specific directories where we use TypeScript
-web/node_modules/
-web/src/pages/*.js
-web/src/components/*.js
-web/src/*.js
+src/server/node_modules/
+src/web/node_modules/

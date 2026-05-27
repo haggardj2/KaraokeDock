@@ -1,9 +1,9 @@
-# 🎤 Docker Web Karaoke
+# Docker Web Karaoke
 
 A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
 
 
-## 📋 Table of Contents
+##  Table of Contents
 
 - [Features](#-features)
 - [Web Pages Overview](#-web-pages-overview)
@@ -13,6 +13,17 @@ A modern, full-featured web-based karaoke system with support for multiple media
 - [Development](#-development)
 - [Troubleshooting](#-troubleshooting)
 
+## Overview
+
+Web Karaoke MVP is built for hosts who need reliable show control and for singers who need fast, mobile-friendly requests. The system combines local library playback (MP4/CDG+MP3/ZIP), external song sources, and live queue sync between host, player, and request pages.
+
+Recent platform updates add:
+
+- 🔐 **OIDC/SSO authentication** with auto-provisioning options, role defaults, and optional password-login fallback
+- 🔄 **Advanced rotation engine** with multiple rotation types (strict round robin, least recently sung, signup order, song-queue-only, manual, and hybrid) plus host overrides
+- 🎶 **Break music management** with playlists, active playlist sync, volume control, and crossfade settings between karaoke tracks
+- 🖥️ **Player/overlay controls** for QR visibility, ticker controls, queue privacy options, and live settings propagation over WebSocket
+
 ## ✨ Features
 
 - 🎤 **Multi-format support**: MP4 videos, CDG+MP3 files (raw and zipped)
@@ -20,15 +31,17 @@ A modern, full-featured web-based karaoke system with support for multiple media
 - 📱 **Mobile-friendly interface** with QR code for easy guest access
 - 🌐 **External karaoke integration** (Karaoke Nerds)
 - ⚡ **Auto-play mode** with configurable delays
+- 🎚️ **Configurable rotation policies** with host controls
+- 🎶 **Break music playlists** with crossfade and live controls
 - 🎵 **CDG to MP4 streaming** transcoding on-the-fly
-- 🔐 **Session-based authentication** with secure password management
+- 🔐 **Flexible authentication**: local sessions + OIDC/SSO
 - 📊 **Admin dashboard** for library management and statistics
 - 🎯 **Host panel** for queue control and playback management
 
-## 📱 Web Pages Overview
-
+## Web Pages Overview
+---
 ### Requests Page
-**URL:** `http://your-server:5173/requests`
+**URL:** `http://your-server:5173/`
 
 The main interface for guests to browse and request songs. Fully mobile-responsive and accessible via QR code.
 
@@ -42,7 +55,7 @@ The main interface for guests to browse and request songs. Fully mobile-responsi
 - Switch to Karaoke Nerds for online songs
 
 ### Karaoke Nerds Integration
-**URL:** `http://your-server:5173/requests` (switch to Karaoke Nerds tab)
+**URL:** `http://your-server:5173/` (switch to Karaoke Nerds tab)
 
 Access thousands of online karaoke tracks from Karaoke Nerds directly within the app.
 
@@ -53,7 +66,7 @@ Access thousands of online karaoke tracks from Karaoke Nerds directly within the
 - Preview and add external songs
 - Seamless integration with your queue
 - No need to download files
-
+---
 ### Host Panel
 **URL:** `http://your-server:5173/host`
 
@@ -63,13 +76,18 @@ The control center for managing the karaoke session.
 
 **Functions:**
 - View real-time queue updates
-- Play, pause, skip, and stop songs
+- Play, skip, and stop songs
 - Manage queue order (reorder, remove songs)
 - Enable auto-play mode
-- Configure playback settings
-- Access QR code for guest requests
-- Password-protected access
+- Manually add songs to the queue
 
+#### Manage break music
+![Break Settings](screenshots/break_mgmt.png)
+
+#### Configure playback settings
+![Player Settings](screenshots/player_mgmt.png)
+
+---
 ### Player Page
 **URL:** `http://your-server:5173/player`
 
@@ -83,8 +101,8 @@ Full-screen karaoke player optimized for display on TVs or projectors.
 - Show scrolling text when idle
 - QR code display for song requests
 - Automatic queue progression
-- Support for MP4, CDG+MP3, and external URLs from KaraokeNerds.com
 
+---
 ### Admin Dashboard
 **URL:** `http://your-server:5173/admin`
 
@@ -95,60 +113,90 @@ Management interface for system configuration and media libraries.
 **Functions:**
 - View system statistics (artists, tracks, queue)
 - Add and manage media libraries
-- Scan directories for karaoke files
-- Configure authentication credentials
-- Database management tools
-- System health monitoring
+- Add and manage break music
+- Scan directories for karaoke files & break music
+- User manager
+- OIDC/SSO settings
 
-## 🚀 Quick Start with Docker
+---
+
+## Quick Start with Docker
 
 ### Prerequisites
 
-- **Docker** (version 20.10 or higher)
-- **Docker Compose** (version 2.0 or higher)
-- Karaoke media files (MP4, CDG+MP3, or ZIP files)
+- A Linux machine or WSL that can run Docker
+- Karaoke media files (MP4, CDG+MP3, or ZIP files) - optional
 
 ### Installation Steps
 
-1. **Clone the repository:**
+1. **Install Docker and the Docker Compose plugin.**
+
+   Follow the official Docker installation guide for your platform:
+   - [Docker Engine](https://docs.docker.com/engine/install/)
+   - [Docker Compose plugin](https://docs.docker.com/compose/install/)
+
+   Confirm both are available:
    ```bash
-   git clone https://github.com/haggardj2/web-karaoke-mvp.git
-   cd web-karaoke-mvp
+   docker --version
+   docker compose version
    ```
 
-2. **Copy the environment file:**
+2. **Create a `docker-karaoke` folder** for your deployment files:
+   ```bash
+   mkdir -p ~/docker-karaoke
+   cd ~/docker-karaoke
+   ```
+
+3. **Download or copy `docker-compose.yml` and `.env.example` into the `docker-karaoke` folder.**
+
+   Download them directly:
+   ```bash
+   curl -O https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/docker-compose.yml
+   curl -O https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/.env.example
+   ```
+
+   Or copy them from a local checkout:
+   ```bash
+   cp /path/to/docker-karaoke/docker-compose.yml .
+   cp /path/to/docker-karaoke/.env.example .
+   ```
+
+4. **Create `.env` from the new environment file:**
    ```bash
    cp .env.example .env
    ```
 
-3. **Edit the `.env` file** with your configuration:
+5. **Edit `.env`** with your host paths and network settings:
    ```bash
-   nano .env  # or use your preferred editor
+   nano .env
    ```
 
-   At minimum, update these variables:
+   At minimum, review and update these values from `.env.example`:
    ```env
-
-   # Path to where you want the Postgres DB to be saved
-   DB_PATH=/home/user/web-karaoke-mvp/db
-   
-   # Path to your karaoke files on the host machine
-   MEDIA_PATH=./media/local
-   
-   # Your server's IP address or hostname
-   WEB_APP_URL=http://192.168.1.100:5173
-   VITE_API_BASE=http://192.168.1.100:5174
-   ORIGIN=http://192.168.1.100:5173,http://localhost:5173
+   POSTGRES_PASSWORD=karaoke
+   DB_PATH=/home/user/docker-karaoke/db
+   MEDIA_PATH=/mnt/karaoke/Karaoke Tracks/
+   DOWNLOAD_PATH=/mnt/karaoke/downloads
+   BREAK_PATH=/mnt/karaoke/Break Music
+   VITE_API_BASE=http://localhost:5174
+   ORIGIN=http://localhost:5173,http://127.0.0.1:5173
+   TRUST_PROXY=1
    ```
 
-6. **Start the application:**
+6. **Create the host directories you configured** if they do not already exist:
    ```bash
-   docker compose up -d
+   mkdir -p /home/user/docker-karaoke/db
+   mkdir -p /mnt/karaoke/downloads
    ```
 
-7. **Check container status:**
+7. **Start the stack with `docker-compose.yml`:**
    ```bash
-   docker compose ps
+   docker compose -f docker-compose.yml up -d
+   ```
+
+8. **Check container status:**
+   ```bash
+   docker compose -f docker-compose.yml ps
    ```
 
    You should see three running containers:
@@ -156,39 +204,14 @@ Management interface for system configuration and media libraries.
    - `karaoke-api` (API Server)
    - `karaoke-db` (PostgreSQL Database)
 
-8. **Access the application:**
-   - Web Interface: `http://localhost:5173` (or your server IP)
-   - Admin Panel: `http://localhost:5173/admin`
-   - Host Panel: `http://localhost:5173/host`
-   - Player: `http://localhost:5173/player`
+9. **Access the application:**
+   - Web Interface: `http://your-server:5173`
+   - Admin Panel: `http://your-server:5173/admin`
+   - Host Panel: `http://your-server:5173/host`
+   - Player: `http://your-server:5173/player`
 
-### Docker Compose Architecture
 
-The application runs three Docker containers:
-
-```
-----------------     --------------------     ------------------
-|  karaoke-web |     |    karaoke-api   |     |   karaoke-db   |
-|  (Frontend)  |---> |    (Backend)     |---> |  (PostgreSQL)  | 
-|  Port: 5173  |     |    Port: 5174    |     |   Port: 5432   | 
-----------------     --------------------     ------------------ 
-```
-
-**Container Details:**
-
-- **karaoke-web**: React + TypeScript frontend served via Vite
-  - Image: `haggardj2/karaoke-web:latest`
-  - Exposed port: 5173
-
-- **karaoke-api**: Node.js + Express backend
-  - Image: `haggardj2/karaoke-api:latest`
-  - Exposed port: 5174
-  - Mounts: `MEDIA_PATH` → `/media` inside container
-
-- **karaoke-db**: PostgreSQL 16 database
-  - Image: `postgres:18`
-  - Exposed port: 5432
-
+---
 ### Managing the Application
 
 **View logs:**
@@ -222,8 +245,8 @@ docker compose restart
 docker compose -f docker-compose.build.yml build
 docker compose -f docker-compose.build.yml up -d
 ```
-
-## ⚙️ Configuration
+---
+## Configuration
 
 ### Environment Variables
 
@@ -232,14 +255,14 @@ All configuration is managed through the `.env` file. Key variables:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `MEDIA_PATH` | Path to karaoke files on host | `./media/local` or `/mnt/karaoke` |
-| `WEB_APP_URL` | Public URL for QR codes | `http://192.168.1.100:5173` |
-| `VITE_API_BASE` | API server URL for frontend | `http://192.168.1.100:5174` |
-| `ORIGIN` | CORS allowed origins (comma-separated) | `http://192.168.1.100:5173,http://localhost:5173` |
+| `WEB_APP_URL` | Public URL for QR codes | `http://your-server-ip:5173` or `https://karaoke.example.com` |
+| `VITE_API_BASE` | API server URL for frontend | `http://your-server-ip:5174`  or `https://api.example.com` |
+| `ORIGIN` | CORS allowed origins (comma-separated) | `http://your-server-ip:5173`, or `https://karaoke.example.com`,`https://api.example.com` |
 | `POSTGRES_PASSWORD` | Database password | `karaoke` (change in production) |
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://karaoke:karaoke@db:5432/karaoke` |
 
 **Important Notes:**
-- Replace `localhost` with your server's IP address for network access
+- Replace `your-server-ip` with your server's IP address for network access
 - Ensure `ORIGIN` includes all URLs where the web app will be accessed
 - The `MEDIA_PATH` on the host maps to `/media` inside the API container
 - Change default passwords before deploying to production
@@ -248,12 +271,20 @@ All configuration is managed through the `.env` file. Key variables:
 
 To access from other devices on your network:
 
-1. Set `WEB_APP_URL` to your server's IP: `http://192.168.1.100:5173`
-2. Set `VITE_API_BASE` to your server's IP: `http://192.168.1.100:5174`
+1. Set `WEB_APP_URL` to your server's IP: `http://your-server-ip:5173`
+2. Set `VITE_API_BASE` to your server's IP: `http://your-server-ip:5174`
 3. Update `ORIGIN` to include your server's IP
 4. Ensure firewall allows ports 5173 and 5174
 
-## 🎯 First-Time Setup
+To setup reverse proxy for SSL termination:
+
+1. Set `WEB_APP_URL` to your to your FQDN: `https://karaoke.example.com`
+2. Update `ORIGIN` to include your to include the URLs for the api & web servers `https://api.karaoke.example.com`,`https://karaoke.example.com`
+3. Set `VITE_API_BASE` to your URL for the API: `https://api.karaoke.example.com`
+4. Ensure your proxy points to the correct ports
+
+---
+## First-Time Setup
 
 After starting the containers for the first time:
 
@@ -282,16 +313,91 @@ After starting the containers for the first time:
 6. **Access the Host panel:**
    - Go to `http://your-server:5173/host`
    - Login with your password
-   - Share the QR code with guests
 
-7. **Done!** Guests can now request songs via the Requests page
+7. **Open a player window**
+   - Open a browser tab to `http://your-server-ip:5173/player`
+   - If serving from an Android TV, you can use a [kiosk browser app](https://play.google.com/store/apps/details?id=de.ozerov.fully&hl=en_US)
 
-## 🏗️ Architecture
+8. **Done!** Guests can now request songs via the Requests page
+
+---
+## Troubleshooting
+
+### Common Issues
+
+**QR code shows localhost instead of server IP:**
+- Solution: Set `WEB_APP_URL` in `.env` to your server's IP address
+
+**Cannot connect to API from other devices:**
+- Solution: Set `VITE_API_BASE` to your server's IP address
+- Check firewall allows port 5174
+
+**CORS errors in browser console:**
+- Solution: Add your access URL to `ORIGIN` in `.env`
+
+**No songs appearing after scan:**
+- Check `MEDIA_PATH` points to correct directory
+- Verify files are in supported formats
+- Check API logs: `docker compose logs karaoke-api`
+
+**Database connection errors:**
+- Wait 10-15 seconds for database to initialize on first start
+- Restart API container: `docker compose restart karaoke-api`
+
+**Permission denied errors:**
+- Ensure media files are readable by Docker
+- On Linux with SELinux, the `:Z` flag in volumes may help
+
+
+**Forgot Login**
+```bash
+# Run password reset helper:
+docker exec -it karaoke-api npm run reset-credentials 
+# Will reset to default admin/changeme-password if no flags are set. 
+# Alternatively, it can be ran with desired credentials ie.
+docker exec -it karaoke-api npm run reset-credentials --username host --password supersecret"
+```
+
+**Reenable Password Login**
+```bash
+# Run the re-enable-login helper
+docker exec -it karaoke-api npm run re-enable-login
+```
+
+---
+### Docker Compose Architecture
+
+The application runs three Docker containers:
+
+```
+----------------     --------------------     ------------------
+|  karaoke-web |     |    karaoke-api   |     |   karaoke-db   |
+|  (Frontend)  |---> |    (Backend)     |---> |  (PostgreSQL)  | 
+|  Port: 5173  |     |    Port: 5174    |     |   Port: 5432   | 
+----------------     --------------------     ------------------ 
+```
+
+**Container Details:**
+
+- **karaoke-web**: React + TypeScript frontend served via Vite
+  - Image: `haggardj2/karaoke-web:latest`
+  - Exposed port: 5173
+
+- **karaoke-api**: Node.js + Express backend
+  - Image: `haggardj2/karaoke-api:latest`
+  - Exposed port: 5174
+  - Mounts: `MEDIA_PATH` → `/media` inside container
+
+- **karaoke-db**: PostgreSQL 16 database
+  - Image: `postgres:18`
+  - Exposed port: 5432
+---
+## Architecture
 
 ### Technology Stack
 
 **Frontend:**
-- React 18 with TypeScript
+- React 19 with TypeScript
 - Vite for development and building
 - React Router for navigation
 - WebSocket for real-time updates
@@ -301,6 +407,7 @@ After starting the containers for the first time:
 - TypeScript for type safety
 - PostgreSQL for data persistence
 - WebSocket for live queue sync
+- Recompiled FFmpeg with rubberband for pitch adjustment
 - FFmpeg for CDG to MP4 transcoding
 
 **Infrastructure:**
@@ -313,6 +420,7 @@ After starting the containers for the first time:
 - **MP4 videos**: Direct playback
 - **CDG+MP3 pairs**: Transcoded to MP4 on-the-fly
 - **ZIP archives**: Automatically extracted and processed
+- **Break Music**: mp3,flac,opus,wav
 - **External URLs**: From Karaoke Nerds and similar services
 
 ### Data Flow
@@ -324,15 +432,16 @@ After starting the containers for the first time:
 5. Player page displays current song
 6. CDG files transcoded to MP4 in real-time if needed
 
-## 💻 Development
+---
+## Development
 
 ### Local Development (without Docker)
 
 **Server:**
 ```bash
-cd server
+cd src/server
 npm install
-cp ../.env.example .env
+cp ../../.env.example .env
 # Edit .env with local settings
 npm run migrate
 npm run dev
@@ -340,7 +449,7 @@ npm run dev
 
 **Web:**
 ```bash
-cd web
+cd src/web
 npm install
 npm run dev
 ```
@@ -371,41 +480,8 @@ docker compose -f docker-compose.build.yml build web --no-cache
 
 ```
 
-### Database Migrations
 
-```bash
-cd server
-npm run migrate
-```
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-**QR code shows localhost instead of server IP:**
-- Solution: Set `WEB_APP_URL` in `.env` to your server's IP address
-
-**Cannot connect to API from other devices:**
-- Solution: Set `VITE_API_BASE` to your server's IP address
-- Check firewall allows port 5174
-
-**CORS errors in browser console:**
-- Solution: Add your access URL to `ORIGIN` in `.env`
-
-**No songs appearing after scan:**
-- Check `MEDIA_PATH` points to correct directory
-- Verify files are in supported formats
-- Check API logs: `docker compose logs karaoke-api`
-
-**Database connection errors:**
-- Wait 10-15 seconds for database to initialize on first start
-- Restart API container: `docker compose restart karaoke-api`
-
-**Permission denied errors:**
-- Ensure media files are readable by Docker
-- On Linux with SELinux, the `:Z` flag in volumes may help
-
-### Viewing Logs
+## Viewing Logs
 
 ```bash
 
@@ -415,7 +491,7 @@ docker compose logs -f karaoke-web
 docker compose logs -f karaoke-db
 ```
 
-## 🔐 Security Considerations
+## Security Considerations
 
 - **Change default passwords** immediately after first login
 - **Change database password** in production environments
@@ -423,15 +499,15 @@ docker compose logs -f karaoke-db
 - Keep Docker images updated: `docker compose pull`
 - Restrict network access to admin and host pages if needed
 
-## 📄 License
+## License
 
 See [LICENSE](LICENSE) file for details.
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit issues or pull requests.
 
-## 📮 Support
+## Support
 
 For issues and questions:
 - Open an issue on GitHub

@@ -1,3 +1,8 @@
+# docker-compose.build.yml
+# Use this file for local development and building images
+# Run with: docker compose -f docker-compose.build.yml up --build
+
+# Requires environment variables from .env (see .env.example)
 services:
   db:
     image: postgres:18-alpine
@@ -38,7 +43,9 @@ services:
     restart: unless-stopped
 
   api:
-    image: haggardj2/karaoke-api:latest
+    build:
+      context: .src/server
+      dockerfile: Dockerfile
     container_name: karaoke-api
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
@@ -59,7 +66,9 @@ services:
     command: ["sh", "-c", "npm run migrate && npm start"]
 
   web:
-    image: haggardj2/karaoke-web:latest
+    build:
+      context: .src/web
+      dockerfile: Dockerfile
     container_name: karaoke-web
     environment:
       VITE_API_BASE: ${VITE_API_BASE}

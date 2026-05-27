@@ -1,0 +1,3577 @@
+// server/src/routes/api.ts
+import express from 'express';
+import path from 'path';
+import fs from 'fs/promises';
+import { EventEmitter } from 'events';
+import {
+  query,
+  ensureHelpfulIndexes,
+  getSetting,
+  setSetting,
+  createSession,
+  validateSession,
+  validateSessionInfo,
+  deleteSession,
+  cleanupExpiredSessions,
+  hashPassword,
+  verifyPassword,
+  ensureAdminUser,
+  getUserByUsername,
+  createUser,
+  getUserByOidcSubject,
+  listUsers,
+  getUserById,
+  updateUser,
+  deleteUser,
+  countAdminUsers
+} from '../db';
+import {
+  scanPath,
+  getMediaDuration,
+  getZipMp3Duration,
+  extractTrackDuration,
+  extractAudioMetadata,
+  isBreakMusicFile
+} from '../scanner';
+import { parseBreakMusicFromFilename, parseFromFilename } from '../parsing';
+import QRCode from 'qrcode';
+import { searchKaraokeNerds } from '../karaoke-nerds';
+import crypto from 'crypto';
+import * as oidc from 'openid-client';
+import { authLimiter, searchLimiter, queueLimiter } from '../middleware/rateLimiters';
+import { setLogLevel, logger, type LogLevel } from '../logger';
+import { findOrCreateSinger, ensureSingerInActiveRotation } from '../queueIdentity.js';
+import {
+  getQueueState,
+  getSingerHistory,
+  updateQueueItemStatus,
+  reorderSingerQueue,
+} from '../queueState.js';
+import { recalculateSingerStats } from '../singerStats.js';
+
+ensureHelpfulIndexes().catch(e => console.error('ensureHelpfulIndexes failed', e));
+// Migrate legacy admin credentials to users table on startup
+ensureAdminUser().catch(e => console.error('ensureAdminUser failed', e));
+
+export const apiRouter = express.Router();
+
+// Type for public settings that don't require authentication
+interface PublicSettings {
+  'libraries.local_enabled': boolean;
+  'libraries.external_enabled': boolean;
+  'requests.acceptance': 'local' | 'external' | 'disabled';
+}
+
+const DEFAULT_BREAK_PLAYLISTS_FOLDER = '/media/playlists';
+
+let postQueueUpdate: (type?: string, data?: any) => void = () => {};
+export function setPostQueueUpdate(fn: (type?: string, data?: any) => void) {
+  postQueueUpdate = typeof fn === 'function' ? fn : () => {};
+}
+
+const ah =
+  (fn: express.RequestHandler): express.RequestHandler =>
+  (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+
+// Session-based authentication guard (validates session, attaches user info)
+const sessionGuard: express.RequestHandler = async (req, res, next) => {
+  const token = req.headers['x-session-token'] as string;
+  if (!token) {
+    res.status(403).json({ error: 'Forbidden: No session token provided' });
+    return;
+  }
+  
+  try {
+    const info = await validateSessionInfo(token);
+    if (info.valid) {
+      (req as any).user = { userId: info.userId, role: info.role };
+      next();
+      return;
+    }
+    
+    res.status(403).json({ error: 'Forbidden: Invalid or expired session' });
+  } catch (err) {
+    console.error('sessionGuard error:', err);
+    res.status(403).json({ error: 'Forbidden: Authentication error' });
+  }
+};
+
+// Admin-only guard: requires a valid session AND admin role
+const adminGuard: express.RequestHandler = async (req, res, next) => {
+  const token = req.headers['x-session-token'] as string;
+  if (!token) {
+    res.status(403).json({ error: 'Forbidden: No session token provided' });
+    return;
+  }
+
+  try {
+    const info = await validateSessionInfo(token);
+    if (!info.valid) {
+      res.status(403).json({ error: 'Forbidden: Invalid or expired session' });
+      return;
+    }
+    if (info.role !== 'admin') {
+      res.status(403).json({ error: 'Forbidden: Admin role required' });
+      return;
+    }
+    (req as any).user = { userId: info.userId, role: info.role };
+    next();
+  } catch (err) {
+    console.error('adminGuard error:', err);
+    res.status(403).json({ error: 'Forbidden: Authentication error' });
+  }
+};
+
+const toInt = (v: any): number | null => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
+const validateKeyAdjustment = (keyAdjustment: number | null): boolean => {
+  if (keyAdjustment === null || keyAdjustment === undefined) return true; // null/undefined is valid (defaults to 0)
+  return keyAdjustment >= -6 && keyAdjustment <= 6;
+};
+
+const MAX_OIDC_USERNAME_LENGTH = 120;
+const MAX_OIDC_USERNAME_ATTEMPTS = 100;
+const OIDC_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const sanitizeOidcUsername = (value: string): string =>
+  value.trim().toLowerCase().replace(/[^a-z0-9@._+-]/g, '_').slice(0, MAX_OIDC_USERNAME_LENGTH);
+
+const normalizeOidcReturnTo = (value: unknown): '/admin' | '/host' =>
+  value === '/host' ? '/host' : '/admin';
+
+const getOidcDisplayName = (claims: Record<string, unknown>, fallback: string): string => {
+  const displayName = typeof claims.display_name === 'string' ? claims.display_name.trim() : '';
+  const name = typeof claims.name === 'string' ? claims.name.trim() : '';
+  return displayName || name || fallback;
+};
+
+const getOidcPicture = (claims: Record<string, unknown>): string | null => {
+  const picture = typeof claims.picture === 'string' ? claims.picture.trim() : '';
+  return picture || null;
+};
+
+const findAvailableOidcUsername = async (baseUsername: string, currentUserId?: number): Promise<string | null> => {
+  if (!baseUsername) return null;
+
+  let candidate = baseUsername;
+  let attempt = 0;
+
+  while (true) {
+    const existing = await getUserByUsername(candidate);
+    if (!existing || existing.id === currentUserId) {
+      return candidate;
+    }
+
+    attempt++;
+    if (attempt > MAX_OIDC_USERNAME_ATTEMPTS) {
+      return null;
+    }
+
+    candidate = `${baseUsername}_${attempt}`;
+  }
+};
+
+type BreakMusicTrackRow = {
+  id: number;
+  title: string;
+  artist: string | null;
+  genre: string | null;
+  duration_ms: number | null;
+  file_path: string;
+};
+
+type BreakMusicState = {
+  paused: boolean;
+  autoPaused: boolean;
+  currentTrackId: number | null;
+  currentStartedAt: string | null;
+  currentPositionSec: number;
+  playlistTrackIds: number[];
+  playlistIndex: number;
+  activePlaylistId: number | null;
+};
+
+async function walkFilesRecursive(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...await walkFilesRecursive(abs));
+    } else {
+      out.push(abs);
+    }
+  }
+  return out;
+}
+
+async function getBreakMusicState(): Promise<BreakMusicState> {
+  const [
+    paused,
+    autoPaused,
+    currentTrackId,
+    currentStartedAt,
+    currentPositionSec,
+    playlistTrackIds,
+    playlistIndex,
+    activePlaylistId,
+  ] = await Promise.all([
+    getSetting('break_music.paused'),
+    getSetting('break_music.auto_paused'),
+    getSetting('break_music.current_track_id'),
+    getSetting('break_music.current_started_at'),
+    getSetting('break_music.current_position_sec'),
+    getSetting('break_music.playlist_track_ids'),
+    getSetting('break_music.playlist_index'),
+    getSetting('break_music.active_playlist_id'),
+  ]);
+
+  return {
+    paused: paused === true,
+    autoPaused: autoPaused === true,
+    currentTrackId: Number.isFinite(Number(currentTrackId)) ? Number(currentTrackId) : null,
+    currentStartedAt: typeof currentStartedAt === 'string' ? currentStartedAt : null,
+    currentPositionSec: Number.isFinite(Number(currentPositionSec)) ? Number(currentPositionSec) : 0,
+    playlistTrackIds: Array.isArray(playlistTrackIds)
+      ? playlistTrackIds.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
+      : [],
+    playlistIndex: Number.isFinite(Number(playlistIndex)) ? Number(playlistIndex) : 0,
+    activePlaylistId: Number.isFinite(Number(activePlaylistId)) ? Number(activePlaylistId) : null,
+  };
+}
+
+async function setBreakMusicState(partial: Partial<BreakMusicState>) {
+  const writes: Promise<void>[] = [];
+  if (partial.paused !== undefined) writes.push(setSetting('break_music.paused', partial.paused));
+  if (partial.autoPaused !== undefined) writes.push(setSetting('break_music.auto_paused', partial.autoPaused));
+  if (partial.currentTrackId !== undefined) writes.push(setSetting('break_music.current_track_id', partial.currentTrackId));
+  if (partial.currentStartedAt !== undefined) writes.push(setSetting('break_music.current_started_at', partial.currentStartedAt));
+  if (partial.currentPositionSec !== undefined) writes.push(setSetting('break_music.current_position_sec', partial.currentPositionSec));
+  if (partial.playlistTrackIds !== undefined) writes.push(setSetting('break_music.playlist_track_ids', partial.playlistTrackIds));
+  if (partial.playlistIndex !== undefined) writes.push(setSetting('break_music.playlist_index', partial.playlistIndex));
+  if (partial.activePlaylistId !== undefined) writes.push(setSetting('break_music.active_playlist_id', partial.activePlaylistId));
+  await Promise.all(writes);
+}
+
+// Pause break music automatically when a karaoke request starts playing.
+// Saves the current playback position and marks it as auto-paused so we can
+// resume correctly when karaoke ends, without overriding a deliberate user pause.
+async function autoPauseBreakMusicForKaraoke() {
+  const breakState = await getBreakMusicState();
+  if (breakState.paused || !breakState.currentTrackId) return;
+  let currentPositionSec = breakState.currentPositionSec || 0;
+  if (breakState.currentStartedAt) {
+    const startedMs = Date.parse(breakState.currentStartedAt);
+    if (Number.isFinite(startedMs)) {
+      currentPositionSec = Math.max(currentPositionSec, Math.floor((Date.now() - startedMs) / 1000));
+    }
+  }
+  await setBreakMusicState({ paused: true, autoPaused: true, currentPositionSec, currentStartedAt: null });
+  postQueueUpdate('break_music.updated');
+}
+
+// Resume break music after a karaoke request ends, but only if it was
+// auto-paused by karaoke start (not paused by the user).
+async function autoResumeBreakMusicForKaraoke() {
+  const breakState = await getBreakMusicState();
+  if (!breakState.autoPaused) return;
+  await setBreakMusicState({
+    paused: false,
+    autoPaused: false,
+    currentStartedAt: new Date(Date.now() - Math.max(0, breakState.currentPositionSec) * 1000).toISOString(),
+  });
+  postQueueUpdate('break_music.updated');
+}
+
+async function getBreakTrackById(id: number | null): Promise<BreakMusicTrackRow | null> {
+  if (!id) return null;
+  const r = await query<BreakMusicTrackRow>(
+    `SELECT id, title, artist, genre, duration_ms, file_path
+       FROM break_music_tracks
+      WHERE id = $1`,
+    [id]
+  );
+  return r.rows[0] || null;
+}
+
+function sanitizePlaylistFilename(name: string) {
+  const reservedNames = new Set([
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+  ]);
+  const cleaned = name
+    .normalize('NFKD')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/_+/g, '_')
+    .trim()
+    .replace(/^[.\s_]+|[.\s_]+$/g, '');
+  const fallbackSafe = cleaned || 'break-playlist';
+  return reservedNames.has(fallbackSafe.toUpperCase()) ? `${fallbackSafe}-playlist` : fallbackSafe;
+}
+
+async function writeBreakMusicPlaylistFile(name: string, trackIds: number[]) {
+  const playlistsFolder = String(await getSetting('break_music.playlists_folder') || DEFAULT_BREAK_PLAYLISTS_FOLDER).trim() || DEFAULT_BREAK_PLAYLISTS_FOLDER;
+  const resolvedFolder = path.resolve(playlistsFolder);
+  await fs.mkdir(resolvedFolder, { recursive: true });
+
+  const tracks = trackIds.length
+    ? await query<Pick<BreakMusicTrackRow, 'title' | 'artist' | 'duration_ms' | 'file_path'>>(
+      `SELECT title, artist, duration_ms, file_path
+         FROM break_music_tracks
+        WHERE id = ANY($1)
+        ORDER BY array_position($1::int[], id)`,
+      [trackIds]
+    )
+    : { rows: [] };
+
+  const lines = ['#EXTM3U'];
+  for (const track of tracks.rows) {
+    const durationSeconds = track.duration_ms ? Math.max(0, Math.floor(track.duration_ms / 1000)) : 0;
+    const displayName = [track.artist, track.title].filter(Boolean).join(' - ') || path.basename(track.file_path);
+    lines.push(`#EXTINF:${durationSeconds},${displayName}`);
+    lines.push(track.file_path);
+  }
+
+  const outputPath = path.join(resolvedFolder, `${sanitizePlaylistFilename(name)}.m3u`);
+  await fs.writeFile(outputPath, `${lines.join('\r\n')}\r\n`, 'utf8');
+  return outputPath;
+}
+
+async function resolveBreakMusicPlaybackState(step: -1 | 0 | 1 = 0) {
+  const state = await getBreakMusicState();
+  let track = await getBreakTrackById(state.currentTrackId);
+
+  const emptyPlaylistRows = { rows: [] as { id: number }[] };
+  const playlistRows = state.playlistTrackIds.length
+    ? await query<{ id: number }>(
+      `SELECT id FROM break_music_tracks WHERE id = ANY($1) ORDER BY array_position($1::int[], id)`,
+      [state.playlistTrackIds]
+    )
+    : emptyPlaylistRows;
+  const playlist = playlistRows.rows.map(r => r.id);
+
+  if (step !== 0 && playlist.length > 0) {
+    const activeIndex = track ? playlist.indexOf(track.id) : -1;
+    const baseIndex = activeIndex >= 0
+      ? activeIndex
+      : Math.min(Math.max(state.playlistIndex, 0), playlist.length - 1);
+    const nextIndex = (baseIndex + step + playlist.length) % playlist.length;
+    track = await getBreakTrackById(playlist[nextIndex]);
+    const currentStartedAt = track ? new Date().toISOString() : null;
+    await setBreakMusicState({
+      currentTrackId: track?.id ?? null,
+      currentStartedAt,
+      currentPositionSec: 0,
+      playlistTrackIds: playlist,
+      playlistIndex: nextIndex
+    });
+    return {
+      state: {
+        ...state,
+        currentTrackId: track?.id ?? null,
+        currentPositionSec: 0,
+        currentStartedAt,
+        playlistTrackIds: playlist,
+        playlistIndex: nextIndex
+      },
+      track
+    };
+  }
+
+  if (!track && playlist.length > 0) {
+    const nextIndex = Math.min(Math.max(state.playlistIndex, 0), playlist.length - 1);
+    track = await getBreakTrackById(playlist[nextIndex]);
+    const currentStartedAt = track ? new Date().toISOString() : null;
+    await setBreakMusicState({
+      currentTrackId: track?.id ?? null,
+      currentStartedAt,
+      currentPositionSec: 0,
+      playlistTrackIds: playlist,
+      playlistIndex: nextIndex
+    });
+    return {
+      state: {
+        ...state,
+        currentTrackId: track?.id ?? null,
+        currentPositionSec: 0,
+        currentStartedAt,
+        playlistTrackIds: playlist,
+        playlistIndex: nextIndex
+      },
+      track
+    };
+  }
+
+  if (!track) {
+    await setBreakMusicState({
+      currentTrackId: null,
+      currentStartedAt: null,
+      currentPositionSec: 0,
+      playlistTrackIds: playlist,
+      playlistIndex: 0
+    });
+  }
+
+  return { state: { ...state, playlistTrackIds: playlist }, track };
+}
+
+apiRouter.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Clean up expired sessions periodically
+setInterval(() => {
+  cleanupExpiredSessions().catch(err => console.error('Failed to cleanup sessions:', err));
+}, 60 * 60 * 1000); // Run every hour
+
+// ===================== AUTHENTICATION =====================
+
+// Admin/Host login endpoint - validates username/password and creates a session
+apiRouter.post(
+  '/auth/login',
+  authLimiter, // Apply strict rate limiting to prevent brute force attacks
+  ah(async (req, res) => {
+    const passwordLoginEnabled = await getSetting('auth.password_login_enabled');
+    if (passwordLoginEnabled === false) {
+      return res.status(403).json({ ok: false, message: 'Username/password login is disabled. Please use SSO.' });
+    }
+
+    const { username, password } = req.body;
+
+    // --- Primary path: check users table first ---
+    // This ensures passwords changed via User Manager take effect immediately.
+    const userRecord = await getUserByUsername(username);
+    if (userRecord && userRecord.password_hash) {
+      if (!userRecord.is_active) {
+        return res.status(401).json({ ok: false, message: 'Account is disabled' });
+      }
+      const isPasswordValid = await verifyPassword(password, userRecord.password_hash);
+      if (!isPasswordValid) {
+        return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+      }
+      const isDefaultPassword = await verifyPassword('changeme-password', userRecord.password_hash);
+      const sessionToken = await createSession(30, userRecord.id, userRecord.role);
+      return res.json({
+        ok: true,
+        sessionToken,
+        isDefaultPassword,
+        role: userRecord.role,
+        username: userRecord.username,
+        displayName: userRecord.display_name,
+        picture: userRecord.picture,
+      });
+    }
+
+    // --- Legacy fallback: check admin.username / admin.password settings ---
+    // Used during initial setup before the users table has a password_hash stored.
+    const storedUsername = await getSetting('admin.username');
+    const adminUsername = storedUsername || process.env.ADMIN_USERNAME || 'admin';
+
+    const storedPassword = await getSetting('admin.password');
+    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+
+    if (username !== adminUsername) {
+      return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+    }
+
+    const isPasswordValid = await verifyPassword(password, adminPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+    }
+
+    const isDefaultPassword = await verifyPassword('changeme-password', adminPassword);
+
+    // Find or create user record for this legacy admin and sync the password hash
+    let user = userRecord; // may be null (no password_hash) or undefined
+    if (!user) {
+      user = await createUser({ username, role: 'admin' });
+    }
+    // Sync password hash into users table so future logins use the primary path
+    await updateUser(user.id, { password }); // updateUser hashes the plaintext password before storing
+    const updatedUser = await getUserById(user.id) || user;
+
+    if (!updatedUser.is_active) {
+      return res.status(401).json({ ok: false, message: 'Account is disabled' });
+    }
+
+    const sessionToken = await createSession(30, updatedUser.id, updatedUser.role);
+    return res.json({
+      ok: true,
+      sessionToken,
+      isDefaultPassword,
+      role: updatedUser.role,
+      username: updatedUser.username,
+      displayName: updatedUser.display_name,
+      picture: updatedUser.picture,
+    });
+  })
+);
+
+// Validate session endpoint - check if a session is still valid
+apiRouter.get(
+  '/auth/validate',
+  ah(async (req, res) => {
+    const token = req.headers['x-session-token'] as string;
+    if (!token) {
+      return res.status(401).json({ valid: false, role: 'user' });
+    }
+    
+    const info = await validateSessionInfo(token);
+    if (!info.valid) {
+      return res.json({ valid: false, role: 'user' });
+    }
+
+    const user = info.userId ? await getUserById(info.userId) : null;
+    res.json({
+      valid: true,
+      role: info.role,
+      username: user?.username || null,
+      displayName: user?.display_name || null,
+      picture: user?.picture || null,
+    });
+  })
+);
+
+// Logout endpoint - invalidate session
+apiRouter.post(
+  '/auth/logout',
+  ah(async (req, res) => {
+    const token = req.headers['x-session-token'] as string;
+    if (token) {
+      await deleteSession(token);
+    }
+    res.json({ ok: true });
+  })
+);
+
+// Change password endpoint - requires valid session
+apiRouter.post(
+  '/auth/change-password',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new passwords are required' });
+    }
+    
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+    
+    // Verify current password
+    const storedPassword = await getSetting('admin.password');
+    const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    const isPasswordValid = await verifyPassword(currentPassword, envPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Hash and save new password
+    const hashedPassword = await hashPassword(newPassword);
+    await setSetting('admin.password', hashedPassword);
+    res.json({ ok: true });
+  })
+);
+
+// Change username endpoint - requires valid session
+apiRouter.post(
+  '/auth/change-username',
+  sessionGuard,
+  ah(async (req, res) => {
+    const { currentPassword, newUsername } = req.body;
+    
+    if (!currentPassword || !newUsername) {
+      return res.status(400).json({ error: 'Current password and new username are required' });
+    }
+    
+    if (newUsername.length < 3) {
+      return res.status(400).json({ error: 'Username must be at least 3 characters long' });
+    }
+    
+    // Verify current password
+    const storedPassword = await getSetting('admin.password');
+    const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    const isPasswordValid = await verifyPassword(currentPassword, envPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Save new username
+    await setSetting('admin.username', newUsername);
+    res.json({ ok: true });
+  })
+);
+
+// Username/password admin login endpoint (session-based)
+apiRouter.post(
+  '/admin/login',
+  authLimiter, // Apply strict rate limiting to prevent brute force attacks
+  ah(async (req, res) => {
+    const { username, password } = req.body;
+    
+    const storedUsername = await getSetting('admin.username');
+    const adminUsername = storedUsername || process.env.ADMIN_USERNAME || 'admin';
+    
+    const storedPassword = await getSetting('admin.password');
+    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    
+    // Check username first
+    if (username !== adminUsername) {
+      res.status(401).json({ ok: false, message: 'Invalid credentials' });
+      return;
+    }
+    
+    // Verify password using bcrypt
+    const isPasswordValid = await verifyPassword(password, adminPassword);
+    
+    if (isPasswordValid) {
+      res.json({ ok: true });
+    } else {
+      res.status(401).json({ ok: false, message: 'Invalid credentials' });
+    }
+  })
+);
+
+// ===================== USER MANAGEMENT =====================
+
+// List all users (admin only)
+apiRouter.get(
+  '/admin/users',
+  adminGuard,
+  ah(async (_req, res) => {
+    const users = await listUsers();
+    // Strip password hashes from the response
+    const safeUsers = users.map(u => ({
+      id: u.id,
+      username: u.username,
+      display_name: u.display_name,
+      picture: u.picture,
+      role: u.role,
+      is_active: u.is_active,
+      oidc_subject: u.oidc_subject,
+      oidc_issuer: u.oidc_issuer,
+      created_at: u.created_at,
+      updated_at: u.updated_at,
+    }));
+    res.json(safeUsers);
+  })
+);
+
+// Create a new user (admin only)
+apiRouter.post(
+  '/admin/users',
+  adminGuard,
+  ah(async (req, res) => {
+    const { username, password, role } = req.body;
+    if (!username || typeof username !== 'string' || username.trim().length < 3) {
+      return res.status(400).json({ error: 'Username must be at least 3 characters' });
+    }
+    if (!password || typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    if (role && role !== 'admin' && role !== 'user') {
+      return res.status(400).json({ error: 'Role must be admin or user' });
+    }
+
+    const existing = await getUserByUsername(username.trim());
+    if (existing) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+
+    const user = await createUser({ username: username.trim(), password, role: role || 'user' });
+    res.json({
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      is_active: user.is_active,
+      created_at: user.created_at,
+    });
+  })
+);
+
+// Update a user (admin only)
+apiRouter.put(
+  '/admin/users/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid user id' });
+
+    const { role, is_active, password } = req.body;
+
+    // Prevent removing the last admin
+    if (role === 'user' || is_active === false) {
+      const target = await getUserById(id);
+      if (target?.role === 'admin') {
+        const adminCount = await countAdminUsers();
+        if (adminCount <= 1) {
+          return res.status(400).json({ error: 'Cannot demote or deactivate the last admin user' });
+        }
+      }
+    }
+
+    const updates: Parameters<typeof updateUser>[1] = {};
+    if (role === 'admin' || role === 'user') updates.role = role;
+    if (typeof is_active === 'boolean') updates.is_active = is_active;
+    if (password && typeof password === 'string') {
+      if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+      updates.password = password;
+    }
+
+    const updated = await updateUser(id, updates);
+    if (!updated) return res.status(404).json({ error: 'User not found' });
+
+    res.json({
+      id: updated.id,
+      username: updated.username,
+      role: updated.role,
+      is_active: updated.is_active,
+      updated_at: updated.updated_at,
+    });
+  })
+);
+
+// Delete a user (admin only)
+apiRouter.delete(
+  '/admin/users/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid user id' });
+
+    const target = await getUserById(id);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+
+    // Prevent deleting the last admin
+    if (target.role === 'admin') {
+      const adminCount = await countAdminUsers();
+      if (adminCount <= 1) {
+        return res.status(400).json({ error: 'Cannot delete the last admin user' });
+      }
+    }
+
+    await deleteUser(id);
+    res.json({ ok: true });
+  })
+);
+
+// ===================== OIDC SETTINGS =====================
+
+// Public endpoint: get OIDC button config (for login page)
+apiRouter.get(
+  '/auth/oidc/config',
+  ah(async (_req, res) => {
+    const enabled = await getSetting('oidc.enabled');
+    const buttonText = await getSetting('oidc.button_text');
+    const buttonColor = await getSetting('oidc.button_color');
+    const passwordLoginEnabled = await getSetting('auth.password_login_enabled');
+    res.json({
+      enabled: enabled === true,
+      buttonText: buttonText || 'Login with SSO',
+      buttonColor: buttonColor || '#6366f1',
+      passwordLoginEnabled: passwordLoginEnabled !== false,
+    });
+  })
+);
+
+// Admin: get full OIDC config
+apiRouter.get(
+  '/admin/settings/oidc',
+  adminGuard,
+  ah(async (_req, res) => {
+    const [enabled, issuer, clientId, clientSecret, redirectUri, buttonText, buttonColor, autoCreate, defaultRole, passwordLoginEnabled] =
+      await Promise.all([
+        getSetting('oidc.enabled'),
+        getSetting('oidc.issuer'),
+        getSetting('oidc.client_id'),
+        getSetting('oidc.client_secret'),
+        getSetting('oidc.redirect_uri'),
+        getSetting('oidc.button_text'),
+        getSetting('oidc.button_color'),
+        getSetting('oidc.auto_create_users'),
+        getSetting('oidc.default_role'),
+        getSetting('auth.password_login_enabled'),
+      ]);
+    res.json({
+      enabled: enabled === true,
+      issuer: issuer || '',
+      clientId: clientId || '',
+      clientSecret: clientSecret ? '***' : '', // mask the secret
+      redirectUri: redirectUri || '',
+      buttonText: buttonText || 'Login with SSO',
+      buttonColor: buttonColor || '#6366f1',
+      autoCreateUsers: autoCreate !== false,
+      defaultRole: defaultRole || 'user',
+      passwordLoginEnabled: passwordLoginEnabled !== false,
+    });
+  })
+);
+
+// Admin: update OIDC config
+apiRouter.put(
+  '/admin/settings/oidc',
+  adminGuard,
+  ah(async (req, res) => {
+    const {
+      enabled,
+      issuer,
+      clientId,
+      clientSecret,
+      redirectUri,
+      buttonText,
+      buttonColor,
+      autoCreateUsers,
+      defaultRole,
+      passwordLoginEnabled
+    } = req.body;
+
+    const tasks: Promise<void>[] = [];
+    if (typeof enabled === 'boolean') tasks.push(setSetting('oidc.enabled', enabled));
+    if (typeof issuer === 'string') tasks.push(setSetting('oidc.issuer', issuer.trim()));
+    if (typeof clientId === 'string') tasks.push(setSetting('oidc.client_id', clientId.trim()));
+    if (typeof clientSecret === 'string' && clientSecret.length > 0) {
+      tasks.push(setSetting('oidc.client_secret', clientSecret));
+    }
+    if (typeof redirectUri === 'string') tasks.push(setSetting('oidc.redirect_uri', redirectUri.trim()));
+    if (typeof buttonText === 'string') tasks.push(setSetting('oidc.button_text', buttonText.trim() || 'Login with SSO'));
+    if (typeof buttonColor === 'string') tasks.push(setSetting('oidc.button_color', buttonColor));
+    if (typeof autoCreateUsers === 'boolean') tasks.push(setSetting('oidc.auto_create_users', autoCreateUsers));
+    if (defaultRole === 'admin' || defaultRole === 'user') tasks.push(setSetting('oidc.default_role', defaultRole));
+    if (typeof passwordLoginEnabled === 'boolean') tasks.push(setSetting('auth.password_login_enabled', passwordLoginEnabled));
+
+    await Promise.all(tasks);
+    res.json({ ok: true });
+  })
+);
+
+// ===================== OIDC AUTH FLOW =====================
+
+// In-memory store for OIDC state/PKCE (expires after 10 minutes)
+const oidcStateStore = new Map<string, { codeVerifier: string; createdAt: number; returnTo: '/admin' | '/host' }>();
+
+// Clean up expired OIDC states periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of oidcStateStore) {
+    if (now - val.createdAt > 10 * 60 * 1000) oidcStateStore.delete(key);
+  }
+}, 5 * 60 * 1000);
+
+// Initiate OIDC login
+apiRouter.get(
+  '/auth/oidc/login',
+  ah(async (req, res) => {
+    const oidcEnabled = await getSetting('oidc.enabled');
+    if (!oidcEnabled) {
+      return res.status(400).json({ error: 'OIDC is not enabled' });
+    }
+
+    const issuerUrl = await getSetting('oidc.issuer');
+    const clientId = await getSetting('oidc.client_id');
+    const clientSecret = await getSetting('oidc.client_secret');
+    const redirectUri = await getSetting('oidc.redirect_uri');
+
+    if (!issuerUrl || !clientId || !clientSecret || !redirectUri) {
+      return res.status(400).json({ error: 'OIDC is not fully configured' });
+    }
+
+    try {
+      const config = await oidc.discovery(
+        new URL(issuerUrl),
+        clientId,
+        {
+          client_secret: clientSecret,
+          redirect_uris: [redirectUri],
+          response_types: ['code'],
+        },
+        oidc.ClientSecretPost(clientSecret),
+      );
+
+      const state = oidc.randomState();
+      const codeVerifier = oidc.randomPKCECodeVerifier();
+      const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
+      const returnTo = normalizeOidcReturnTo(req.query.returnTo);
+
+      oidcStateStore.set(state, { codeVerifier, createdAt: Date.now(), returnTo });
+
+      const authUrl = oidc.buildAuthorizationUrl(config, {
+        redirect_uri: redirectUri,
+        scope: 'openid email profile',
+        state,
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+      });
+
+      res.redirect(authUrl.href);
+    } catch (err: any) {
+      console.error('OIDC login error:', err);
+      res.status(500).json({ error: 'OIDC configuration error: ' + (err.message || 'Unknown error') });
+    }
+  })
+);
+
+// OIDC callback handler
+apiRouter.get(
+  '/auth/oidc/callback',
+  ah(async (req, res) => {
+    const oidcEnabled = await getSetting('oidc.enabled');
+    if (!oidcEnabled) {
+      return res.status(400).send('OIDC is not enabled');
+    }
+
+    const issuerUrl = await getSetting('oidc.issuer');
+    const clientId = await getSetting('oidc.client_id');
+    const clientSecret = await getSetting('oidc.client_secret');
+    const redirectUri = await getSetting('oidc.redirect_uri');
+
+    if (!issuerUrl || !clientId || !clientSecret || !redirectUri) {
+      return res.status(400).send('OIDC is not fully configured');
+    }
+
+    try {
+      const config = await oidc.discovery(
+        new URL(issuerUrl),
+        clientId,
+        {
+          client_secret: clientSecret,
+          redirect_uris: [redirectUri],
+          response_types: ['code'],
+        },
+        oidc.ClientSecretPost(clientSecret),
+      );
+
+      const host = req.headers.host || 'localhost:5174';
+      const protoHeader = req.headers['x-forwarded-proto'];
+      const proto = Array.isArray(protoHeader) ? protoHeader[0] : (protoHeader || 'http');
+      const currentUrl = new URL(req.originalUrl, `${proto}://${host}`);
+
+      const stateKey = currentUrl.searchParams.get('state') || '';
+
+      const stored = stateKey ? oidcStateStore.get(stateKey) : undefined;
+      if (!stored) {
+        return res.status(400).send('Invalid or expired OIDC state');
+      }
+      oidcStateStore.delete(stateKey);
+
+      const tokenSet = await oidc.authorizationCodeGrant(
+        config,
+        currentUrl,
+        {
+          expectedState: stateKey,
+          pkceCodeVerifier: stored.codeVerifier,
+        },
+        {
+          redirect_uri: redirectUri,
+        },
+      );
+
+      const claims = tokenSet.claims();
+      if (!claims?.sub) {
+        throw new Error('Missing subject claim from OIDC token');
+      }
+      const sub = claims.sub;
+      const emailClaim = typeof claims.email === 'string' ? claims.email.trim() : '';
+      const email = emailClaim.toLowerCase();
+      if (!email || !OIDC_EMAIL_REGEX.test(email)) {
+        const frontendUrl = await getOidcFrontendUrl(req);
+        return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=Missing+or+invalid+email+claim+from+SSO+provider`);
+      }
+      const displayName = getOidcDisplayName(claims, email || sub);
+      const picture = getOidcPicture(claims);
+      const baseUsername = sanitizeOidcUsername(email);
+      if (!baseUsername) {
+        const frontendUrl = await getOidcFrontendUrl(req);
+        return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=Could+not+derive+username+from+email`);
+      }
+
+      // Find or create user
+      let user = await getUserByOidcSubject(sub, issuerUrl);
+      if (!user) {
+        const autoCreate = await getSetting('oidc.auto_create_users');
+        if (autoCreate === false) {
+          // Redirect back with error
+          const frontendUrl = await getOidcFrontendUrl(req);
+          return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=User+not+found`);
+        }
+        const defaultRole = (await getSetting('oidc.default_role')) || 'user';
+        const username = await findAvailableOidcUsername(baseUsername);
+        if (!username) {
+          const frontendUrl = await getOidcFrontendUrl(req);
+          return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=Could+not+assign+a+unique+username`);
+        }
+        user = await createUser({
+          username,
+          role: defaultRole as 'admin' | 'user',
+          oidc_subject: sub,
+          oidc_issuer: issuerUrl,
+          display_name: displayName,
+          picture,
+        });
+      } else {
+        let nextUsername = user.username;
+        if (baseUsername && baseUsername !== user.username) {
+          nextUsername = await findAvailableOidcUsername(baseUsername, user.id) || user.username;
+        }
+
+        const updatedUser = await updateUser(user.id, {
+          username: nextUsername,
+          display_name: displayName,
+          picture,
+        });
+        if (updatedUser) {
+          user = updatedUser;
+        }
+      }
+
+      if (!user.is_active) {
+        const frontendUrl = await getOidcFrontendUrl(req);
+        return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=Account+disabled`);
+      }
+
+      const sessionToken = await createSession(30, user.id, user.role);
+      const frontendUrl = await getOidcFrontendUrl(req);
+      res.redirect(`${frontendUrl}${stored.returnTo}?oidc_session=${sessionToken}`);
+    } catch (err: any) {
+      console.error('OIDC callback error:', err);
+      const frontendUrl = await getOidcFrontendUrl(req).catch(() => '');
+      res.redirect(`${frontendUrl}/admin?oidc_error=${encodeURIComponent(err.message || 'OIDC error')}`);
+    }
+  })
+);
+
+async function getOidcFrontendUrl(req: express.Request): Promise<string> {
+  const stored = await getSetting('oidc.frontend_url');
+  if (stored) return stored.replace(/\/$/, '');
+  // Derive from ORIGIN env variable (first one)
+  const origins = process.env.ORIGIN?.split(',').map((o: string) => o.trim()).filter(Boolean);
+  if (origins?.length) return origins[0].replace(/\/$/, '');
+  // Fall back to request origin
+  const host = req.headers.host || 'localhost:5173';
+  const proto = req.headers['x-forwarded-proto'] || 'http';
+  return `${proto}://${host}`;
+}
+
+
+const scanBus = new EventEmitter();
+let scanInProgress = false;
+let lastScan: { finishedAt?: string; perLibrary?: Record<number, any> } | null = null;
+
+// Load persisted lastScan from settings on startup
+getSetting('scan.last_scan').then((saved: any) => {
+  if (saved) lastScan = saved;
+}).catch((err) => {
+  console.error('Failed to load persisted lastScan:', err);
+});
+
+async function persistLastScan(data: typeof lastScan) {
+  try {
+    await setSetting('scan.last_scan', data);
+  } catch (err) {
+    console.error('Failed to persist lastScan:', err);
+  }
+}
+
+function sseSend(res: express.Response, event: string, data: any) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+apiRouter.get('/scan/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  sseSend(res, 'hello', { scanInProgress, lastScan });
+
+  const onStart = () => sseSend(res, 'scan_start', { at: new Date().toISOString() });
+  const onProgress = (payload: any) => sseSend(res, 'scan_progress', payload);
+  const onDone = (payload: any) => sseSend(res, 'scan_done', payload);
+
+  scanBus.on('start', onStart);
+  scanBus.on('progress', onProgress);
+  scanBus.on('done', onDone);
+
+  req.on('close', () => {
+    scanBus.off('start', onStart);
+    scanBus.off('progress', onProgress);
+    scanBus.off('done', onDone);
+    res.end();
+  });
+});
+
+// ===================== LIBRARIES =====================
+
+apiRouter.get(
+  '/libraries',
+  ah(async (_req, res) => {
+    const r = await query<{ id: number; name: string; path: string }>(
+      `SELECT id, name, path FROM libraries ORDER BY id`
+    );
+    res.json(r.rows);
+  })
+);
+
+apiRouter.post(
+  '/libraries',
+  adminGuard,
+  ah(async (req, res) => {
+    const name = String(req.body?.name ?? '').trim();
+    const libPath = String(req.body?.path ?? '').trim();
+    if (!name || !libPath) return res.status(400).send('name and path required');
+    await query(`INSERT INTO libraries (name, path) VALUES ($1, $2)`, [name, libPath]);
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.delete(
+  '/libraries/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.params.id);
+    if (id == null) return res.status(400).send('id required');
+    await query(`DELETE FROM libraries WHERE id = $1`, [id]);
+    res.json({ ok: true });
+  })
+);
+
+// ===================== SCAN =====================
+
+apiRouter.post(
+  '/scan',
+  adminGuard,
+  ah(async (req, res) => {
+    const libraryId = Number.isFinite(+req.body?.libraryId) ? +req.body.libraryId : null;
+
+    if (scanInProgress) {
+      return res.status(409).json({ ok: false, message: 'scan already in progress' });
+    }
+
+    scanInProgress = true;
+    scanBus.emit('start');
+
+    const progress = (evt: any) => scanBus.emit('progress', evt);
+
+    try {
+      if (libraryId != null) {
+        const r = await query<{ id: number; path: string }>(`SELECT id, path FROM libraries WHERE id = $1`, [libraryId]);
+        if (!r.rows.length) return res.status(404).send('library not found');
+
+        const lib = r.rows[0];
+        const stats = await scanPath(lib.id, lib.path, progress);
+        lastScan = { finishedAt: new Date().toISOString(), perLibrary: { [lib.id]: stats } };
+        await persistLastScan(lastScan);
+        scanBus.emit('done', { ...lastScan });
+        return res.json({ ok: true, stats });
+      }
+
+      const libs = await query<{ id: number; path: string }>(`SELECT id, path FROM libraries ORDER BY id`);
+      const allStats: Record<number, any> = {};
+
+      for (const lib of libs.rows) {
+        try {
+          scanBus.emit('progress', { libraryId: lib.id, state: 'scanning', path: lib.path });
+          allStats[lib.id] = await scanPath(lib.id, lib.path, (evt) =>
+            scanBus.emit('progress', { libraryId: lib.id, ...evt })
+          );
+          scanBus.emit('progress', { libraryId: lib.id, state: 'done', stats: allStats[lib.id] });
+        } catch (e: any) {
+          allStats[lib.id] = { error: String(e?.message || e) };
+          scanBus.emit('progress', { libraryId: lib.id, state: 'error', error: allStats[lib.id].error });
+        }
+      }
+
+      lastScan = { finishedAt: new Date().toISOString(), perLibrary: allStats };
+      await persistLastScan(lastScan);
+      scanBus.emit('done', { ...lastScan });
+      res.json({ ok: true, stats: allStats });
+    } finally {
+      scanInProgress = false;
+    }
+  })
+);
+
+// ===================== ADMIN STATS =====================
+
+apiRouter.get(
+  '/admin/stats',
+  adminGuard,
+  ah(async (_req, res) => {
+    const [artists, tracks, queued] = await Promise.all([
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM tracks`),
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue`),
+    ]);
+    res.json({
+      artists: Number(artists.rows[0].c),
+      tracks: Number(tracks.rows[0].c),
+      queued: Number(queued.rows[0].c),
+      lastScan,
+    });
+  })
+);
+
+// ===================== SEARCH =====================
+
+apiRouter.get(
+  '/search',
+  searchLimiter, // Apply rate limiting to prevent search abuse
+  ah(async (req, res) => {
+    // Check if local library is enabled
+    const localLibraryEnabled = await getSetting('libraries.local_enabled');
+    if (localLibraryEnabled === false) {
+      return res.status(403).json({ error: 'Local library search is disabled' });
+    }
+    
+    const q = String(req.query.q ?? '').trim();
+    const kindFilter = req.query.kind as string | undefined;
+    const libraryIdFilter = req.query.library_id ? Number(req.query.library_id) : undefined;
+    
+    if (!q) return res.json([]);
+
+    // Build filter conditions
+    let filterConditions = '';
+    const queryParams: any[] = [q];
+    let paramIndex = 2;
+
+    if (kindFilter && (kindFilter === 'mp4' || kindFilter === 'cdgmp3')) {
+      filterConditions += ` AND t.kind = $${paramIndex}`;
+      queryParams.push(kindFilter);
+      paramIndex++;
+    }
+
+    if (libraryIdFilter !== undefined) {
+      filterConditions += ` AND t.library_id = $${paramIndex}`;
+      queryParams.push(libraryIdFilter);
+      paramIndex++;
+    }
+
+    try {
+      // Enhanced search with better ranking
+      // Priority order:
+      // 1. Exact title match (highest)
+      // 2. Title starts with query
+      // 3. Exact artist match
+      // 4. Artist starts with query
+      // 5. Full-text search match in title
+      // 6. Partial match in title or artist
+      // 7. Disc ID match
+      const searchResults = await query(
+        `
+        WITH ranked_results AS (
+          SELECT DISTINCT ON (t.id)
+                 t.id,
+                 t.title,
+                 t.disc_id,
+                 t.kind,
+                 a.name AS artist,
+                 CASE
+                   -- Exact title match (case-insensitive)
+                   WHEN LOWER(t.title) = LOWER($1) THEN 1
+                   -- Title starts with query
+                   WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 2
+                   -- Exact artist match
+                   WHEN LOWER(a.name) = LOWER($1) THEN 3
+                   -- Artist starts with query
+                   WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 4
+                   -- Full-text search in title
+                   WHEN to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1) THEN 5
+                   -- Contains query in title
+                   WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 6
+                   -- Contains query in artist
+                   WHEN LOWER(a.name) LIKE '%' || LOWER($1) || '%' THEN 7
+                   -- Disc ID match
+                   WHEN t.disc_id ILIKE '%' || $1 || '%' THEN 8
+                   ELSE 9
+                 END AS rank
+            FROM tracks t
+            LEFT JOIN artists a ON a.id = t.artist_id
+           WHERE (t.source IS NULL OR t.source = 'local')
+                 AND (
+                   LOWER(t.title) LIKE '%' || LOWER($1) || '%'
+                   OR LOWER(a.name) LIKE '%' || LOWER($1) || '%'
+                   OR t.disc_id ILIKE '%' || $1 || '%'
+                   OR to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1)
+                 )
+                 ${filterConditions}
+        )
+        SELECT id, title, disc_id, kind, artist
+          FROM ranked_results
+         ORDER BY rank ASC, 
+                  LOWER(artist) NULLS LAST, 
+                  LOWER(title)
+         LIMIT 100
+        `,
+        queryParams
+      );
+      
+      return res.json(searchResults.rows);
+    } catch (err) {
+      console.error('Search error:', err);
+      
+      // Fallback to simple ILIKE search
+      const like = await query(
+        `
+        SELECT t.id,
+               t.title,
+               t.disc_id,
+               t.kind,
+               a.name AS artist
+          FROM tracks t
+          LEFT JOIN artists a ON a.id = t.artist_id
+         WHERE (t.source IS NULL OR t.source = 'local')
+           AND (t.title ILIKE '%' || $1 || '%'
+            OR a.name ILIKE '%' || $1 || '%'
+            OR t.disc_id ILIKE '%' || $1 || '%')
+            ${filterConditions}
+         ORDER BY a.name NULLS LAST, t.title
+         LIMIT 100
+        `,
+        queryParams
+      );
+      return res.json(like.rows);
+    }
+  })
+);
+
+// ===================== KARAOKE NERDS SEARCH =====================
+
+apiRouter.get(
+  '/karaoke-nerds/search',
+  searchLimiter, // Apply rate limiting to prevent search abuse
+  ah(async (req, res) => {
+    // Check if external library is enabled
+    const externalLibraryEnabled = await getSetting('libraries.external_enabled');
+    if (externalLibraryEnabled === false) {
+      return res.status(403).json({ error: 'External library search is disabled' });
+    }
+    
+    const q = String(req.query.q ?? '').trim();
+    if (!q) return res.json([]);
+
+    const results = await searchKaraokeNerds(q);
+    res.json(results);
+  })
+);
+
+// Add Karaoke Nerds track to queue
+apiRouter.post(
+  '/karaoke-nerds/add',
+  queueLimiter, // Apply rate limiting to prevent abuse
+  ah(async (req, res) => {
+    // Check if external library is enabled
+    const externalLibraryEnabled = await getSetting('libraries.external_enabled');
+    if (externalLibraryEnabled === false) {
+      return res.status(403).json({ error: 'External library is disabled' });
+    }
+    
+    const { title, artist, url, requestedBy, keyAdjustment } = req.body;
+    
+    if (!title || !url) {
+      return res.status(400).send('title and url required');
+    }
+
+    // Import upsertArtist and upsertExternalTrack
+    const { upsertArtist, upsertExternalTrack } = await import('../db');
+    const { getYouTubeDuration } = await import('../karaoke-nerds');
+    
+    // Insert artist if provided
+    const artistId = artist ? await upsertArtist(artist) : null;
+    
+    // Try to get YouTube video duration (async, don't wait for it to fail)
+    let duration_ms: number | null = null;
+    try {
+      const durationSeconds = await getYouTubeDuration(url);
+      if (durationSeconds) {
+        duration_ms = Math.round(durationSeconds * 1000);
+        logger.verbose(`Got YouTube duration for "${title}": ${durationSeconds}s`);
+      }
+    } catch (err) {
+      logger.warn('Failed to get YouTube duration:', err);
+    }
+    
+    // Upsert the external track
+    const track = await upsertExternalTrack({
+      artist_id: artistId,
+      title,
+      external_url: url,
+      source: 'karaoke-nerds',
+      duration_ms
+    });
+    
+    // Add to queue
+    const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
+    const position = (posr.rows[0] as any).p;
+
+    const keyAdj = toInt(keyAdjustment) ?? 0;
+    if (!validateKeyAdjustment(keyAdj)) {
+      return res.status(400).send('keyAdjustment must be between -6 and 6');
+    }
+
+    // Find or create singer for this request
+    let kn_singerId: bigint | null = null;
+    if (requestedBy && requestedBy.trim()) {
+      try {
+        const singer = await findOrCreateSinger(requestedBy);
+        kn_singerId = singer.id;
+        await ensureSingerInActiveRotation(kn_singerId);
+      } catch (err) {
+        console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
+      }
+    }
+
+    // Try to insert with key_adjustment if the column exists
+    try {
+      const r = await query(
+        `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
+         VALUES ($1,$2,$3,'queued',$4,$5)
+         RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
+        [track.id, requestedBy || null, kn_singerId, position, keyAdj]
+      );
+      res.json(r.rows[0]);
+      await resortQueueByRotation();
+      postQueueUpdate('queue.updated');
+      return;
+    } catch (err: any) {
+      // If key_adjustment column doesn't exist, fall back to insert without it
+      // PostgreSQL error code 42703 = undefined_column
+      const isColumnNotFound = 
+        err?.code === '42703' || 
+        (err?.message?.includes('key_adjustment') && err?.message?.includes('does not exist'));
+      
+      if (isColumnNotFound) {
+        console.warn('key_adjustment column does not exist in queue table, inserting without it');
+        const r = await query(
+          `INSERT INTO queue(track_id, requested_by, singer_id, status, position)
+           VALUES ($1,$2,$3,'queued',$4)
+           RETURNING id, track_id, requested_by, singer_id, status, position, created_at`,
+          [track.id, requestedBy || null, kn_singerId, position]
+        );
+        res.json(r.rows[0]);
+        await resortQueueByRotation();
+        postQueueUpdate('queue.updated');
+        return;
+      }
+      // Re-throw if it's a different error
+      throw err;
+    }
+  })
+);
+
+// Get video metadata from URL (title, etc.)
+apiRouter.get(
+  '/video-metadata',
+  ah(async (req, res) => {
+    const url = String(req.query.url ?? '').trim();
+    if (!url) {
+      return res.status(400).json({ error: 'url parameter required' });
+    }
+
+    try {
+      const { getYouTubeTitle } = await import('../karaoke-nerds');
+      const title = await getYouTubeTitle(url);
+      
+      if (title) {
+        res.json({ title });
+      } else {
+        // Fallback: extract from URL
+        const fallbackTitle = url.split('/').pop()?.split('?')[0] || 'Video';
+        res.json({ title: fallbackTitle });
+      }
+    } catch (err) {
+      console.error('Error fetching video metadata:', err);
+      // Fallback: extract from URL
+      const fallbackTitle = url.split('/').pop()?.split('?')[0] || 'Video';
+      res.json({ title: fallbackTitle });
+    }
+  })
+);
+
+// ===================== MEDIA =====================
+
+apiRouter.get(
+  '/media/info',
+  ah(async (req, res) => {
+    const id = toInt(req.query.id);
+    if (id == null) return res.status(400).send('id required');
+    const r = await query(
+      `SELECT id, kind, file_mp4, file_cdg, file_mp3, path FROM tracks WHERE id=$1`,
+      [id]
+    );
+    if (!r.rows.length) return res.status(404).send('not found');
+    res.json(r.rows[0]);
+  })
+);
+
+apiRouter.get(
+  '/media/file',
+  ah(async (req, res) => {
+    try {
+      const p = String(req.query.path || '');
+      if (!p) return res.status(400).send('path required');
+      if (p.startsWith('zip://')) {
+        // Parse zip://path#entry format - split at .zip# to handle # in filenames
+        const ZIP_EXT = '.zip';
+        const ZIP_SEPARATOR = '.zip#';
+        const withoutPrefix = p.replace(/^zip:\/\//, '');
+        const separatorIdx = withoutPrefix.indexOf(ZIP_SEPARATOR);
+        const zipPath = separatorIdx >= 0 ? withoutPrefix.substring(0, separatorIdx + ZIP_EXT.length) : withoutPrefix;
+        const inner = separatorIdx >= 0 ? withoutPrefix.substring(separatorIdx + ZIP_SEPARATOR.length) : '';
+        res.redirect(`/media/zip?zip=${encodeURIComponent(zipPath)}&file=${encodeURIComponent(inner)}`);
+        return;
+      }
+      const stat = await fs.stat(p);
+      res.setHeader('Content-Length', String(stat.size));
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.resolve(p));
+    } catch {
+      res.status(404).send('file not found');
+    }
+  })
+);
+
+// Add to your browse endpoint - ensure it handles permissions correctly
+apiRouter.get(
+  '/browse',
+  adminGuard,
+  ah(async (req, res) => {
+    const requestPath = String(req.query.path || '/media')
+    
+    try {
+      // Try to access the directory
+      const entries = await fs.readdir(requestPath, { withFileTypes: true })
+      
+      const items = entries
+        .filter(entry => {
+          // Filter out hidden and system directories
+          return !entry.name.startsWith('.') && 
+                 entry.name !== 'lost+found'
+        })
+        .map(entry => ({
+          name: entry.name,
+          path: path.join(requestPath, entry.name),
+          isDirectory: entry.isDirectory()
+        }))
+        .sort((a, b) => {
+          // Directories first, then alphabetical
+          if (a.isDirectory && !b.isDirectory) return -1
+          if (!a.isDirectory && b.isDirectory) return 1
+          return a.name.localeCompare(b.name)
+        })
+      
+      res.json(items)
+    } catch (err: any) {
+      console.error('Browse error:', err)
+      
+      // If permission denied, return empty list with error message
+      if (err.code === 'EACCES' || err.code === 'EPERM') {
+        res.json([{
+          name: 'Permission denied - check volume mount permissions',
+          path: requestPath,
+          isDirectory: false
+        }])
+      } else if (err.code === 'ENOENT') {
+        res.json([{
+          name: 'Directory not found',
+          path: requestPath,
+          isDirectory: false
+        }])
+      } else {
+        res.status(500).json({ error: 'Failed to browse directory' })
+      }
+    }
+  })
+);
+// ===================== QUEUE =====================
+
+/** Broadcast a queue update to all connected WebSocket clients. */
+export function broadcastQueueUpdate(type = 'queue.updated', data?: any): void {
+  postQueueUpdate(type, data);
+}
+
+// Re-sort queued items according to the active rotation policy.
+// Called after new items are added or a song completes so the queue respects
+// the configured rotation order.
+//
+// Algorithm:
+//  1. Count how many songs each singer has already had played (done/playing) —
+//     this tells us which "round" their next queued song belongs to.
+//  2. Assign round numbers to all queued songs: round = doneSongs + 1 + songIndex.
+//  3. Sort by (round ASC, tiebreaker) where the tiebreaker depends on policy:
+//     - strict_round_robin / signup_order / hybrid: rotation position (rs.position)
+//     - least_recently_sung: last_sang_at ASC (never sung first), then position
+//  4. For singers who have queued songs but are not yet in rotation_singers,
+//     derive their rotation slot from their first-appearance order in the queue.
+export async function resortQueueByRotation(): Promise<void> {
+  try {
+    // Get the active rotation type
+    const rotRes = await query<any>(
+      `SELECT id, type, config FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`
+    );
+    if (rotRes.rows.length === 0) return;
+
+    const rotRow = rotRes.rows[0];
+    const rotationType: string = (rotRow.config?.type) || rotRow.type || 'strict_round_robin';
+
+    // For manual mode, never touch the order
+    if (rotationType === 'manual') return;
+
+    // song_queue_only: sort strictly by original request order (no singer fairness).
+    // The queue is already in insertion order, so nothing needs to change.
+    if (rotationType === 'song_queue_only') return;
+
+    // Get all queued (not yet playing) items in their current order.
+    // Prefer singer_id for grouping; fall back to requested_by for old rows.
+    const queueRes = await query<{
+      id: number;
+      requested_by: string | null;
+      singer_id: string | null;
+      position: number;
+    }>(
+      `SELECT id, requested_by, singer_id, position FROM queue WHERE status = 'queued' ORDER BY position`
+    );
+    if (queueRes.rows.length <= 1) return;
+
+    // Count songs already played (done or currently playing) per singer — determines their "round".
+    // Use singer_id where available, fall back to requested_by.
+    const doneRes = await query<{ singer_key: string; count: string }>(
+      `SELECT
+         COALESCE(singer_id::text, LOWER(COALESCE(requested_by, ''))) AS singer_key,
+         COUNT(*) AS count
+       FROM queue
+       WHERE status IN ('done', 'playing')
+       GROUP BY singer_key`
+    );
+    const doneCounts = new Map<string, number>();
+    for (const row of doneRes.rows) {
+      doneCounts.set(row.singer_key, Number(row.count));
+    }
+
+    // Get singer positions from the rotation (used as tiebreaker within a round).
+    // Join via singer_id for precision.
+    const singerRes = await query<{
+      singer_id: string;
+      display_name: string;
+      position: number;
+      last_sang_at: Date | null;
+    }>(
+      `SELECT s.id AS singer_id, s.display_name, rs.position, rs.last_sang_at
+         FROM rotation_singers rs
+         JOIN singers s ON s.id = rs.singer_id
+        WHERE rs.rotation_id = $1 AND rs.status = 'active'
+        ORDER BY rs.position`,
+      [rotRow.id]
+    );
+
+    // Build lookup: singer_id string → { position, lastSangAt }
+    // Also keep a fallback lookup by lowercase display_name for old queue rows without singer_id
+    const singerInfoById = new Map<string, { position: number; lastSangAt: Date | null }>();
+    const singerInfoByName = new Map<string, { position: number; lastSangAt: Date | null }>();
+    for (const row of singerRes.rows) {
+      const info = { position: row.position, lastSangAt: row.last_sang_at };
+      singerInfoById.set(String(row.singer_id), info);
+      singerInfoByName.set(row.display_name.toLowerCase(), info);
+    }
+
+    // For singers in the queue but not yet in rotation_singers, assign them
+    // positions after the existing rotation singers, in first-appearance order.
+    const maxRegisteredPos =
+      singerInfoById.size > 0
+        ? Math.max(...Array.from(singerInfoById.values()).map((v) => v.position))
+        : -1;
+    let nextPos = maxRegisteredPos + 1;
+
+    // Helper: derive a stable singer key and info for a queue row
+    const getSingerKey = (row: { id: number; requested_by: string | null; singer_id: string | null }) => {
+      return row.singer_id ? row.singer_id : `name:${(row.requested_by ?? '').toLowerCase()}`;
+    };
+
+    const resolvedInfo = new Map<string, { position: number; lastSangAt: Date | null }>();
+    for (const item of queueRes.rows) {
+      const key = getSingerKey(item);
+      if (resolvedInfo.has(key)) continue;
+
+      if (item.singer_id && singerInfoById.has(item.singer_id)) {
+        resolvedInfo.set(key, singerInfoById.get(item.singer_id)!);
+      } else {
+        const name = (item.requested_by ?? '').toLowerCase();
+        if (name && singerInfoByName.has(name)) {
+          resolvedInfo.set(key, singerInfoByName.get(name)!);
+        } else {
+          resolvedInfo.set(key, { position: nextPos++, lastSangAt: null });
+        }
+      }
+    }
+
+    if (resolvedInfo.size === 0) return;
+
+    // Group queued items by singer key
+    const bySinger = new Map<string, Array<{ id: number; requested_by: string | null; singer_id: string | null; position: number }>>();
+    for (const item of queueRes.rows) {
+      const key = getSingerKey(item);
+      if (!bySinger.has(key)) bySinger.set(key, []);
+      bySinger.get(key)!.push(item);
+    }
+
+    // Assign a (round, tiebreaker) to every queued item
+    type SortItem = {
+      item: { id: number; requested_by: string | null; singer_id: string | null; position: number };
+      round: number;
+      origPos: number;
+      rotPos: number;
+      lastSangAt: Date | null;
+    };
+    const sortable: SortItem[] = [];
+
+    for (const [key, items] of bySinger) {
+      // Build the doneCounts key using the same logic as the SQL query:
+      // singer_id::text when available, else LOWER(requested_by).
+      const doneKey = items[0].singer_id
+        ? items[0].singer_id
+        : (items[0].requested_by ?? '').toLowerCase();
+      const doneCount = doneCounts.get(doneKey) ?? 0;
+      const info = resolvedInfo.get(key) ?? { position: Number.MAX_SAFE_INTEGER, lastSangAt: null };
+      items.forEach((item, songIndex) => {
+        sortable.push({
+          item,
+          // Each of a singer's queued songs belongs to a different round so that
+          // round-robin and signup_order policies correctly interleave singers.
+          // Round = songs already done + 1 (first pending) + songIndex (second, third…).
+          round: doneCount + 1 + songIndex,
+          origPos: item.position,
+          rotPos: info.position,
+          lastSangAt: info.lastSangAt,
+        });
+      });
+    }
+
+    // Determine the effective base policy for sort tiebreaking
+    const basePolicy: string =
+      rotationType === 'hybrid'
+        ? ((rotRow.config?.basePolicy as string | undefined) ?? 'strict_round_robin')
+        : rotationType;
+
+    if (basePolicy === 'least_recently_sung') {
+      sortable.sort((a, b) => {
+        if (a.round !== b.round) return a.round - b.round;
+        // Never sung → first
+        if (a.lastSangAt === null && b.lastSangAt !== null) return -1;
+        if (a.lastSangAt !== null && b.lastSangAt === null) return 1;
+        if (a.lastSangAt !== null && b.lastSangAt !== null) {
+          const diff = a.lastSangAt.getTime() - b.lastSangAt.getTime();
+          if (diff !== 0) return diff;
+        }
+        return a.origPos - b.origPos;
+      });
+    } else {
+      // strict_round_robin, signup_order, hybrid (non-LRS base)
+      // Within the same round, sort by rotation position so that the configured
+      // singer order is respected (not the order they happened to submit songs).
+      sortable.sort((a, b) => {
+        if (a.round !== b.round) return a.round - b.round;
+        return a.rotPos - b.rotPos;
+      });
+    }
+
+    const sorted = sortable.map((s) => s.item);
+
+    // Skip if already in the correct order
+    const currentIds = queueRes.rows.map((r) => r.id);
+    const sortedIds = sorted.map((r) => r.id);
+    if (currentIds.every((id, i) => id === sortedIds[i])) return;
+
+    const minPos = queueRes.rows[0].position;
+    // Temporary offset used in the two-phase position update to avoid
+    // intermediate unique-constraint conflicts when shuffling positions.
+    const TEMP_OFFSET = 1_000_000;
+
+    await query('BEGIN');
+    try {
+      // Phase 1: move to temp positions to avoid conflicts
+      for (let i = 0; i < sorted.length; i++) {
+        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, sorted[i].id]);
+      }
+      // Phase 2: move to final positions
+      for (let i = 0; i < sorted.length; i++) {
+        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [minPos + i, sorted[i].id]);
+      }
+      await query('COMMIT');
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+  } catch (err) {
+    console.error('resortQueueByRotation failed:', err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/queue/state — nested singer-based queue state for Host page
+// ---------------------------------------------------------------------------
+// NOTE: This route MUST be declared before GET /api/queue so Express doesn't
+// try to match "state" as an :id parameter.
+apiRouter.get(
+  '/queue/state',
+  ah(async (_req, res) => {
+    const state = await getQueueState();
+    res.json(state);
+  })
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/singers/:id/history — singer history including completed songs
+// ---------------------------------------------------------------------------
+apiRouter.get(
+  '/singers/:id/history',
+  ah(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid singer id' });
+    const history = await getSingerHistory(BigInt(id));
+    if (!history) return res.status(404).json({ error: 'Singer not found' });
+    res.json(history);
+  })
+);
+
+// ---------------------------------------------------------------------------
+// DELETE /api/singers/:id/history — delete ALL of a singer's queue entries
+// (pending queued songs, history, skipped, removed, cancelled) and reset stats.
+// Used when removing a singer from the rotation.
+// ---------------------------------------------------------------------------
+apiRouter.delete(
+  '/singers/:id/history',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid singer id' });
+    await query('BEGIN');
+    try {
+      await query(`DELETE FROM queue WHERE singer_id = $1`, [id]);
+      await query(`UPDATE singers SET total_songs_sung = 0, last_sang_at = NULL WHERE id = $1`, [id]);
+      await query('COMMIT');
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// PATCH /api/queue/:id/status — change status of a queue item
+// ---------------------------------------------------------------------------
+apiRouter.patch(
+  '/queue/:id/status',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid queue id' });
+    const { status } = req.body as { status?: string };
+    if (!status) return res.status(400).json({ error: 'status is required' });
+    const allowed = ['queued', 'done', 'removed', 'skipped'] as const;
+    if (!(allowed as readonly string[]).includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
+    }
+    const result = await updateQueueItemStatus(id, status as any);
+    if (!result.ok) return res.status(404).json({ error: result.error });
+    await resortQueueByRotation();
+    broadcastQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// PATCH /api/singers/:singerId/song-order — reorder a singer's queued songs
+// ---------------------------------------------------------------------------
+apiRouter.patch(
+  '/singers/:singerId/song-order',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = Number(req.params.singerId);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    const { queueIds } = req.body as { queueIds?: number[] };
+    if (!Array.isArray(queueIds)) return res.status(400).json({ error: 'queueIds array is required' });
+    const result = await reorderSingerQueue(BigInt(singerId), queueIds);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    await resortQueueByRotation();
+    broadcastQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  })
+);
+
+// Update the /queue endpoint to include duration_ms:
+
+apiRouter.get(
+  '/queue',
+  ah(async (_req, res) => {
+    const result = await query(
+      `
+      SELECT q.id,
+             q.track_id,
+             q.requested_by,
+             q.status,
+             q.position,
+             q.key_adjustment,
+             t.title,
+             t.disc_id,
+             t.duration_ms,
+             t.kind,
+             t.file_mp4,
+             t.file_mp3,
+             t.file_cdg,
+             t.path,
+             t.external_url,
+             t.source,
+             a.name AS artist
+        FROM queue q
+        JOIN tracks t ON t.id = q.track_id
+        LEFT JOIN artists a ON a.id = t.artist_id
+       ORDER BY q.position
+      `
+    );
+    res.json(result.rows);
+  })
+);
+
+apiRouter.post(
+  '/queue',
+  queueLimiter, // Apply rate limiting to prevent queue spam
+  ah(async (req, res) => {
+    const trackId = toInt(req.body?.trackId);
+    const requestedBy = (req.body?.requestedBy ?? null) as string | null;
+    const keyAdjustment = toInt(req.body?.keyAdjustment) ?? 0;
+    if (trackId == null) return res.status(400).send('trackId required');
+    if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
+
+    // Check if the track is from local library or external
+    const trackInfo = await query<{ source: string | null }>(
+      'SELECT source FROM tracks WHERE id = $1',
+      [trackId]
+    );
+    
+    if (trackInfo.rows.length === 0) {
+      return res.status(404).send('Track not found');
+    }
+    
+    const track = trackInfo.rows[0];
+    const isExternal = track.source && track.source !== 'local';
+    
+    // Check library settings
+    if (isExternal) {
+      const externalLibraryEnabled = await getSetting('libraries.external_enabled');
+      if (externalLibraryEnabled === false) {
+        return res.status(403).json({ error: 'External library is disabled' });
+      }
+    } else {
+      const localLibraryEnabled = await getSetting('libraries.local_enabled');
+      if (localLibraryEnabled === false) {
+        return res.status(403).json({ error: 'Local library is disabled' });
+      }
+    }
+
+    const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
+    const position = (posr.rows[0] as any).p;
+
+    // Find or create singer, then ensure they are in the active rotation.
+    let singerId: bigint | null = null;
+    if (requestedBy && requestedBy.trim()) {
+      try {
+        const singer = await findOrCreateSinger(requestedBy);
+        singerId = singer.id;
+        await ensureSingerInActiveRotation(singerId);
+      } catch (err) {
+        console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
+      }
+    }
+
+    // Try to insert with key_adjustment if the column exists
+    try {
+      const r = await query(
+        `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
+         VALUES ($1,$2,$3,'queued',$4,$5)
+         RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
+        [trackId, requestedBy, singerId, position, keyAdjustment]
+      );
+      logger.info(`Singer request queued: "${requestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
+      res.json(r.rows[0]);
+    } catch (err: any) {
+      // If key_adjustment column doesn't exist, fall back to insert without it
+      // PostgreSQL error code 42703 = undefined_column
+      const isColumnNotFound = 
+        err?.code === '42703' || 
+        (err?.message?.includes('key_adjustment') && err?.message?.includes('does not exist'));
+      
+      if (isColumnNotFound) {
+        console.warn('key_adjustment column does not exist in queue table, inserting without it');
+        const r = await query(
+          `INSERT INTO queue(track_id, requested_by, singer_id, status, position)
+           VALUES ($1,$2,$3,'queued',$4)
+           RETURNING id, track_id, requested_by, singer_id, status, position, created_at`,
+          [trackId, requestedBy, singerId, position]
+        );
+        logger.info(`Singer request queued: "${requestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
+        res.json(r.rows[0]);
+      } else {
+        // Re-throw if it's a different error
+        throw err;
+      }
+    }
+    
+    // Notify clients about the queue update
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    
+    // Get track details for pre-caching and duration extraction
+    const trackDetails = await query(
+      `SELECT t.id, t.title, t.kind, t.file_mp4, t.file_mp3, t.file_cdg, t.path, t.duration_ms, a.name AS artist
+       FROM tracks t
+       LEFT JOIN artists a ON a.id = t.artist_id
+       WHERE t.id = $1`,
+      [trackId]
+    );
+    
+    if (trackDetails.rows.length) {
+      const track = trackDetails.rows[0];
+      
+      // If duration_ms is missing, try to extract it
+      if (track.duration_ms === null) {
+        const extractedDuration = await extractTrackDuration(track);
+        
+        // Update the database with the extracted duration
+        if (extractedDuration !== null) {
+          logger.verbose(`Updating duration for track ${track.id}: ${extractedDuration}ms (${Math.round(extractedDuration / 1000)}s)`);
+          await query('UPDATE tracks SET duration_ms = $1 WHERE id = $2', [extractedDuration, track.id]);
+          
+          // Notify clients about the updated track (so Host page gets new duration)
+          postQueueUpdate('queue.updated');
+        }
+      }
+      
+      // Trigger pre-caching for CDG+MP3 from ZIP
+      if (track.kind === 'cdgmp3') {
+        const isFromZip = track.file_cdg?.startsWith('zip://');
+        
+        if (isFromZip) {
+          // Parse zip://path#entry format - split at .zip# to handle # in filenames
+          const ZIP_EXT = '.zip';
+          const ZIP_SEPARATOR = '.zip#';
+          const cdgWithoutPrefix = track.file_cdg.replace('zip://', '');
+          const mp3WithoutPrefix = track.file_mp3.replace('zip://', '');
+          
+          const cdgSeparatorIdx = cdgWithoutPrefix.indexOf(ZIP_SEPARATOR);
+          const mp3SeparatorIdx = mp3WithoutPrefix.indexOf(ZIP_SEPARATOR);
+          
+          const zipPath = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(0, cdgSeparatorIdx + ZIP_EXT.length) : cdgWithoutPrefix;
+          const cdgEntry = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(cdgSeparatorIdx + ZIP_SEPARATOR.length) : '';
+          const mp3Entry = mp3SeparatorIdx >= 0 ? mp3WithoutPrefix.substring(mp3SeparatorIdx + ZIP_SEPARATOR.length) : '';
+          
+          fetch(`http://localhost:${process.env.PORT || 5174}/media/precache`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              file: zipPath,
+              cdg: cdgEntry,
+              mp3: mp3Entry,
+              requestedBy,
+              title: track.title,
+              artist: track.artist
+            })
+          }).catch(err => console.error('Pre-cache request failed:', err));
+        }
+      }
+    }
+  })
+);
+
+apiRouter.post(
+  '/queue/reorder',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    const newPosition = toInt(req.body?.newPosition);
+    if (id == null || newPosition == null) return res.status(400).send('id and newPosition (integers) required');
+
+    await query('BEGIN');
+    try {
+      const cur = await query<{ position: number }>(`SELECT position FROM queue WHERE id=$1 FOR UPDATE`, [id]);
+      if (!cur.rows.length) throw new Error('not found');
+
+      const oldPos = cur.rows[0].position as number;
+      if (newPosition < oldPos) {
+        await query(`UPDATE queue SET position = position + 1 WHERE position >= $1 AND position < $2`, [newPosition, oldPos]);
+      } else if (newPosition > oldPos) {
+        await query(`UPDATE queue SET position = position - 1 WHERE position > $1 AND position <= $2`, [oldPos, newPosition]);
+      }
+      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [newPosition, id]);
+      await query('COMMIT');
+
+      res.json({ ok: true });
+      postQueueUpdate('queue.updated');
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+  })
+);
+
+apiRouter.post(
+  '/queue/rename',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    const requestedBy = String(req.body?.requestedBy ?? '').trim();
+    if (id == null) return res.status(400).send('id required');
+
+    await query(`UPDATE queue SET requested_by = $1 WHERE id = $2`, [requestedBy, id]);
+    res.json({ ok: true });
+    postQueueUpdate('queue.updated');
+  })
+);
+
+apiRouter.post(
+  '/queue/update-key',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    const keyAdjustment = toInt(req.body?.keyAdjustment);
+    if (id == null) return res.status(400).send('id required');
+    if (keyAdjustment == null) return res.status(400).send('keyAdjustment required');
+    if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
+
+    await query(`UPDATE queue SET key_adjustment = $1 WHERE id = $2`, [keyAdjustment, id]);
+    res.json({ ok: true });
+    postQueueUpdate('queue.updated');
+  })
+);
+
+apiRouter.post(
+  '/queue/delete',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    if (id == null) return res.status(400).send('id required');
+
+    await query('BEGIN');
+    try {
+      const cur = await query(`SELECT position FROM queue WHERE id=$1 FOR UPDATE`, [id]);
+      if (!cur.rows.length) throw new Error('not found');
+      const pos = (cur.rows[0] as any).position as number;
+
+      await query(`DELETE FROM queue WHERE id=$1`, [id]);
+      await query(`UPDATE queue SET position = position - 1 WHERE position > $1`, [pos]);
+
+      await query('COMMIT');
+      res.json({ ok: true });
+      postQueueUpdate('queue.updated');
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+  })
+);
+
+apiRouter.post(
+  '/queue/clear',
+  adminGuard,
+  ah(async (_req, res) => {
+    await query('BEGIN');
+    try {
+      // Reset stats for all singers who have queue entries before clearing
+      await query(`
+        UPDATE singers SET total_songs_sung = 0, last_sang_at = NULL
+        WHERE id IN (SELECT DISTINCT singer_id FROM queue WHERE singer_id IS NOT NULL)
+      `);
+      await query(`DELETE FROM queue`);
+      await query('COMMIT');
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+    res.json({ ok: true });
+    postQueueUpdate('queue.updated');
+  })
+);
+
+// ===================== PLAYER (Host controls) =====================
+// These are minimal and keep logic server-side so Player can react via your postQueueUpdate hook.
+
+apiRouter.get(
+  '/player/now',
+  ah(async (_req, res) => {
+    const r = await query(
+      `
+      SELECT q.id, q.track_id, q.position, q.requested_by, q.status,
+             t.title, t.kind, t.file_mp4, t.file_mp3, t.file_cdg, t.path,
+             t.external_url, t.source,
+             a.name AS artist
+        FROM queue q
+        JOIN tracks t ON t.id = q.track_id
+        LEFT JOIN artists a ON a.id = t.artist_id
+       WHERE q.status = 'playing'
+       ORDER BY q.position
+       LIMIT 1
+      `
+    );
+    res.json(r.rows[0] || null);
+  })
+);
+
+apiRouter.post(
+  '/player/play',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id ?? null);
+    
+    // Clear manual stop so autoplay can resume after this play action
+    manualStopActive = false;
+    await setSetting('player.manual_stop', 'false');
+
+    // First, determine which track will be played and ensure duration_ms is populated
+    let trackToPlay: any = null;
+    if (id != null) {
+      const result = await query(`
+        SELECT q.id, q.track_id, q.key_adjustment, q.requested_by, t.duration_ms, t.kind, t.file_mp4, t.file_mp3, t.file_cdg,
+               t.title, a.name AS artist
+        FROM queue q
+        JOIN tracks t ON t.id = q.track_id
+        LEFT JOIN artists a ON a.id = t.artist_id
+        WHERE q.id = $1
+      `, [id]);
+      if (result.rows.length > 0) {
+        trackToPlay = result.rows[0];
+      }
+    } else {
+      // Get the top queued song
+      const result = await query(`
+        SELECT q.id, q.track_id, q.key_adjustment, q.requested_by, t.duration_ms, t.kind, t.file_mp4, t.file_mp3, t.file_cdg,
+               t.title, a.name AS artist
+        FROM queue q
+        JOIN tracks t ON t.id = q.track_id
+        LEFT JOIN artists a ON a.id = t.artist_id
+        WHERE q.status = 'queued'
+        ORDER BY q.position
+        LIMIT 1
+      `);
+      if (result.rows.length > 0) {
+        trackToPlay = result.rows[0];
+      }
+    }
+    
+    // If we have a track to play with pitch adjustment or missing duration, ensure duration is cached
+    if (trackToPlay) {
+      const hasPitchAdjustment = trackToPlay.key_adjustment && trackToPlay.key_adjustment !== 0;
+      const needsDuration = trackToPlay.duration_ms === null;
+      
+      // Extract duration if:
+      // 1. Duration is missing (null), OR
+      // 2. Pitch adjustment is applied (to ensure accurate duration is cached before re-encoding)
+      if (needsDuration || hasPitchAdjustment) {
+        logger.verbose(`Track ${trackToPlay.track_id}: Ensuring duration is cached (hasPitch=${hasPitchAdjustment}, needsDuration=${needsDuration})`);
+        
+        const extractedDuration = await extractTrackDuration({
+          kind: trackToPlay.kind,
+          file_mp4: trackToPlay.file_mp4,
+          file_mp3: trackToPlay.file_mp3
+        });
+        
+        if (extractedDuration !== null && needsDuration) {
+          logger.verbose(`Caching duration for track ${trackToPlay.track_id}: ${extractedDuration}ms (${Math.round(extractedDuration / 1000)}s)`);
+          await query('UPDATE tracks SET duration_ms = $1 WHERE id = $2', [extractedDuration, trackToPlay.track_id]);
+        } else if (extractedDuration !== null) {
+          logger.verbose(`Duration already cached for track ${trackToPlay.track_id}: ${trackToPlay.duration_ms}ms (will be used for pitch-shifted playback)`);
+        }
+      }
+    }
+    
+    let songStarted = false;
+    if (trackToPlay) {
+      const singerLabel = trackToPlay.requested_by ? ` (requested by ${trackToPlay.requested_by})` : '';
+      const artistLabel = trackToPlay.artist ? ` by ${trackToPlay.artist}` : '';
+      logger.info(`Now playing: "${trackToPlay.title}"${artistLabel}${singerLabel}`);
+    }
+    await query('BEGIN');
+    try {
+      // Only reset the currently playing song back to queued; leave done/removed/skipped rows untouched
+      await query(`UPDATE queue SET status = 'queued', started_at = NULL WHERE status = 'playing'`);
+      if (id != null) {
+        const updateResult = await query<{ id: number }>(`UPDATE queue SET status = 'playing', started_at = NOW() WHERE id = $1 RETURNING id`, [id]);
+        songStarted = updateResult.rows.length > 0;
+      } else {
+        // play top
+        const updateResult = await query<{ id: number }>(`
+          UPDATE queue SET status = 'playing', started_at = NOW()
+           WHERE id = (SELECT id FROM queue WHERE status = 'queued' ORDER BY position LIMIT 1)
+           RETURNING id
+        `);
+        songStarted = updateResult.rows.length > 0;
+      }
+      await query('COMMIT');
+    } catch (e) {
+      await query('ROLLBACK'); throw e;
+    }
+    postQueueUpdate('player.play');
+    if (songStarted) {
+      await autoPauseBreakMusicForKaraoke();
+    }
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.post(
+  '/player/next',
+  adminGuard,
+  ah(async (_req, res) => {
+    // Re-sort the remaining queued items now that a song is about to complete.
+    // The currently-playing song is counted in doneCounts (status = 'playing')
+    // so the rotation correctly treats it as used up before picking the next song.
+    await resortQueueByRotation();
+
+    // Capture the currently-playing row so we can update singer stats after completion.
+    const playingRow = await query<{ id: number; singer_id: string | null }>(
+      `SELECT id, singer_id FROM queue WHERE status = 'playing' LIMIT 1`
+    );
+
+    // Atomically mark current song done and start the next one.
+    await query('BEGIN');
+    try {
+      await query(`UPDATE queue SET status = 'done', finished_at = NOW() WHERE status = 'playing'`);
+      await query(`
+        UPDATE queue SET status = 'playing', started_at = NOW()
+         WHERE id IN (
+           SELECT id FROM queue
+           WHERE status = 'queued'
+           ORDER BY position
+           LIMIT 1
+         )
+      `);
+      await query('COMMIT');
+    } catch (e) {
+      await query('ROLLBACK'); throw e;
+    }
+
+    // Update singer stats for the completed song using authoritative COUNT to avoid double-counting
+    if (playingRow.rows.length > 0 && playingRow.rows[0].singer_id) {
+      const singerId = playingRow.rows[0].singer_id;
+      try {
+        await recalculateSingerStats(singerId);
+      } catch (err) {
+        console.error('Failed to update singer stats after completion:', err);
+      }
+    }
+
+    postQueueUpdate('player.next');
+    // Resume break music only when there is no next karaoke song to play
+    const stillPlaying = await query<{ id: number }>(`SELECT id FROM queue WHERE status = 'playing' LIMIT 1`);
+    if (!stillPlaying.rows.length) {
+      await autoResumeBreakMusicForKaraoke();
+    }
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.post(
+  '/player/stop',
+  adminGuard,
+  ah(async (_req, res) => {
+    manualStopActive = true;
+    await setSetting('player.manual_stop', 'true');
+    await query(`UPDATE queue SET status = 'queued' WHERE status = 'playing'`);
+    postQueueUpdate('player.stop');
+    await autoResumeBreakMusicForKaraoke();
+    res.json({ ok: true });
+  })
+);
+
+// Get current player state (readable by all clients, not admin-only)
+apiRouter.get(
+  '/player/state',
+  ah(async (_req, res) => {
+    res.json({ manualStop: manualStopActive });
+  })
+);
+
+// Track song state for autoplay logic
+const songState = new Map<number | string, {
+  hasFinished: boolean;
+  autoplayScheduled: boolean;
+}>();
+
+// Track initial autoplay state to prevent duplicate triggers
+let initialAutoplayScheduled = false;
+let lastQueueCheck = 0;
+// Prevents autoplay from restarting after a manual stop; cleared on manual play
+let manualStopActive = false;
+
+// Restore manualStopActive from DB on startup (so server restarts preserve the stopped state)
+(async () => {
+  try {
+    const storedVal = await getSetting('player.manual_stop');
+    if (storedVal === 'true') {
+      manualStopActive = true;
+    }
+  } catch {
+    // ignore — default is false
+  }
+})();
+
+// Constants for initial autoplay timing
+const INITIAL_AUTOPLAY_CHECK_INTERVAL_MS = 2000; // Check every 2 seconds
+const INITIAL_AUTOPLAY_DEBOUNCE_MS = 3000; // Minimum time between scheduling attempts
+
+// Helper function to check if initial autoplay conditions are met
+async function checkInitialAutoplayConditions(): Promise<{ 
+  shouldAutoplay: boolean; 
+  autoplayEnabled: boolean;
+  hasPlayingSong: boolean;
+  hasQueuedSongs: boolean;
+}> {
+  const autoplayEnabled = await getSetting('autoplay.enabled');
+  const isEnabled = autoplayEnabled === 'true';
+  
+  const currentlyPlaying = await query<{ id: number }>(`
+    SELECT id FROM queue WHERE status = 'playing' LIMIT 1
+  `);
+  const hasPlayingSong = currentlyPlaying.rows.length > 0;
+  
+  const queuedSongs = await query<{ id: number }>(`
+    SELECT id FROM queue WHERE status = 'queued' ORDER BY position LIMIT 1
+  `);
+  const hasQueuedSongs = queuedSongs.rows.length > 0;
+  
+  return {
+    shouldAutoplay: isEnabled && !hasPlayingSong && hasQueuedSongs,
+    autoplayEnabled: isEnabled,
+    hasPlayingSong,
+    hasQueuedSongs
+  };
+}
+
+// Periodic check for initial autoplay - starts first song if:
+// 1. No song is playing
+// 2. Autoplay is enabled  
+// 3. There are songs in queue
+// 4. Enough time has passed since last check
+setInterval(async () => {
+  try {
+    const now = Date.now();
+    
+    // Skip check if autoplay was recently scheduled to avoid unnecessary queries
+    if (initialAutoplayScheduled && (now - lastQueueCheck) < INITIAL_AUTOPLAY_DEBOUNCE_MS) {
+      return;
+    }
+    
+    const conditions = await checkInitialAutoplayConditions();
+    
+    // Reset flag if conditions no longer met, or if a manual stop is active
+    if (!conditions.autoplayEnabled || conditions.hasPlayingSong || !conditions.hasQueuedSongs || manualStopActive) {
+      initialAutoplayScheduled = false;
+      return;
+    }
+    
+    // Schedule initial autoplay if not already scheduled
+    if (!initialAutoplayScheduled && conditions.shouldAutoplay) {
+      initialAutoplayScheduled = true;
+      lastQueueCheck = now;
+      
+      const delayStr = await getSetting('autoplay.delay');
+      const delay = delayStr ? parseInt(delayStr, 10) : 5;
+      
+      logger.info(`Initial autoplay: Waiting ${delay}s before starting first song...`);
+      
+      setTimeout(async () => {
+        try {
+          // Double-check conditions before starting song
+          const stillValid = await checkInitialAutoplayConditions();
+          
+          if (!stillValid.shouldAutoplay) {
+            logger.verbose('Initial autoplay: Conditions changed, skipping');
+            initialAutoplayScheduled = false;
+            return;
+          }
+          
+          // Start playing the first queued song with proper transaction handling
+          try {
+            await query('BEGIN');
+            const result = await query<{ id: number; title: string | null; artist: string | null }>(`
+              WITH next_song AS (
+                SELECT id FROM queue
+                WHERE status = 'queued'
+                ORDER BY position
+                LIMIT 1
+              ), updated AS (
+                UPDATE queue SET status = 'playing'
+                WHERE id = (SELECT id FROM next_song)
+                RETURNING id, track_id
+              )
+              SELECT u.id, t.title, a.name AS artist
+                FROM updated u
+                JOIN tracks t ON t.id = u.track_id
+                LEFT JOIN artists a ON a.id = t.artist_id
+            `);
+            await query('COMMIT');
+            
+            if (result.rows.length > 0) {
+              const { id, title, artist } = result.rows[0];
+              const songLabel = [artist, title].filter(Boolean).join(' - ') || `ID: ${id}`;
+              logger.info(`Initial autoplay: Started first song — ${songLabel}`);
+              postQueueUpdate('player.play');
+              await autoPauseBreakMusicForKaraoke();
+            }
+          } catch (dbErr) {
+            await query('ROLLBACK');
+            throw dbErr;
+          }
+          
+          initialAutoplayScheduled = false;
+        } catch (err) {
+          console.error('Initial autoplay error:', err);
+          initialAutoplayScheduled = false;
+        }
+      }, delay * 1000);
+    }
+  } catch (err) {
+    console.error('Initial autoplay check error:', err);
+    initialAutoplayScheduled = false;
+  }
+}, INITIAL_AUTOPLAY_CHECK_INTERVAL_MS);
+
+// Helper function to normalize queue ID to a number
+function normalizeQueueId(queueId: number | string): number | null {
+  if (typeof queueId === 'number') {
+    return queueId;
+  }
+  
+  // Use stricter validation for string inputs
+  const parsed = parseInt(queueId, 10);
+  
+  // Ensure the parsed value is valid and the string representation matches
+  // This prevents cases like '123abc' being parsed as 123
+  if (isNaN(parsed) || String(parsed) !== String(queueId).trim()) {
+    return null;
+  }
+  
+  return parsed;
+}
+
+// Mark a finished song as 'done' and keep it in the queue for history.
+// Returns true if the song was found (whether it needed updating or was already
+// done), false if the song does not exist in the queue at all.
+async function markSongDone(queueId: number | string): Promise<boolean> {
+  try {
+    const id = normalizeQueueId(queueId);
+    if (id === null) {
+      console.warn(`Invalid queueId for completion: ${queueId}`);
+      return false;
+    }
+
+    const checkResult = await query<{ id: number; singer_id: string | null; status: string }>(`
+      SELECT id, singer_id, status FROM queue WHERE id = $1
+    `, [id]);
+
+    if (checkResult.rows.length === 0) {
+      logger.verbose(`Song ${id} not found in queue`);
+      return false;
+    }
+
+    const row = checkResult.rows[0];
+    if (row.status === 'done') {
+      // Already marked done (e.g. manual /player/next was called first)
+      logger.verbose(`Song ${id} already marked done`);
+      return true;
+    }
+
+    // Mark song done and record completion time
+    await query(
+      `UPDATE queue SET status = 'done', finished_at = NOW() WHERE id = $1`,
+      [id],
+    );
+    logger.verbose(`Marked finished song ${id} as done`);
+
+    // Recalculate singer stats from actual done-count
+    if (row.singer_id) {
+      await recalculateSingerStats(row.singer_id).catch((err) =>
+        console.error(`Failed to recalculate singer stats after completion for singer ${row.singer_id}:`, err),
+      );
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Error marking finished song as done:', queueId, err);
+    throw err;
+  }
+}
+
+// Report playback timing from Player
+apiRouter.post(
+  '/player/timing',
+  ah(async (req, res) => {
+    const { currentTime, duration, queueId } = req.body;
+    
+    // Validate inputs
+    if (typeof currentTime !== 'number' || typeof duration !== 'number') {
+      return res.status(400).json({ error: 'currentTime and duration must be numbers' });
+    }
+    
+    // Validate ranges
+    if (currentTime < 0 || !isFinite(currentTime) || 
+        duration <= 0 || !isFinite(duration)) {
+      return res.status(400).json({ error: 'Invalid timing values: must be finite, non-negative, and duration must be positive' });
+    }
+    
+    // Broadcast timing update to all connected clients via WebSocket
+    postQueueUpdate('player.timing', {
+      currentTime,
+      duration,
+      queueId
+    });
+    
+    // Server-side autoplay logic: detect when song is finished
+    const SONG_END_TOLERANCE = 1; // Same as Host page
+    const songFinished = currentTime >= duration - SONG_END_TOLERANCE;
+    
+    if (songFinished && queueId != null) {
+      // Normalize queueId to a consistent type for Map lookups
+      const normalizedQueueId = normalizeQueueId(queueId);
+      
+      // Skip if the ID is invalid
+      if (normalizedQueueId === null) {
+        console.warn(`Invalid queueId received: ${queueId}`);
+        return res.json({ ok: true });
+      }
+      
+      // Get or initialize state for this song
+      const state = songState.get(normalizedQueueId) || { hasFinished: false, autoplayScheduled: false };
+      
+      // Only trigger autoplay once per song
+      if (!state.hasFinished && !state.autoplayScheduled) {
+        state.hasFinished = true;
+        state.autoplayScheduled = true;
+        songState.set(normalizedQueueId, state);
+        
+        // Check if autoplay is enabled (default: enabled when setting is not explicitly set)
+        const autoplayEnabled = await getSetting('autoplay.enabled');
+        const isEnabled = autoplayEnabled !== 'false';
+        
+        if (isEnabled) {
+          const delayStr = await getSetting('autoplay.delay');
+          const delay = delayStr ? parseInt(delayStr, 10) : 5;
+          const breakResumeDelayRaw = await getSetting('break_music.resume_delay');
+          const breakResumeDelay = breakResumeDelayRaw !== null ? Math.max(0, parseInt(breakResumeDelayRaw, 10)) : 2;
+          
+          // Mark the finished song as done so Player page shows countdown
+          try {
+            const songStillExisted = await markSongDone(normalizedQueueId);
+            
+            if (!songStillExisted) {
+              // Song was already removed, don't schedule autoplay
+              songState.delete(normalizedQueueId);
+              logger.verbose(`Autoplay: Song ${normalizedQueueId} was already removed, skipping autoplay`);
+              postQueueUpdate('queue.updated');
+              return res.json({ ok: true });
+            }
+            
+            // Notify clients that queue has updated (finished song marked done)
+            postQueueUpdate('queue.updated');
+            
+            // Determine whether there is a queued song waiting.
+            // Use a shorter break-music resume delay when the queue is empty so that
+            // break music resumes faster than the karaoke-to-karaoke transition delay.
+            const nextQueued = await query<{ id: number }>(
+              `SELECT id FROM queue WHERE status = 'queued' ORDER BY position LIMIT 1`
+            );
+            const timerDelay = nextQueued.rows.length > 0 ? delay : breakResumeDelay;
+
+            if (nextQueued.rows.length > 0) {
+              logger.info(`Song ${normalizedQueueId} finished. Autoplay enabled, waiting ${timerDelay}s before next song...`);
+              // Resume break music immediately so it plays during the inter-song countdown
+              await autoResumeBreakMusicForKaraoke();
+            } else {
+              logger.info(`Song ${normalizedQueueId} finished. Queue empty, resuming break music in ${timerDelay}s...`);
+            }
+
+            // Wait for the appropriate delay, then advance to next song or resume break music
+            setTimeout(async () => {
+              try {
+                await query('BEGIN');
+                
+                // Check if there's already a song playing (could happen if user manually advanced)
+                const currentlyPlaying = await query<{ id: number }>(`
+                  SELECT id FROM queue WHERE status = 'playing' LIMIT 1
+                `);
+                
+                if (currentlyPlaying.rows.length > 0) {
+                  // Another song is already playing, don't start a new one
+                  await query('COMMIT');
+                  songState.delete(normalizedQueueId);
+                  logger.verbose(`Autoplay: Another song is already playing (ID: ${currentlyPlaying.rows[0].id}), skipping autoplay`);
+                  return;
+                }
+                
+                // Check if manual stop is active — host pressed stop during the autoplay delay
+                if (manualStopActive) {
+                  await query('COMMIT');
+                  songState.delete(normalizedQueueId);
+                  logger.verbose(`Autoplay: Manual stop is active, skipping autoplay for song ${normalizedQueueId}`);
+                  return;
+                }
+                
+                // Play the next queued song
+                const result = await query<{ id: number; title: string | null; artist: string | null }>(`
+                  WITH next_song AS (
+                    SELECT id FROM queue
+                    WHERE status = 'queued'
+                    ORDER BY position
+                    LIMIT 1
+                  ), updated AS (
+                    UPDATE queue SET status = 'playing'
+                    WHERE id = (SELECT id FROM next_song)
+                    RETURNING id, track_id
+                  )
+                  SELECT u.id, t.title, a.name AS artist
+                    FROM updated u
+                    JOIN tracks t ON t.id = u.track_id
+                    LEFT JOIN artists a ON a.id = t.artist_id
+                `);
+                
+                await query('COMMIT');
+                
+                // Clean up state for the finished song
+                songState.delete(normalizedQueueId);
+                
+                if (result.rows.length > 0) {
+                  const { id, title, artist } = result.rows[0];
+                  const songLabel = [artist, title].filter(Boolean).join(' - ') || `ID: ${id}`;
+                  logger.info(`Autoplay: Started next song — ${songLabel}`);
+                  // Pause break music now that the next karaoke song is starting
+                  await autoPauseBreakMusicForKaraoke();
+                  postQueueUpdate('player.next');
+                } else {
+                  logger.info('Autoplay: No more songs in queue');
+                  postQueueUpdate('queue.updated');
+                  await autoResumeBreakMusicForKaraoke();
+                }
+              } catch (err) {
+                await query('ROLLBACK');
+                console.error('Autoplay error:', err);
+                songState.delete(normalizedQueueId);
+              }
+            }, timerDelay * 1000);
+          } catch (err) {
+            logger.error('Error marking finished song as done for autoplay:', err);
+          }
+        } else {
+          logger.verbose(`Song ${normalizedQueueId} finished but autoplay is disabled`);
+          // Still mark the finished song as done even if autoplay is disabled
+          try {
+            const marked = await markSongDone(normalizedQueueId);
+            songState.delete(normalizedQueueId);
+            if (marked) {
+              postQueueUpdate('queue.updated');
+              await autoResumeBreakMusicForKaraoke();
+            }
+          } catch (err) {
+            console.error('Error in autoplay-disabled song completion:', err);
+            // If marking fails, still clean up state and notify clients
+            // The song may have been manually removed already
+            songState.delete(normalizedQueueId);
+            postQueueUpdate('queue.updated');
+          }
+        }
+      }
+    }
+    
+    res.json({ ok: true });
+  })
+);
+
+// ==================== QR CODE GENERATION =====================
+// QR endpoint is now handled by routes/qr.ts
+
+// ===================== OVERLAY SETTINGS =====================
+
+// Get overlay settings
+apiRouter.get(
+  '/overlay/settings',
+  ah(async (_req, res) => {
+    const visible = await getSetting('overlay.visible');
+    const height = await getSetting('overlay.height');
+    const qrSize = await getSetting('overlay.qrSize');
+    const customMessage = await getSetting('overlay.customMessage');
+    const showRoller = await getSetting('overlay.showRoller');
+    const showQrCode = await getSetting('overlay.showQrCode');
+    const hideSingerQueue = await getSetting('overlay.hideSingerQueue');
+    res.json({
+      visible: visible === null ? true : visible === 'true',
+      height: height === null ? 90 : parseInt(height, 10),
+      qrSize: qrSize === null ? 60 : parseInt(qrSize, 10),
+      customMessage: customMessage || '',
+      showRoller: showRoller === null ? true : showRoller === 'true',
+      showQrCode: showQrCode === null ? true : showQrCode === 'true',
+      hideSingerQueue: hideSingerQueue === null ? false : hideSingerQueue === 'true'
+    });
+  })
+);
+
+// Update overlay settings (requires admin)
+apiRouter.post(
+  '/overlay/settings',
+  adminGuard,
+  ah(async (req, res) => {
+    const { visible, height, qrSize, customMessage, showRoller, showQrCode, hideSingerQueue } = req.body;
+    
+    if (typeof visible === 'boolean') {
+      await setSetting('overlay.visible', String(visible));
+    }
+    if (typeof height === 'number' && height >= 40 && height <= 150) {
+      await setSetting('overlay.height', String(height));
+    }
+    if (typeof qrSize === 'number' && qrSize >= 40 && qrSize <= 150) {
+      await setSetting('overlay.qrSize', String(qrSize));
+    }
+    if (typeof customMessage === 'string') {
+      // Limit custom message length to 500 characters
+      const truncatedMessage = customMessage.slice(0, 500);
+      await setSetting('overlay.customMessage', truncatedMessage);
+    }
+    if (typeof showRoller === 'boolean') {
+      await setSetting('overlay.showRoller', String(showRoller));
+    }
+    if (typeof showQrCode === 'boolean') {
+      await setSetting('overlay.showQrCode', String(showQrCode));
+    }
+    if (typeof hideSingerQueue === 'boolean') {
+      await setSetting('overlay.hideSingerQueue', String(hideSingerQueue));
+    }
+    
+    // Broadcast settings update to all clients
+    const currentVisible = await getSetting('overlay.visible');
+    const currentHeight = await getSetting('overlay.height');
+    const currentQrSize = await getSetting('overlay.qrSize');
+    const currentCustomMessage = await getSetting('overlay.customMessage');
+    const currentShowRoller = await getSetting('overlay.showRoller');
+    const currentShowQrCode = await getSetting('overlay.showQrCode');
+    const currentHideSingerQueue = await getSetting('overlay.hideSingerQueue');
+    
+    postQueueUpdate('overlay.settings', {
+      visible: currentVisible === null ? true : currentVisible === 'true',
+      height: currentHeight === null ? 90 : parseInt(currentHeight, 10),
+      qrSize: currentQrSize === null ? 60 : parseInt(currentQrSize, 10),
+      customMessage: currentCustomMessage || '',
+      showRoller: currentShowRoller === null ? true : currentShowRoller === 'true',
+      showQrCode: currentShowQrCode === null ? true : currentShowQrCode === 'true',
+      hideSingerQueue: currentHideSingerQueue === null ? false : currentHideSingerQueue === 'true'
+    });
+    
+    res.json({ ok: true });
+  })
+);
+
+// ===================== AUTOPLAY SETTINGS =====================
+
+// Get autoplay settings
+apiRouter.get(
+  '/autoplay/settings',
+  ah(async (_req, res) => {
+    const enabled = await getSetting('autoplay.enabled');
+    const delay = await getSetting('autoplay.delay');
+    res.json({
+      enabled: enabled === null ? false : enabled === 'true',
+      delay: delay === null ? 5 : parseInt(delay, 10)
+    });
+  })
+);
+
+// Update autoplay settings (requires admin)
+apiRouter.post(
+  '/autoplay/settings',
+  adminGuard,
+  ah(async (req, res) => {
+    const { enabled, delay } = req.body;
+    
+    if (typeof enabled === 'boolean') {
+      await setSetting('autoplay.enabled', String(enabled));
+    }
+    if (typeof delay === 'number' && delay >= 0 && delay <= 60) {
+      await setSetting('autoplay.delay', String(delay));
+    }
+    
+    // Broadcast settings update to all clients
+    const currentEnabled = await getSetting('autoplay.enabled');
+    const currentDelay = await getSetting('autoplay.delay');
+    
+    postQueueUpdate('autoplay.settings', {
+      enabled: currentEnabled === null ? false : currentEnabled === 'true',
+      delay: currentDelay === null ? 5 : parseInt(currentDelay, 10)
+    });
+    
+    res.json({ ok: true });
+  })
+);
+
+// ===================== CLEAR DATABASE (FK-safe, verifiable) =====================
+
+apiRouter.post(
+  '/admin/clear-db',
+  adminGuard,
+  ah(async (_req, res) => {
+    const [a1, t1, q1] = await Promise.all([
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM tracks`),
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue`),
+    ]);
+
+    await query(`
+      TRUNCATE TABLE queue, tracks, artists
+      RESTART IDENTITY
+      CASCADE
+    `);
+
+    const [a2, t2, q2] = await Promise.all([
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM tracks`),
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue`),
+    ]);
+
+    res.json({
+      ok: true,
+      before: { artists: Number(a1.rows[0].c), tracks: Number(t1.rows[0].c), queue: Number(q1.rows[0].c) },
+      after:  { artists: Number(a2.rows[0].c), tracks: Number(t2.rows[0].c), queue: Number(q2.rows[0].c) }
+    });
+
+    postQueueUpdate('queue.updated');
+  })
+);
+
+// ===================== YT-DLP OPERATIONS =====================
+
+// Get yt-dlp version
+apiRouter.get(
+  '/admin/ytdlp/version',
+  adminGuard,
+  ah(async (req, res) => {
+    const { getYtDlpVersion } = await import('../ytdlp');
+    const version = await getYtDlpVersion();
+    res.json({ version });
+  })
+);
+
+// Update yt-dlp
+apiRouter.post(
+  '/admin/ytdlp/update',
+  adminGuard,
+  ah(async (req, res) => {
+    const { updateYtDlp } = await import('../ytdlp');
+    const result = await updateYtDlp();
+    res.json(result);
+  })
+);
+
+// Download video using yt-dlp
+apiRouter.post(
+  '/admin/ytdlp/download',
+  adminGuard,
+  ah(async (req, res) => {
+    const { url, format, title, artist, brand, discId } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    
+    // Check if downloads are allowed
+    const allowDownloads = await getSetting('ytdlp.allow_downloads');
+    if (allowDownloads === false) {
+      return res.status(403).json({ error: 'Downloads are disabled' });
+    }
+    
+    const { downloadVideo, addDownloadedFileToDatabase } = await import('../ytdlp');
+    
+    // Download the video
+    const result = await downloadVideo(url, { format, title, artist, brand, discId });
+    
+    if (result.success && result.filePath) {
+      // Add the downloaded file to the database
+      const dbResult = await addDownloadedFileToDatabase(result.filePath);
+      
+      res.json({ 
+        ok: true, 
+        filePath: result.filePath,
+        parsed: result.parsed,
+        trackId: dbResult.trackId,
+        message: result.message,
+        dbMessage: dbResult.message
+      });
+    } else {
+      res.status(500).json({ error: result.message });
+    }
+  })
+);
+
+// Scan download location
+apiRouter.post(
+  '/admin/ytdlp/scan',
+  adminGuard,
+  ah(async (req, res) => {
+    const { scanDownloadLocation } = await import('../ytdlp');
+    const result = await scanDownloadLocation();
+    res.json(result);
+  })
+);
+
+// Get video info
+apiRouter.post(
+  '/admin/ytdlp/info',
+  adminGuard,
+  ah(async (req, res) => {
+    const { url } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    
+    const { getVideoInfo } = await import('../ytdlp');
+    try {
+      const info = await getVideoInfo(url);
+      res.json({ ok: true, info });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  })
+);
+
+// ===================== SETTINGS MANAGEMENT =====================
+
+// Get public settings (no authentication required - for guest features like Requests page)
+apiRouter.get(
+  '/settings/public',
+  ah(async (req, res) => {
+    // Only return settings that are safe for public access
+    const publicKeys: Array<keyof PublicSettings> = [
+      'libraries.local_enabled',
+      'libraries.external_enabled',
+      'requests.acceptance'
+    ];
+    
+    const result = await query('SELECT key, value FROM settings WHERE key = ANY($1)', [publicKeys]);
+    const settings: Partial<PublicSettings> = {};
+    for (const row of result.rows) {
+      settings[row.key as keyof PublicSettings] = row.value;
+    }
+    
+    // Set defaults for missing settings
+    const completeSettings: PublicSettings = {
+      'libraries.local_enabled': settings['libraries.local_enabled'] ?? true,
+      'libraries.external_enabled': settings['libraries.external_enabled'] ?? true,
+      'requests.acceptance': settings['requests.acceptance'] ?? 'local'
+    };
+    
+    res.json(completeSettings);
+  })
+);
+
+// Get all settings (admin only)
+apiRouter.get(
+  '/admin/settings',
+  adminGuard,
+  ah(async (req, res) => {
+    const result = await query('SELECT key, value FROM settings ORDER BY key');
+    const settings: Record<string, any> = {};
+    for (const row of result.rows) {
+      settings[row.key] = row.value;
+    }
+    res.json(settings);
+  })
+);
+
+// Update a setting (admin only)
+apiRouter.put(
+  '/admin/settings/:key',
+  adminGuard,
+  ah(async (req, res) => {
+    const { key } = req.params;
+    const { value } = req.body;
+    
+    if (!key) {
+      return res.status(400).json({ error: 'Setting key is required' });
+    }
+    
+    await setSetting(key, value);
+
+    // Apply log level change immediately without requiring a server restart
+    if (key === 'admin.log_level' && value) {
+      setLogLevel(value as LogLevel);
+    }
+
+    res.json({ ok: true });
+  })
+);
+
+// ===================== BREAK MUSIC =====================
+
+apiRouter.get(
+  '/break-music/folders',
+  adminGuard,
+  ah(async (_req, res) => {
+    const r = await query<{ id: number; name: string; path: string }>(
+      `SELECT id, name, path FROM break_music_folders ORDER BY id`
+    );
+    res.json(r.rows);
+  })
+);
+
+apiRouter.post(
+  '/break-music/folders',
+  adminGuard,
+  ah(async (req, res) => {
+    const name = String(req.body?.name ?? '').trim();
+    const folderPath = String(req.body?.path ?? '').trim();
+    if (!name || !folderPath) return res.status(400).json({ error: 'name and path required' });
+    await query(`INSERT INTO break_music_folders(name, path) VALUES ($1, $2)`, [name, folderPath]);
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.delete(
+  '/break-music/folders/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.params.id);
+    if (id == null) return res.status(400).json({ error: 'invalid id' });
+    await query('BEGIN');
+    try {
+      await query(`DELETE FROM break_music_tracks WHERE folder_id = $1`, [id]);
+      await query(`DELETE FROM break_music_folders WHERE id = $1`, [id]);
+      await query('COMMIT');
+    } catch (err) {
+      await query('ROLLBACK');
+      throw err;
+    }
+
+    const resolved = await resolveBreakMusicPlaybackState(0);
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true, currentTrackId: resolved.track?.id ?? null });
+  })
+);
+
+apiRouter.post(
+  '/break-music/clear-library',
+  adminGuard,
+  ah(async (_req, res) => {
+    const beforeResult = await query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM break_music_tracks`);
+    const before = Number(beforeResult.rows[0]?.count || '0');
+
+    await query(`DELETE FROM break_music_tracks`);
+    await setBreakMusicState({
+      currentTrackId: null,
+      currentStartedAt: null,
+      currentPositionSec: 0,
+      playlistTrackIds: [],
+      playlistIndex: 0,
+      activePlaylistId: null,
+    });
+
+    const afterResult = await query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM break_music_tracks`);
+    const after = Number(afterResult.rows[0]?.count || '0');
+
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true, before, after });
+  })
+);
+
+apiRouter.post(
+  '/break-music/scan',
+  adminGuard,
+  ah(async (req, res) => {
+    const folderId = toInt(req.body?.folderId);
+    const folders = folderId == null
+      ? await query<{ id: number; path: string }>(`SELECT id, path FROM break_music_folders ORDER BY id`)
+      : await query<{ id: number; path: string }>(`SELECT id, path FROM break_music_folders WHERE id = $1`, [folderId]);
+
+    let indexed = 0;
+    for (const folder of folders.rows) {
+      let files: string[] = [];
+      try {
+        files = await walkFilesRecursive(folder.path);
+      } catch (err) {
+        console.warn('Failed to scan break music folder:', folder.path, err);
+        continue;
+      }
+
+      const seen = new Set<string>();
+      for (const filePath of files) {
+        if (!isBreakMusicFile(filePath)) continue;
+        const base = path.basename(filePath);
+        const parsed = parseBreakMusicFromFilename(base);
+
+        // Extract ID3/metadata tags from the actual audio file via ffprobe,
+        // falling back to filename-parsed values when tags are absent.
+        const meta = await extractAudioMetadata(filePath);
+        const title = meta.title || parsed.title || base.replace(/\.[^.]+$/, '');
+        const artist = meta.artist || parsed.artist || null;
+        const genre = meta.genre || null;
+        const duration_ms = meta.duration_ms || null;
+
+        await query(
+          `INSERT INTO break_music_tracks(folder_id, title, artist, genre, duration_ms, file_path)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (file_path) DO UPDATE
+           SET folder_id = EXCLUDED.folder_id,
+               title = EXCLUDED.title,
+               artist = EXCLUDED.artist,
+               genre = EXCLUDED.genre,
+               duration_ms = EXCLUDED.duration_ms`,
+          [folder.id, title, artist, genre, duration_ms, filePath]
+        );
+        seen.add(filePath);
+        indexed++;
+      }
+
+      if (seen.size > 0) {
+        await query(
+          `DELETE FROM break_music_tracks
+            WHERE folder_id = $1
+              AND file_path <> ALL($2::text[])`,
+          [folder.id, Array.from(seen)]
+        );
+      } else {
+        await query(`DELETE FROM break_music_tracks WHERE folder_id = $1`, [folder.id]);
+      }
+    }
+
+    const resolved = await resolveBreakMusicPlaybackState(0);
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true, indexed, currentTrackId: resolved.track?.id ?? null });
+  })
+);
+
+apiRouter.get(
+  '/break-music/search',
+  sessionGuard,
+  searchLimiter,
+  ah(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const r = q
+      ? await query(
+        `SELECT id, title, artist, genre, duration_ms, file_path
+           FROM break_music_tracks
+          WHERE title ILIKE '%' || $1 || '%'
+             OR artist ILIKE '%' || $1 || '%'
+             OR genre ILIKE '%' || $1 || '%'
+          ORDER BY artist NULLS LAST, title`,
+        [q]
+      )
+      : await query(
+        `SELECT id, title, artist, genre, duration_ms, file_path
+           FROM break_music_tracks
+          ORDER BY artist NULLS LAST, title`
+      );
+    res.json(r.rows);
+  })
+);
+
+apiRouter.get(
+  '/break-music/state',
+  ah(async (_req, res) => {
+    const crossfadeSeconds = Number(await getSetting('break_music.crossfade_seconds') ?? 3);
+    const volumePercent = Number(await getSetting('break_music.volume_percent') ?? 100);
+    const resumeDelayRaw = await getSetting('break_music.resume_delay');
+    const resumeDelaySec = resumeDelayRaw !== null ? Number(resumeDelayRaw) : 2;
+    const resolved = await resolveBreakMusicPlaybackState(0);
+    const playlistNames = await query<{ id: number; name: string }>(
+      `SELECT id, name FROM break_music_playlists ORDER BY updated_at DESC, id DESC`
+    );
+
+    let elapsed = resolved.state.currentPositionSec || 0;
+    if (!resolved.state.paused && resolved.state.currentStartedAt) {
+      const startedMs = Date.parse(resolved.state.currentStartedAt);
+      if (Number.isFinite(startedMs)) {
+        elapsed = Math.max(elapsed, Math.floor((Date.now() - startedMs) / 1000));
+      }
+    }
+
+    const durationSec = resolved.track?.duration_ms ? Math.max(0, Math.floor(resolved.track.duration_ms / 1000)) : null;
+    const remainingSec = durationSec != null ? Math.max(0, durationSec - elapsed) : null;
+
+    res.json({
+      paused: resolved.state.paused,
+      crossfadeSeconds: Number.isFinite(crossfadeSeconds) ? crossfadeSeconds : 3,
+      volumePercent: Number.isFinite(volumePercent) ? Math.max(0, Math.min(100, Math.round(volumePercent))) : 100,
+      resumeDelaySec: Number.isFinite(resumeDelaySec) ? Math.max(0, Math.min(30, Math.round(resumeDelaySec))) : 2,
+      currentTrack: resolved.track,
+      elapsedSec: elapsed,
+      remainingSec,
+      playlistTrackIds: resolved.state.playlistTrackIds,
+      playlistIndex: resolved.state.playlistIndex,
+      activePlaylistId: resolved.state.activePlaylistId,
+      playlists: playlistNames.rows
+    });
+  })
+);
+
+apiRouter.post(
+  '/break-music/settings',
+  adminGuard,
+  ah(async (req, res) => {
+    const hasCrossfadeSeconds = req.body?.crossfadeSeconds !== undefined;
+    const hasVolumePercent = req.body?.volumePercent !== undefined;
+    const hasResumeDelaySec = req.body?.resumeDelaySec !== undefined;
+    if (!hasCrossfadeSeconds && !hasVolumePercent && !hasResumeDelaySec) {
+      return res.status(400).json({ error: 'At least one of crossfadeSeconds, volumePercent, or resumeDelaySec is required' });
+    }
+
+    if (hasCrossfadeSeconds) {
+      const crossfadeSeconds = Number(req.body?.crossfadeSeconds);
+      if (!Number.isFinite(crossfadeSeconds) || crossfadeSeconds < 0 || crossfadeSeconds > 15) {
+        return res.status(400).json({ error: 'crossfadeSeconds must be between 0 and 15' });
+      }
+      await setSetting('break_music.crossfade_seconds', crossfadeSeconds);
+    }
+
+    if (hasVolumePercent) {
+      const volumePercent = Number(req.body?.volumePercent);
+      if (!Number.isFinite(volumePercent) || volumePercent < 0 || volumePercent > 100) {
+        return res.status(400).json({ error: 'volumePercent must be between 0 and 100' });
+      }
+      await setSetting('break_music.volume_percent', Math.round(volumePercent));
+    }
+
+    if (hasResumeDelaySec) {
+      const resumeDelaySec = Number(req.body?.resumeDelaySec);
+      if (!Number.isFinite(resumeDelaySec) || resumeDelaySec < 0 || resumeDelaySec > 30) {
+        return res.status(400).json({ error: 'resumeDelaySec must be between 0 and 30' });
+      }
+      await setSetting('break_music.resume_delay', Math.round(resumeDelaySec));
+    }
+
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.post(
+  '/break-music/control',
+  adminGuard,
+  ah(async (req, res) => {
+    const action = String(req.body?.action || '').trim();
+    if (action === 'pause') {
+      const resolved = await resolveBreakMusicPlaybackState(0);
+      let currentPositionSec = resolved.state.currentPositionSec || 0;
+      if (!resolved.state.paused && resolved.state.currentStartedAt) {
+        const startedMs = Date.parse(resolved.state.currentStartedAt);
+        if (Number.isFinite(startedMs)) {
+          currentPositionSec = Math.max(currentPositionSec, Math.floor((Date.now() - startedMs) / 1000));
+        }
+      }
+      // User explicitly paused — clear autoPaused so karaoke end won't override this
+      await setBreakMusicState({ paused: true, autoPaused: false, currentPositionSec, currentStartedAt: null });
+    } else if (action === 'resume') {
+      const state = await getBreakMusicState();
+      // User explicitly resumed — clear autoPaused so karaoke start will auto-pause again if needed
+      await setBreakMusicState({
+        paused: false,
+        autoPaused: false,
+        currentStartedAt: new Date(Date.now() - Math.max(0, state.currentPositionSec) * 1000).toISOString()
+      });
+    } else if (action === 'skip') {
+      await resolveBreakMusicPlaybackState(1);
+    } else if (action === 'previous') {
+      await resolveBreakMusicPlaybackState(-1);
+    } else if (action === 'select') {
+      const trackId = toInt(req.body?.trackId);
+      if (trackId == null) return res.status(400).json({ error: 'trackId required for select' });
+      await setBreakMusicState({
+        currentTrackId: trackId,
+        currentStartedAt: new Date().toISOString(),
+        currentPositionSec: 0,
+        paused: false
+      });
+    } else {
+      return res.status(400).json({ error: 'Invalid action' });
+    }
+
+    const resolved = await resolveBreakMusicPlaybackState(0);
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true, currentTrack: resolved.track });
+  })
+);
+
+apiRouter.post(
+  '/break-music/auto-next',
+  ah(async (_req, res) => {
+    await resolveBreakMusicPlaybackState(1);
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.post(
+  '/break-music/timing',
+  ah(async (req, res) => {
+    const trackId = toInt(req.body?.trackId);
+    const currentTime = Number(req.body?.currentTime);
+    if (trackId == null || !Number.isFinite(currentTime) || currentTime < 0) {
+      return res.status(400).json({ error: 'trackId and currentTime are required' });
+    }
+    await setBreakMusicState({
+      currentTrackId: trackId,
+      currentPositionSec: Math.floor(currentTime),
+      currentStartedAt: new Date(Date.now() - Math.floor(currentTime * 1000)).toISOString()
+    });
+    res.json({ ok: true });
+  })
+);
+
+apiRouter.get(
+  '/break-music/playlists',
+  sessionGuard,
+  ah(async (_req, res) => {
+    const r = await query<{ id: number; name: string; created_at: string; updated_at: string }>(
+      `SELECT id, name, created_at, updated_at
+         FROM break_music_playlists
+        ORDER BY updated_at DESC, id DESC`
+    );
+    res.json(r.rows);
+  })
+);
+
+apiRouter.post(
+  '/break-music/playlists',
+  sessionGuard,
+  ah(async (req, res) => {
+    const name = String(req.body?.name ?? '').trim();
+    const trackIds = Array.isArray(req.body?.trackIds)
+      ? req.body.trackIds.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
+      : [];
+
+    if (!name) return res.status(400).json({ error: 'name required' });
+    if (trackIds.length === 0) return res.status(400).json({ error: 'trackIds required' });
+
+    await query('BEGIN');
+    try {
+      const playlist = await query<{ id: number }>(
+        `INSERT INTO break_music_playlists(name)
+         VALUES($1)
+         ON CONFLICT (name) DO UPDATE SET updated_at = now()
+         RETURNING id`,
+        [name]
+      );
+      const playlistId = playlist.rows[0].id;
+      await query(`DELETE FROM break_music_playlist_tracks WHERE playlist_id = $1`, [playlistId]);
+      for (let i = 0; i < trackIds.length; i++) {
+        await query(
+          `INSERT INTO break_music_playlist_tracks(playlist_id, track_id, position)
+           VALUES ($1, $2, $3)`,
+          [playlistId, trackIds[i], i]
+        );
+      }
+      const m3uPath = await writeBreakMusicPlaylistFile(name, trackIds);
+      await query('COMMIT');
+      res.json({ ok: true, playlistId, m3uPath });
+    } catch (err) {
+      await query('ROLLBACK');
+      throw err;
+    }
+  })
+);
+
+apiRouter.post(
+  '/break-music/playlists/load',
+  sessionGuard,
+  ah(async (req, res) => {
+    const playlistId = toInt(req.body?.playlistId);
+    if (playlistId == null) return res.status(400).json({ error: 'playlistId required' });
+    const tracks = await query<{ track_id: number }>(
+      `SELECT track_id FROM break_music_playlist_tracks
+        WHERE playlist_id = $1
+        ORDER BY position`,
+      [playlistId]
+    );
+    const trackIds = tracks.rows.map(r => r.track_id);
+    await setBreakMusicState({
+      playlistTrackIds: trackIds,
+      playlistIndex: 0,
+      currentTrackId: null,
+      currentPositionSec: 0,
+      currentStartedAt: null,
+      paused: false,
+      activePlaylistId: playlistId,
+    });
+    const resolved = await resolveBreakMusicPlaybackState(0);
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true, trackIds, currentTrack: resolved.track });
+  })
+);
+
+apiRouter.post(
+  '/break-music/playlist/active',
+  sessionGuard,
+  ah(async (req, res) => {
+    const requestedTrackIds = Array.isArray(req.body?.trackIds)
+      ? req.body.trackIds.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
+      : [];
+
+    const existing = requestedTrackIds.length
+      ? await query<{ id: number }>(
+        `SELECT id
+           FROM break_music_tracks
+          WHERE id = ANY($1)
+          ORDER BY array_position($1::int[], id)`,
+        [requestedTrackIds]
+      )
+      : { rows: [] as { id: number }[] };
+    const trackIds = existing.rows.map((r) => r.id);
+
+    const state = await getBreakMusicState();
+    let currentTrackId = state.currentTrackId;
+    let playlistIndex = 0;
+    let currentStartedAt = state.currentStartedAt;
+    let currentPositionSec = state.currentPositionSec;
+
+    if (trackIds.length === 0) {
+      currentTrackId = null;
+      playlistIndex = 0;
+      currentStartedAt = null;
+      currentPositionSec = 0;
+    } else if (currentTrackId != null && trackIds.includes(currentTrackId)) {
+      playlistIndex = trackIds.indexOf(currentTrackId);
+    } else {
+      const maxIndex = Math.max(0, trackIds.length - 1);
+      const nextIndex = Math.min(Math.max(state.playlistIndex, 0), maxIndex);
+      currentTrackId = trackIds[nextIndex] ?? null;
+      playlistIndex = nextIndex;
+      currentStartedAt = currentTrackId != null ? new Date().toISOString() : null;
+      currentPositionSec = 0;
+    }
+
+    await setBreakMusicState({
+      playlistTrackIds: trackIds,
+      playlistIndex,
+      currentTrackId,
+      currentStartedAt,
+      currentPositionSec,
+      activePlaylistId: null,
+    });
+
+    const resolved = await resolveBreakMusicPlaybackState(0);
+    postQueueUpdate('break_music.updated');
+    res.json({
+      ok: true,
+      trackIds: resolved.state.playlistTrackIds,
+      playlistIndex: resolved.state.playlistIndex,
+      currentTrack: resolved.track
+    });
+  })
+);
+
+// JSON error handler
+apiRouter.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('API error:', err);
+  res.status(500).json({ error: String(err?.message || err) });
+});
