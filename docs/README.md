@@ -5,13 +5,13 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 ##  Table of Contents
 
-- [Features](#-features)
-- [Web Pages Overview](#-web-pages-overview)
-- [Quick Start with Docker](#-quick-start-with-docker)
-- [First-Time Setup](#-first-time-setup)
-- [Architecture](#-architecture)
-- [Development](#-development)
-- [Troubleshooting](#-troubleshooting)
+- [Features](#features)
+- [Web Pages Overview](#web-pages-overview)
+- [Quick Start with Docker](#quick-start-with-docker)
+- [First-Time Setup](#first-time-setup)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
 
 ## Overview
 
@@ -24,6 +24,7 @@ Recent platform updates add:
 - 🎶 **Break music management** with playlists, active playlist sync, volume control, and crossfade settings between karaoke tracks
 - 🖥️ **Player/overlay controls** for QR visibility, ticker controls, queue privacy options, and live settings propagation over WebSocket
 
+<a id="features"></a>
 ## ✨ Features
 
 - 🎤 **Multi-format support**: MP4 videos, CDG+MP3 files (raw and zipped)
@@ -38,6 +39,7 @@ Recent platform updates add:
 - 📊 **Admin dashboard** for library management and statistics
 - 🎯 **Host panel** for queue control and playback management
 
+<a id="web-pages-overview"></a>
 ## Web Pages Overview
 ---
 ### Requests Page
@@ -120,6 +122,7 @@ Management interface for system configuration and media libraries.
 
 ---
 
+<a id="quick-start-with-docker"></a>
 ## Quick Start with Docker
 
 ### Prerequisites
@@ -284,6 +287,7 @@ To setup reverse proxy for SSL termination:
 4. Ensure your proxy points to the correct ports
 
 ---
+<a id="first-time-setup"></a>
 ## First-Time Setup
 
 After starting the containers for the first time:
@@ -321,6 +325,7 @@ After starting the containers for the first time:
 8. **Done!** Guests can now request songs via the Requests page
 
 ---
+<a id="troubleshooting"></a>
 ## Troubleshooting
 
 ### Common Issues
@@ -392,6 +397,7 @@ The application runs three Docker containers:
   - Image: `postgres:18`
   - Exposed port: 5432
 ---
+<a id="architecture"></a>
 ## Architecture
 
 ### Technology Stack
@@ -433,6 +439,7 @@ The application runs three Docker containers:
 6. CDG files transcoded to MP4 in real-time if needed
 
 ---
+<a id="development"></a>
 ## Development
 
 ### Local Development (without Docker)
