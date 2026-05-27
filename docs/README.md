@@ -393,7 +393,7 @@ The application runs three Docker containers:
   - Exposed port: 5174
   - Mounts: `MEDIA_PATH` → `/media` inside container
 
-- **karaoke-db**: PostgreSQL 16 database
+- **karaoke-db**: PostgreSQL 18 database
   - Image: `postgres:18`
   - Exposed port: 5432
 ---
