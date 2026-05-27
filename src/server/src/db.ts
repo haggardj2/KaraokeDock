@@ -361,8 +361,13 @@ export async function ensureAdminUser(): Promise<void> {
     const storedUsername = await getSetting('admin.username');
     const storedPassword = await getSetting('admin.password');
     const username = storedUsername || process.env.ADMIN_USERNAME || 'admin';
-    // storedPassword may be a bcrypt hash (from migration) or plaintext default
-    const rawPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    // storedPassword may be a bcrypt hash (from migration) or plaintext value
+    let rawPassword = storedPassword || process.env.ADMIN_PASSWORD;
+    let generatedBootstrapPassword: string | null = null;
+    if (!rawPassword) {
+      generatedBootstrapPassword = crypto.randomBytes(18).toString('base64url');
+      rawPassword = generatedBootstrapPassword;
+    }
     // Use a regex matching the full bcrypt format ($2a$, $2b$, $2y$ + cost + hash)
     const bcryptPattern = /^\$2[aby]\$\d{2}\$.{53}$/;
     const isAlreadyHashed = typeof rawPassword === 'string' && bcryptPattern.test(rawPassword);
@@ -374,6 +379,11 @@ export async function ensureAdminUser(): Promise<void> {
        ON CONFLICT (username) DO NOTHING`,
       [username, passwordHash]
     );
+    if (generatedBootstrapPassword) {
+      console.warn(
+        `[security] No admin password was configured. Generated bootstrap credentials: username="${username}" password="${generatedBootstrapPassword}". Change this password immediately after first login.`
+      );
+    }
     console.log('[db] Migrated legacy admin user to users table');
   } catch (err) {
     console.error('[db] ensureAdminUser failed:', err);
@@ -409,10 +419,11 @@ export async function createSession(expiresInDays: number = 30, userId?: number,
   const token = generateToken();
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + expiresInDays);
+  const storedToken = hashSessionToken(token);
 
   await query(
     'INSERT INTO sessions (token, expires_at, user_id, role) VALUES ($1, $2, $3, $4)',
-    [token, expiresAt, userId ?? null, role]
+    [storedToken, expiresAt, userId ?? null, role]
   );
 
   return token;
@@ -430,9 +441,10 @@ export async function validateSession(token: string): Promise<boolean> {
  * Validate a session and return user info (role, userId)
  */
 export async function validateSessionInfo(token: string): Promise<SessionInfo> {
+  const hashedToken = hashSessionToken(token);
   const res = await query<Session>(
-    'SELECT * FROM sessions WHERE token = $1 AND expires_at > NOW()',
-    [token]
+    'SELECT * FROM sessions WHERE token = ANY($1::text[]) AND expires_at > NOW() LIMIT 1',
+    [[hashedToken, token]]
   );
 
   if (res.rows.length === 0) {
@@ -442,7 +454,11 @@ export async function validateSessionInfo(token: string): Promise<SessionInfo> {
   const session = res.rows[0];
 
   // Update last accessed time
-  await query('UPDATE sessions SET last_accessed = NOW() WHERE token = $1', [token]);
+  if (session.token === token) {
+    await query('UPDATE sessions SET token = $2, last_accessed = NOW() WHERE token = $1', [token, hashedToken]);
+  } else {
+    await query('UPDATE sessions SET last_accessed = NOW() WHERE token = $1', [hashedToken]);
+  }
 
   // Backward compat: sessions without user_id are legacy admin sessions
   const role = session.role || 'admin';
@@ -458,7 +474,7 @@ export async function validateSessionInfo(token: string): Promise<SessionInfo> {
  * Delete a session (logout)
  */
 export async function deleteSession(token: string): Promise<void> {
-  await query('DELETE FROM sessions WHERE token = $1', [token]);
+  await query('DELETE FROM sessions WHERE token = ANY($1::text[])', [[hashSessionToken(token), token]]);
 }
 
 /**
@@ -473,6 +489,10 @@ export async function cleanupExpiredSessions(): Promise<void> {
  */
 function generateToken(): string {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function hashSessionToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 /**

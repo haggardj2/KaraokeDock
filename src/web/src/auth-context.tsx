@@ -1,5 +1,6 @@
 import React, { useState, createContext, useContext } from 'react'
 import { api } from './api'
+import { clearStoredSessionToken, readStoredSessionToken, writeStoredSessionToken } from './session-token'
 
 type AuthProfile = {
   username: string
@@ -35,13 +36,18 @@ export function useAuth() {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [sessionToken, setSessionToken] = useState(localStorage.getItem('sessionToken') || '')
+  const [sessionTokenState, setSessionTokenState] = useState(() => readStoredSessionToken())
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [isDefaultPassword, setIsDefaultPassword] = useState(false)
   const [role, setRole] = useState('user')
   const [profile, setProfileState] = useState<AuthProfile>({ username: '', displayName: '', picture: '' })
 
   const isAdmin = role === 'admin'
+
+  const setSessionToken = (token: string) => {
+    setSessionTokenState(token)
+    writeStoredSessionToken(token)
+  }
 
   const setProfile = (nextProfile: Partial<AuthProfile>) => {
     setProfileState((current) => ({ ...current, ...nextProfile }))
@@ -55,13 +61,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await api('/api/auth/logout', {
         method: 'POST',
-        headers: { 'x-session-token': sessionToken }
+        headers: { 'x-session-token': sessionTokenState }
       })
     } catch (err) {
       console.error('Logout error:', err)
     } finally {
       setSessionToken('')
-      localStorage.removeItem('sessionToken')
+      clearStoredSessionToken()
       setIsLoggedIn(false)
       setIsDefaultPassword(false)
       setRole('user')
@@ -72,7 +78,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return (
     <AuthContext.Provider value={{
       isLoggedIn,
-      sessionToken,
+      sessionToken: sessionTokenState,
       setSessionToken,
       setIsLoggedIn,
       isDefaultPassword,

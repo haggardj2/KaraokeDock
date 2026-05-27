@@ -1,8 +1,9 @@
 // web/src/pages/Host.tsx
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { api, API_BASE, wsUrl } from '../api'
+import { api, API_BASE, getWsUrl } from '../api'
 import { useAuth } from '../auth-context'
 import { parseBooleanSetting } from '../utils/settings'
+import { clearStoredSessionToken, writeStoredSessionToken } from '../session-token'
 
 type Row = {
   id: number
@@ -291,13 +292,31 @@ export default function Host() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const oidcSession = params.get('oidc_session')
+    const oidcCode = params.get('oidc_code')
     const oidcError = params.get('oidc_error')
 
-    if (oidcSession) {
-      auth.setSessionToken(oidcSession)
-      localStorage.setItem('sessionToken', oidcSession)
-      window.history.replaceState({}, '', window.location.pathname)
+    if (oidcCode) {
+      api('/api/auth/oidc/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: oidcCode })
+      })
+        .then((result) => {
+          auth.setSessionToken(result.sessionToken)
+          writeStoredSessionToken(result.sessionToken)
+          auth.setIsLoggedIn(true)
+          auth.setRole(result.role || 'user')
+          auth.setProfile({
+            username: result.username || '',
+            displayName: result.displayName || '',
+            picture: result.picture || ''
+          })
+          window.history.replaceState({}, '', window.location.pathname)
+        })
+        .catch((err) => {
+          setLoginError(`SSO login failed: ${String(err?.message || 'Unable to complete login')}`)
+          window.history.replaceState({}, '', window.location.pathname)
+        })
     } else if (oidcError) {
       setLoginError(`SSO login failed: ${decodeURIComponent(oidcError)}`)
       window.history.replaceState({}, '', window.location.pathname)
@@ -360,7 +379,7 @@ export default function Host() {
       
       if (result.ok && result.sessionToken) {
         auth.setSessionToken(result.sessionToken)
-        localStorage.setItem('sessionToken', result.sessionToken)
+        writeStoredSessionToken(result.sessionToken)
         auth.setIsLoggedIn(true)
         auth.setRole(result.role || 'user')
         setLoginPassword('')
@@ -409,13 +428,13 @@ export default function Host() {
           auth.setIsLoggedIn(false)
           auth.setSessionToken('')
           auth.clearProfile()
-          localStorage.removeItem('sessionToken')
+          clearStoredSessionToken()
         }
       } catch (err) {
         auth.setIsLoggedIn(false)
         auth.setSessionToken('')
         auth.clearProfile()
-        localStorage.removeItem('sessionToken')
+        clearStoredSessionToken()
       }
     }
     
@@ -1327,7 +1346,7 @@ export default function Host() {
   useEffect(() => {
     function connectWs() {
       try {
-        wsRef.current = new WebSocket(wsUrl)
+        wsRef.current = new WebSocket(getWsUrl(auth.sessionToken || undefined))
         
         wsRef.current.onmessage = (ev) => {
           try {
@@ -1427,7 +1446,7 @@ export default function Host() {
       }
       wsRef.current?.close() 
     }
-  }, [])
+  }, [auth.sessionToken])
 
   const currentPlaying = useMemo(() => {
     return queue.find(r => r.status === 'playing')

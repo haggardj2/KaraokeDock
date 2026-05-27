@@ -1,2 +1,8 @@
 src/server/node_modules/
 src/web/node_modules/
+dev/build-and-publish.sh
+dev/redeploy-webkaraoke.sh
+dev/test/
+build-and-publish.sh
+redeploy-webkaraoke.sh
+src/web/dist/assets/

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, API_BASE } from "../api";
 import { useAuth } from "../auth-context";
 import { parseBooleanSetting } from "../utils/settings";
+import { clearStoredSessionToken, readStoredSessionToken, writeStoredSessionToken } from "../session-token";
 
 type Library = { id: number; name: string; path: string };
 type BreakFolder = { id: number; name: string; path: string };
@@ -177,7 +178,7 @@ export default function Admin() {
 
         if (result.ok && result.sessionToken) {
           auth.setSessionToken(result.sessionToken);
-          localStorage.setItem("sessionToken", result.sessionToken);
+          writeStoredSessionToken(result.sessionToken);
           auth.setIsLoggedIn(true);
           auth.setRole(result.role || 'admin');
           auth.setIsDefaultPassword(result.isDefaultPassword || false);
@@ -324,7 +325,7 @@ export default function Admin() {
 
     // Check if we have a stored session token and validate it.
     // The localStorage value is written before this effect by the OIDC session handler in main.tsx.
-    const storedSessionToken = localStorage.getItem("sessionToken");
+    const storedSessionToken = readStoredSessionToken();
     if (storedSessionToken) {
       auth.setSessionToken(storedSessionToken);
       api("/api/auth/validate", {
@@ -343,13 +344,13 @@ export default function Admin() {
           } else {
             auth.setIsLoggedIn(false);
             auth.clearProfile();
-            localStorage.removeItem("sessionToken");
+            clearStoredSessionToken();
           }
         })
         .catch(() => {
           auth.setIsLoggedIn(false);
           auth.clearProfile();
-          localStorage.removeItem("sessionToken");
+          clearStoredSessionToken();
         });
     }
 

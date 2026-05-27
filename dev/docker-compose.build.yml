@@ -44,7 +44,7 @@ services:
 
   api:
     build:
-      context: .src/server
+      context: ./src/server
       dockerfile: Dockerfile
     container_name: karaoke-api
     environment:
@@ -52,7 +52,6 @@ services:
       MEDIA_ROOT: ${MEDIA_ROOT}
       ORIGIN: ${ORIGIN}
       WEB_APP_URL: ${WEB_APP_URL}
-      PORT: ${PORT}
     depends_on:
       db:
         condition: service_healthy
@@ -62,12 +61,12 @@ services:
       - "${BREAK_PATH}:/media/music:ro"
     restart: always
     ports:
-      - "5174:5174"
+      - "${API_PORT:-5174}:5174"
     command: ["sh", "-c", "npm run migrate && npm start"]
 
   web:
     build:
-      context: .src/web
+      context: ./src/web
       dockerfile: Dockerfile
     container_name: karaoke-web
     environment:
@@ -77,4 +76,4 @@ services:
         condition: service_healthy
     restart: always
     ports:
-      - "5173:5173"
+      - "${WEB_PORT:-5173}:5173"

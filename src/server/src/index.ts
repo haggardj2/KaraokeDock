@@ -9,6 +9,7 @@ import { qrRouter } from './routes/qr';
 import { rotationRouter } from './routes/rotation';
 import { processMissingDurations } from './scanner';
 import { logger, setLogLevel, type LogLevel } from './logger';
+import { validateSessionInfo } from './db';
 
 // Helper to add timestamps to console logs
 function timestamp() {
@@ -65,6 +66,19 @@ const corsOptions = {
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   maxAge: 600  // Cache preflight requests for 10 minutes
 };
+
+const wildcardOriginAllowed = allowedOrigins.length === 1 && allowedOrigins[0] === '*';
+
+function isOriginAllowed(origin: string | undefined) {
+  if (wildcardOriginAllowed) return true;
+  if (!origin) return false;
+  return allowedOrigins.includes(origin.trim());
+}
+
+function rejectUpgrade(socket: import('node:net').Socket, statusCode: number, message: string) {
+  socket.write(`HTTP/1.1 ${statusCode} ${message}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
 
 console.log(`[${timestamp()}] CORS configured for origins:`, allowedOrigins);
 
@@ -142,7 +156,36 @@ const server = app.listen(port, () => {
 });
 
 server.on('upgrade', (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+  if (!isOriginAllowed(origin)) {
+    rejectUpgrade(socket, 403, 'Forbidden');
+    return;
+  }
+
+  const requestUrl = new URL(req.url || '/ws', `http://${req.headers.host || 'localhost'}`);
+  if (requestUrl.pathname !== '/ws') {
+    rejectUpgrade(socket, 404, 'Not Found');
+    return;
+  }
+
+  const sessionToken = requestUrl.searchParams.get('sessionToken');
+  const proceed = async () => {
+    if (sessionToken) {
+      const info = await validateSessionInfo(sessionToken);
+      if (!info.valid) {
+        rejectUpgrade(socket, 401, 'Unauthorized');
+        return;
+      }
+      (req as any).user = { userId: info.userId, role: info.role };
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  };
+
+  proceed().catch((err) => {
+    console.error('WebSocket upgrade failed:', err);
+    rejectUpgrade(socket, 500, 'Internal Server Error');
+  });
 });
 
 // Background task to process tracks with missing duration

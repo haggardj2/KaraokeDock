@@ -1,6 +1,7 @@
 import { jsx as _jsx } from "react/jsx-runtime";
 import { useState, createContext, useContext } from 'react';
 import { api } from './api';
+import { clearStoredSessionToken, readStoredSessionToken, writeStoredSessionToken } from './session-token';
 const AuthContext = createContext(null);
 export function useAuth() {
     const context = useContext(AuthContext);
@@ -10,12 +11,16 @@ export function useAuth() {
     return context;
 }
 export function AuthProvider({ children }) {
-    const [sessionToken, setSessionToken] = useState(localStorage.getItem('sessionToken') || '');
+    const [sessionTokenState, setSessionTokenState] = useState(() => readStoredSessionToken());
     const [isLoggedIn, setIsLoggedIn] = useState(false);
     const [isDefaultPassword, setIsDefaultPassword] = useState(false);
     const [role, setRole] = useState('user');
     const [profile, setProfileState] = useState({ username: '', displayName: '', picture: '' });
     const isAdmin = role === 'admin';
+    const setSessionToken = (token) => {
+        setSessionTokenState(token);
+        writeStoredSessionToken(token);
+    };
     const setProfile = (nextProfile) => {
         setProfileState((current) => ({ ...current, ...nextProfile }));
     };
@@ -26,7 +31,7 @@ export function AuthProvider({ children }) {
         try {
             await api('/api/auth/logout', {
                 method: 'POST',
-                headers: { 'x-session-token': sessionToken }
+                headers: { 'x-session-token': sessionTokenState }
             });
         }
         catch (err) {
@@ -34,7 +39,7 @@ export function AuthProvider({ children }) {
         }
         finally {
             setSessionToken('');
-            localStorage.removeItem('sessionToken');
+            clearStoredSessionToken();
             setIsLoggedIn(false);
             setIsDefaultPassword(false);
             setRole('user');
@@ -43,7 +48,7 @@ export function AuthProvider({ children }) {
     };
     return (_jsx(AuthContext.Provider, { value: {
             isLoggedIn,
-            sessionToken,
+            sessionToken: sessionTokenState,
             setSessionToken,
             setIsLoggedIn,
             isDefaultPassword,
