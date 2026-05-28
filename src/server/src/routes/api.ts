@@ -21,6 +21,7 @@ import {
   getUserByOidcSubject,
   listUsers,
   getUserById,
+  type User,
   updateUser,
   deleteUser,
   countAdminUsers
@@ -33,6 +34,7 @@ import {
   extractAudioMetadata,
   isBreakMusicFile
 } from '../scanner';
+import { resolveExistingMediaPath } from './media';
 import { parseBreakMusicFromFilename, parseFromFilename } from '../parsing';
 import QRCode from 'qrcode';
 import { searchKaraokeNerds } from '../karaoke-nerds';
@@ -73,6 +75,12 @@ const ah =
   (fn: express.RequestHandler): express.RequestHandler =>
   (req, res, next) =>
     Promise.resolve(fn(req, res, next)).catch(next);
+
+const getAuthenticatedUser = async (req: express.Request): Promise<User | null> => {
+  const userId = Number((req as any).user?.userId);
+  if (!Number.isFinite(userId) || userId <= 0) return null;
+  return getUserById(userId);
+};
 
 // Session-based authentication guard (validates session, attaches user info)
 const sessionGuard: express.RequestHandler = async (req, res, next) => {
@@ -136,6 +144,7 @@ const validateKeyAdjustment = (keyAdjustment: number | null): boolean => {
 const MAX_OIDC_USERNAME_LENGTH = 120;
 const MAX_OIDC_USERNAME_ATTEMPTS = 100;
 const OIDC_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DEFAULT_INSECURE_BOOTSTRAP_PASSWORD = 'changeme-password';
 
 const sanitizeOidcUsername = (value: string): string =>
   value.trim().toLowerCase().replace(/[^a-z0-9@._+-]/g, '_').slice(0, MAX_OIDC_USERNAME_LENGTH);
@@ -344,7 +353,7 @@ async function writeBreakMusicPlaylistFile(name: string, trackIds: number[]) {
 }
 
 async function resolveBreakMusicPlaybackState(step: -1 | 0 | 1 = 0) {
-  const state = await getBreakMusicState();
+  let state = await getBreakMusicState();
   let track = await getBreakTrackById(state.currentTrackId);
 
   const emptyPlaylistRows = { rows: [] as { id: number }[] };
@@ -355,6 +364,41 @@ async function resolveBreakMusicPlaybackState(step: -1 | 0 | 1 = 0) {
     )
     : emptyPlaylistRows;
   const playlist = playlistRows.rows.map(r => r.id);
+
+  if (step === 0 && track && !state.paused && track.duration_ms && track.duration_ms > 0) {
+    let elapsedSec = Math.max(0, state.currentPositionSec || 0);
+    if (state.currentStartedAt) {
+      const startedMs = Date.parse(state.currentStartedAt);
+      if (Number.isFinite(startedMs)) {
+        elapsedSec = Math.max(elapsedSec, Math.floor((Date.now() - startedMs) / 1000));
+      }
+    }
+
+    const durationSec = Math.max(1, Math.floor(track.duration_ms / 1000));
+    if (elapsedSec >= durationSec && playlist.length > 0) {
+      const activeIndex = playlist.indexOf(track.id);
+      const nextIndex = (activeIndex >= 0 ? activeIndex + 1 : state.playlistIndex + 1) % playlist.length;
+      track = await getBreakTrackById(playlist[nextIndex]);
+      const currentStartedAt = track ? new Date().toISOString() : null;
+      state = {
+        ...state,
+        currentTrackId: track?.id ?? null,
+        currentPositionSec: 0,
+        currentStartedAt,
+        playlistTrackIds: playlist,
+        playlistIndex: nextIndex,
+      };
+      await setBreakMusicState({
+        currentTrackId: state.currentTrackId,
+        currentStartedAt: state.currentStartedAt,
+        currentPositionSec: state.currentPositionSec,
+        playlistTrackIds: state.playlistTrackIds,
+        playlistIndex: state.playlistIndex,
+      });
+      postQueueUpdate('break_music.updated');
+      return { state, track };
+    }
+  }
 
   if (step !== 0 && playlist.length > 0) {
     const activeIndex = track ? playlist.indexOf(track.id) : -1;
@@ -455,7 +499,7 @@ apiRouter.post(
       if (!isPasswordValid) {
         return res.status(401).json({ ok: false, message: 'Invalid credentials' });
       }
-      const isDefaultPassword = await verifyPassword('changeme-password', userRecord.password_hash);
+      const isDefaultPassword = await verifyPassword(DEFAULT_INSECURE_BOOTSTRAP_PASSWORD, userRecord.password_hash);
       const sessionToken = await createSession(30, userRecord.id, userRecord.role);
       return res.json({
         ok: true,
@@ -474,9 +518,13 @@ apiRouter.post(
     const adminUsername = storedUsername || process.env.ADMIN_USERNAME || 'admin';
 
     const storedPassword = await getSetting('admin.password');
-    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD;
 
     if (username !== adminUsername) {
+      return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+    }
+
+    if (!adminPassword) {
       return res.status(401).json({ ok: false, message: 'Invalid credentials' });
     }
 
@@ -485,7 +533,7 @@ apiRouter.post(
       return res.status(401).json({ ok: false, message: 'Invalid credentials' });
     }
 
-    const isDefaultPassword = await verifyPassword('changeme-password', adminPassword);
+    const isDefaultPassword = await verifyPassword(DEFAULT_INSECURE_BOOTSTRAP_PASSWORD, adminPassword);
 
     // Find or create user record for this legacy admin and sync the password hash
     let user = userRecord; // may be null (no password_hash) or undefined
@@ -565,18 +613,26 @@ apiRouter.post(
       return res.status(400).json({ error: 'Password must be at least 8 characters long' });
     }
     
-    // Verify current password
-    const storedPassword = await getSetting('admin.password');
-    const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
-    
-    const isPasswordValid = await verifyPassword(currentPassword, envPassword);
+    const currentUser = await getAuthenticatedUser(req);
+    const legacyPassword = await getSetting('admin.password') || process.env.ADMIN_PASSWORD;
+    const passwordToVerify = currentUser?.password_hash || legacyPassword;
+
+    if (!passwordToVerify) {
+      return res.status(400).json({ error: 'No password is configured for this account' });
+    }
+
+    const isPasswordValid = await verifyPassword(currentPassword, passwordToVerify);
     if (!isPasswordValid) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
-    
-    // Hash and save new password
-    const hashedPassword = await hashPassword(newPassword);
-    await setSetting('admin.password', hashedPassword);
+
+    const updatedUser = currentUser ? await updateUser(currentUser.id, { password: newPassword }) : null;
+    const hashedPassword = updatedUser?.password_hash || await hashPassword(newPassword);
+
+    if (currentUser?.role === 'admin' || !currentUser) {
+      await setSetting('admin.password', hashedPassword);
+    }
+
     res.json({ ok: true });
   })
 );
@@ -596,17 +652,32 @@ apiRouter.post(
       return res.status(400).json({ error: 'Username must be at least 3 characters long' });
     }
     
-    // Verify current password
-    const storedPassword = await getSetting('admin.password');
-    const envPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
-    
-    const isPasswordValid = await verifyPassword(currentPassword, envPassword);
+    const currentUser = await getAuthenticatedUser(req);
+    const legacyPassword = await getSetting('admin.password') || process.env.ADMIN_PASSWORD;
+    const passwordToVerify = currentUser?.password_hash || legacyPassword;
+
+    if (!passwordToVerify) {
+      return res.status(400).json({ error: 'No password is configured for this account' });
+    }
+
+    const isPasswordValid = await verifyPassword(currentPassword, passwordToVerify);
     if (!isPasswordValid) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
-    
-    // Save new username
-    await setSetting('admin.username', newUsername);
+
+    if (currentUser) {
+      const existing = await getUserByUsername(newUsername);
+      if (existing && existing.id !== currentUser.id) {
+        return res.status(409).json({ error: 'Username already exists' });
+      }
+      await updateUser(currentUser.id, { username: newUsername });
+      if (currentUser.role === 'admin') {
+        await setSetting('admin.username', newUsername);
+      }
+    } else {
+      await setSetting('admin.username', newUsername);
+    }
+
     res.json({ ok: true });
   })
 );
@@ -622,7 +693,12 @@ apiRouter.post(
     const adminUsername = storedUsername || process.env.ADMIN_USERNAME || 'admin';
     
     const storedPassword = await getSetting('admin.password');
-    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD || 'changeme-password';
+    const adminPassword = storedPassword || process.env.ADMIN_PASSWORD;
+
+    if (!adminPassword) {
+      res.status(503).json({ ok: false, message: 'Admin password is not configured' });
+      return;
+    }
     
     // Check username first
     if (username !== adminUsername) {
@@ -857,12 +933,23 @@ apiRouter.put(
 
 // In-memory store for OIDC state/PKCE (expires after 10 minutes)
 const oidcStateStore = new Map<string, { codeVerifier: string; createdAt: number; returnTo: '/admin' | '/host' }>();
+const oidcExchangeStore = new Map<string, {
+  sessionToken: string;
+  role: string;
+  username: string;
+  displayName: string | null;
+  picture: string | null;
+  createdAt: number;
+}>();
 
 // Clean up expired OIDC states periodically
 setInterval(() => {
   const now = Date.now();
   for (const [key, val] of oidcStateStore) {
     if (now - val.createdAt > 10 * 60 * 1000) oidcStateStore.delete(key);
+  }
+  for (const [key, val] of oidcExchangeStore) {
+    if (now - val.createdAt > 2 * 60 * 1000) oidcExchangeStore.delete(key);
   }
 }, 5 * 60 * 1000);
 
@@ -1038,13 +1125,49 @@ apiRouter.get(
       }
 
       const sessionToken = await createSession(30, user.id, user.role);
+      const exchangeCode = crypto.randomBytes(24).toString('hex');
+      oidcExchangeStore.set(exchangeCode, {
+        sessionToken,
+        role: user.role,
+        username: user.username,
+        displayName: user.display_name,
+        picture: user.picture,
+        createdAt: Date.now(),
+      });
       const frontendUrl = await getOidcFrontendUrl(req);
-      res.redirect(`${frontendUrl}${stored.returnTo}?oidc_session=${sessionToken}`);
+      res.redirect(`${frontendUrl}${stored.returnTo}?oidc_code=${exchangeCode}`);
     } catch (err: any) {
       console.error('OIDC callback error:', err);
       const frontendUrl = await getOidcFrontendUrl(req).catch(() => '');
       res.redirect(`${frontendUrl}/admin?oidc_error=${encodeURIComponent(err.message || 'OIDC error')}`);
     }
+  })
+);
+
+apiRouter.post(
+  '/auth/oidc/exchange',
+  ah(async (req, res) => {
+    const code = String(req.body?.code || '').trim();
+    if (!code) {
+      return res.status(400).json({ error: 'OIDC exchange code is required' });
+    }
+
+    const entry = oidcExchangeStore.get(code);
+    if (!entry || Date.now() - entry.createdAt > 2 * 60 * 1000) {
+      oidcExchangeStore.delete(code);
+      return res.status(400).json({ error: 'Invalid or expired OIDC exchange code' });
+    }
+
+    oidcExchangeStore.delete(code);
+
+    res.json({
+      ok: true,
+      sessionToken: entry.sessionToken,
+      role: entry.role,
+      username: entry.username,
+      displayName: entry.displayName,
+      picture: entry.picture,
+    });
   })
 );
 
@@ -1525,13 +1648,17 @@ apiRouter.get(
         const separatorIdx = withoutPrefix.indexOf(ZIP_SEPARATOR);
         const zipPath = separatorIdx >= 0 ? withoutPrefix.substring(0, separatorIdx + ZIP_EXT.length) : withoutPrefix;
         const inner = separatorIdx >= 0 ? withoutPrefix.substring(separatorIdx + ZIP_SEPARATOR.length) : '';
-        res.redirect(`/media/zip?zip=${encodeURIComponent(zipPath)}&file=${encodeURIComponent(inner)}`);
+        const safeZipPath = resolveExistingMediaPath(zipPath);
+        if (!safeZipPath) return res.status(400).send('invalid path');
+        res.redirect(`/media/zip?zip=${encodeURIComponent(safeZipPath)}&file=${encodeURIComponent(inner)}`);
         return;
       }
-      const stat = await fs.stat(p);
+      const safePath = resolveExistingMediaPath(p);
+      if (!safePath) return res.status(400).send('invalid path');
+      const stat = await fs.stat(safePath);
       res.setHeader('Content-Length', String(stat.size));
       res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(path.resolve(p));
+      res.sendFile(safePath);
     } catch {
       res.status(404).send('file not found');
     }
@@ -3404,6 +3531,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/break-music/auto-next',
+  adminGuard,
   ah(async (_req, res) => {
     await resolveBreakMusicPlaybackState(1);
     postQueueUpdate('break_music.updated');
@@ -3413,6 +3541,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/break-music/timing',
+  adminGuard,
   ah(async (req, res) => {
     const trackId = toInt(req.body?.trackId);
     const currentTime = Number(req.body?.currentTime);

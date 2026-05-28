@@ -181,10 +181,15 @@ Management interface for system configuration and media libraries.
    MEDIA_PATH=/mnt/karaoke/Karaoke Tracks/
    DOWNLOAD_PATH=/mnt/karaoke/downloads
    BREAK_PATH=/mnt/karaoke/Break Music
+   WEB_APP_URL=http://localhost:5173
+   API_PORT=5174
+   WEB_PORT=5173
    VITE_API_BASE=http://localhost:5174
    ORIGIN=http://localhost:5173,http://127.0.0.1:5173
    TRUST_PROXY=1
    ```
+
+   To change the exposed host ports, update `API_PORT` and `WEB_PORT`. The containers keep their internal ports fixed at `5174` and `5173`, so Docker healthchecks continue to work when you remap the host ports.
 
 6. **Create the host directories you configured** if they do not already exist:
    ```bash
@@ -257,6 +262,8 @@ All configuration is managed through the `.env` file. Key variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
+| `API_PORT` | Host port published for the API container | `5174` or `6174` |
+| `WEB_PORT` | Host port published for the web container | `5173` or `6173` |
 | `MEDIA_PATH` | Path to karaoke files on host | `./media/local` or `/mnt/karaoke` |
 | `WEB_APP_URL` | Public URL for QR codes | `http://your-server-ip:5173` or `https://karaoke.example.com` |
 | `VITE_API_BASE` | API server URL for frontend | `http://your-server-ip:5174`  or `https://api.example.com` |
@@ -268,6 +275,7 @@ All configuration is managed through the `.env` file. Key variables:
 - Replace `your-server-ip` with your server's IP address for network access
 - Ensure `ORIGIN` includes all URLs where the web app will be accessed
 - The `MEDIA_PATH` on the host maps to `/media` inside the API container
+- Change `API_PORT` / `WEB_PORT` to remap host ports; container ports remain fixed for healthchecks
 - Change default passwords before deploying to production
 
 ### Network Configuration

@@ -94,22 +94,42 @@ mediaRouter.options('/{*path}', (req, res) => {
   res.status(204).end();
 });
 
-function isUnderMediaRoot(p: string) {
-  const root = (process.env.MEDIA_ROOT || '/media').replace(/\\/g,'/');
-  const resolved = path.resolve(p).replace(/\\/g,'/');
-  return resolved.startsWith(path.resolve(root));
+function getResolvedMediaRoot() {
+  const configuredRoot = process.env.MEDIA_ROOT || '/media';
+  try {
+    return fs.realpathSync.native(configuredRoot);
+  } catch {
+    return path.resolve(configuredRoot);
+  }
+}
+
+function isPathWithinRoot(rootPath: string, candidatePath: string) {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+export function resolveExistingMediaPath(candidatePath: string): string | null {
+  if (!candidatePath) return null;
+  try {
+    const resolvedRoot = getResolvedMediaRoot();
+    const resolvedPath = fs.realpathSync.native(candidatePath);
+    return isPathWithinRoot(resolvedRoot, resolvedPath) ? resolvedPath : null;
+  } catch {
+    return null;
+  }
 }
 
 mediaRouter.get('/file', (req, res) => {
-  const p = (req.query.path as string) || '';
-  if (!p || !isUnderMediaRoot(p)) return res.status(400).send('Invalid path');
-  const stat = fs.statSync(p);
+  const requestedPath = (req.query.path as string) || '';
+  const safePath = resolveExistingMediaPath(requestedPath);
+  if (!safePath) return res.status(400).send('Invalid path');
+  const stat = fs.statSync(safePath);
   const range = req.headers.range;
   
   // Add CORS headers for cross-origin media access
   addCorsHeaders(res, req);
 
-  const ext = path.extname(p).toLowerCase();
+  const ext = path.extname(safePath).toLowerCase();
   const mimeType = AUDIO_MIME[ext];
   if (mimeType) res.setHeader('Content-Type', mimeType);
 
@@ -121,18 +141,19 @@ mediaRouter.get('/file', (req, res) => {
     res.status(206);
     res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
     res.setHeader('Content-Length', String(end - start + 1));
-    fs.createReadStream(p, { start, end }).pipe(res);
+    fs.createReadStream(safePath, { start, end }).pipe(res);
   } else {
     res.setHeader('Content-Length', String(stat.size));
-    fs.createReadStream(p).pipe(res);
+    fs.createReadStream(safePath).pipe(res);
   }
 });
 
 mediaRouter.get('/zip', async (req, res) => {
-  const zipPath = (req.query.zip as string) || '';
+  const requestedZipPath = (req.query.zip as string) || '';
   const entryName = (req.query.file as string) || '';
+  const zipPath = resolveExistingMediaPath(requestedZipPath);
   
-  if (!zipPath || !entryName || !isUnderMediaRoot(zipPath)) {
+  if (!zipPath || !entryName) {
     return res.status(400).send('Invalid zip request');
   }
 
@@ -191,9 +212,10 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
   try {
     // Extract files from ZIP or copy loose files
     if (file) {
-      if (!isUnderMediaRoot(file)) return res.status(400).send('Invalid zip path');
+      const safeZipPath = resolveExistingMediaPath(file);
+      if (!safeZipPath) return res.status(400).send('Invalid zip path');
       await new Promise<void>((resolve, reject) => {
-        yauzl.open(file, { lazyEntries: true, autoClose: true }, (err: any, zip: any) => {
+        yauzl.open(safeZipPath, { lazyEntries: true, autoClose: true }, (err: any, zip: any) => {
           if (err || !zip) return reject(err || new Error('Unable to open zip'));
           let gotCdg = false, gotMp3 = false;
           zip.readEntry();
@@ -226,9 +248,11 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
         });
       });
     } else {
-      if (!isUnderMediaRoot(cdg) || !isUnderMediaRoot(mp3)) return res.status(400).send('Invalid media path');
-      await fs.promises.copyFile(cdg, tmpCdg);
-      await fs.promises.copyFile(mp3, tmpMp3);
+      const safeCdgPath = resolveExistingMediaPath(cdg);
+      const safeMp3Path = resolveExistingMediaPath(mp3);
+      if (!safeCdgPath || !safeMp3Path) return res.status(400).send('Invalid media path');
+      await fs.promises.copyFile(safeCdgPath, tmpCdg);
+      await fs.promises.copyFile(safeMp3Path, tmpMp3);
     }
 
     // Optimized FFmpeg settings for smooth CDG playback
@@ -299,10 +323,11 @@ mediaRouter.get('/cdgmp4', async (req, res) => {
 
 // Simple MP4 serving without re-encoding
 mediaRouter.get('/mp4stream', (req, res) => {
-  const mp4Path = (req.query.path as string) || '';
+  const requestedMp4Path = (req.query.path as string) || '';
+  const mp4Path = resolveExistingMediaPath(requestedMp4Path);
   const { hasPitch, pitchRatio, pitchSemitones } = getPitchParams(req);
   
-  if (!mp4Path || !isUnderMediaRoot(mp4Path)) {
+  if (!mp4Path) {
     return res.status(400).send('Invalid path');
   }
 

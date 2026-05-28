@@ -3,10 +3,12 @@ import { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { useAuth, AuthProvider } from './auth-context';
+import { api } from './api';
 import Player from './pages/Player';
 import Requests from './pages/Requests';
 import Host from './pages/Host';
 import Admin from './pages/Admin';
+import { writeStoredSessionToken } from './session-token';
 const ACCOUNT_AVATAR_BACKGROUND = '#111827';
 function Nav() {
     const location = useLocation();
@@ -24,24 +26,34 @@ function Nav() {
         };
         document.title = titles[location.pathname] || 'Web Karaoke';
     }, [location.pathname]);
-    // Handle OIDC session token and errors from URL params (on /admin page)
+    // Handle OIDC login redirects on the admin page.
     useEffect(() => {
         if (location.pathname !== '/admin')
             return;
         const params = new URLSearchParams(location.search);
-        const oidcSession = params.get('oidc_session');
-        const oidcError = params.get('oidc_error');
-        if (oidcSession) {
-            auth.setSessionToken(oidcSession);
-            localStorage.setItem('sessionToken', oidcSession);
-            // Remove from URL without triggering a navigation
-            const newUrl = window.location.pathname;
-            window.history.replaceState({}, '', newUrl);
-        }
-        else if (oidcError) {
-            // Remove error from URL
-            const newUrl = window.location.pathname;
-            window.history.replaceState({}, '', newUrl);
+        const oidcCode = params.get('oidc_code');
+        if (oidcCode) {
+            api('/api/auth/oidc/exchange', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: oidcCode }),
+            })
+                .then((result) => {
+                auth.setSessionToken(result.sessionToken);
+                writeStoredSessionToken(result.sessionToken);
+                auth.setIsLoggedIn(true);
+                auth.setRole(result.role || 'user');
+                auth.setProfile({
+                    username: result.username || '',
+                    displayName: result.displayName || '',
+                    picture: result.picture || '',
+                });
+                window.history.replaceState({}, '', window.location.pathname);
+            })
+                .catch((err) => {
+                const message = encodeURIComponent(String(err?.message || 'SSO login failed'));
+                window.location.replace(`${window.location.pathname}?oidc_error=${message}`);
+            });
         }
     }, [location.pathname, location.search]);
     // Show auth button only on Host and Admin pages

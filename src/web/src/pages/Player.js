@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useCallback, useEffect, useMemo, useRef, useState, } from "react";
-import { API_BASE, api, wsUrl } from "../api";
+import { API_BASE, api, getWsUrl } from "../api";
 // Helper function to extract YouTube video ID from URL
 function getYouTubeVideoId(url) {
     if (!url)
@@ -267,7 +267,7 @@ export default function Player() {
     useEffect(() => {
         function connect() {
             try {
-                wsRef.current = new WebSocket(wsUrl);
+                wsRef.current = new WebSocket(getWsUrl());
                 wsRef.current.onmessage = (ev) => {
                     try {
                         const msg = JSON.parse(ev.data);
@@ -818,25 +818,14 @@ export default function Player() {
         fadeBreakAudioTo,
     ]);
     useEffect(() => {
-        const audio = breakAudioRef.current;
-        const trackId = breakMusicState.currentTrack?.id;
-        if (!audio || !trackId || breakMusicState.paused)
-            return;
-        if (now)
-            return;
         if (breakTimingRef.current) {
             clearInterval(breakTimingRef.current);
             breakTimingRef.current = null;
         }
+        if (now || breakMusicState.paused || !breakMusicState.currentTrack?.id)
+            return;
         breakTimingRef.current = setInterval(() => {
-            if (!breakAudioRef.current)
-                return;
-            const currentTime = breakAudioRef.current.currentTime || 0;
-            api('/api/break-music/timing', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trackId, currentTime }),
-            }).catch(() => { });
+            refreshBreakMusicState().catch(() => { });
         }, 1000);
         return () => {
             if (breakTimingRef.current) {
@@ -845,18 +834,6 @@ export default function Player() {
             }
         };
     }, [breakMusicState.currentTrack?.id, breakMusicState.paused, now]);
-    useEffect(() => {
-        const audio = breakAudioRef.current;
-        if (!audio)
-            return;
-        const onEnded = () => {
-            api('/api/break-music/auto-next', {
-                method: 'POST',
-            }).catch(() => { });
-        };
-        audio.addEventListener('ended', onEnded);
-        return () => audio.removeEventListener('ended', onEnded);
-    }, [now]);
     // Get next up singers
     const upNext = queue
         .filter((q) => q.status === "queued")

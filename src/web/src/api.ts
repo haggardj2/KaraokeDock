@@ -16,4 +16,13 @@ export async function api(path: string, init?: RequestInit) {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
-export const wsUrl = (API_BASE.replace(/^http/,'ws') + '/ws');
+
+export function getWsUrl(sessionToken?: string) {
+  const url = new URL(API_BASE.replace(/^http/, 'ws') + '/ws');
+  if (sessionToken) {
+    url.searchParams.set('sessionToken', sessionToken);
+  }
+  return url.toString();
+}
+
+export const wsUrl = getWsUrl();

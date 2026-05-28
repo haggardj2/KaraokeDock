@@ -29,4 +29,4 @@ EXPOSE 5174
 ENV PORT=5174
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=10 \
-  CMD node -e 'const http = require("http"); const port = process.env.PORT || 5174; const req = http.get({ hostname: "127.0.0.1", port, path: "/health", timeout: 4000 }, res => process.exit(res.statusCode === 200 ? 0 : 1)); req.on("timeout", () => { req.destroy(); process.exit(1); }); req.on("error", () => process.exit(1));'
+  CMD node -e 'const http = require("http"); const req = http.get({ hostname: "127.0.0.1", port: 5174, path: "/health", timeout: 4000 }, res => process.exit(res.statusCode === 200 ? 0 : 1)); req.on("timeout", () => { req.destroy(); process.exit(1); }); req.on("error", () => process.exit(1));'
