@@ -4046,7 +4046,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       }}>
                         <div style={{ marginBottom: '20px' }}>
                           <label className="form-label" style={{ marginBottom: '12px' }}>
-                            Overlay Height: <strong>{overlayHeight}px</strong>
+                            Scroller Height: <strong>{overlayHeight}px</strong>
                           </label>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>40px</span>

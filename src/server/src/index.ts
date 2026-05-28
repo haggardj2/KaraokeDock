@@ -9,7 +9,7 @@ import { qrRouter } from './routes/qr';
 import { rotationRouter } from './routes/rotation';
 import { processMissingDurations } from './scanner';
 import { logger, setLogLevel, type LogLevel } from './logger';
-import { validateSessionInfo } from './db';
+import { ensureAdminUser, validateSessionInfo } from './db';
 
 // Helper to add timestamps to console logs
 function timestamp() {
@@ -19,6 +19,11 @@ function timestamp() {
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
+const BOOTSTRAP_PASSWORD_LOG_DELAY_MS = 60_000;
+const bootstrapAdminPromise = ensureAdminUser().catch((e) => {
+  console.error('ensureAdminUser failed', e);
+  return null;
+});
 
 // Configure trust proxy for apps behind reverse proxies/load balancers
 // This allows Express to properly identify client IPs from X-Forwarded-For headers
@@ -153,6 +158,14 @@ setPostQueueUpdate((type = 'queue.updated', data?: any) => {
 
 const server = app.listen(port, () => {
   console.log(`API running on http://localhost:${port}`);
+  void bootstrapAdminPromise.then((bootstrapAdmin) => {
+    if (!bootstrapAdmin) return;
+    setTimeout(() => {
+      console.log(
+        `[security] No admin password was configured. Generated bootstrap credentials: username="${bootstrapAdmin.username}" password="${bootstrapAdmin.password}". Change this password immediately after first login.`
+      );
+    }, BOOTSTRAP_PASSWORD_LOG_DELAY_MS);
+  });
 });
 
 server.on('upgrade', (req, socket, head) => {

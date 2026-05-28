@@ -349,14 +349,19 @@ export async function countAdminUsers(): Promise<number> {
   return Number(res.rows[0].c);
 }
 
+export interface BootstrapAdminCredentials {
+  username: string;
+  password: string;
+}
+
 /**
  * Ensure the legacy admin user from settings is migrated to the users table.
  * Called at application startup - safe to call multiple times.
  */
-export async function ensureAdminUser(): Promise<void> {
+export async function ensureAdminUser(): Promise<BootstrapAdminCredentials | null> {
   try {
     const count = await query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM users`);
-    if (Number(count.rows[0].c) > 0) return; // already have users
+    if (Number(count.rows[0].c) > 0) return null; // already have users
 
     const storedUsername = await getSetting('admin.username');
     const storedPassword = await getSetting('admin.password');
@@ -379,14 +384,14 @@ export async function ensureAdminUser(): Promise<void> {
        ON CONFLICT (username) DO NOTHING`,
       [username, passwordHash]
     );
-    if (generatedBootstrapPassword) {
-      console.warn(
-        `[security] No admin password was configured. Generated bootstrap credentials: username="${username}" password="${generatedBootstrapPassword}". Change this password immediately after first login.`
-      );
-    }
     console.log('[db] Migrated legacy admin user to users table');
+    if (generatedBootstrapPassword) {
+      return { username, password: generatedBootstrapPassword };
+    }
+    return null;
   } catch (err) {
     console.error('[db] ensureAdminUser failed:', err);
+    return null;
   }
 }
 

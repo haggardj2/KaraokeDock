@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 
--- Default settings from migrations 001, 002, 007, 008, 011
+-- Default settings from migrations 001, 002, 011
 INSERT INTO settings (key, value) VALUES
 ('parsing.templates', '["discID - Artist - Title","Artist - Title"]'::jsonb),
 ('player.queueOverlayEnabled', 'true'::jsonb),
@@ -33,7 +33,6 @@ INSERT INTO settings (key, value) VALUES
 ('ui.branding', '{"title":"Web Karaoke"}'::jsonb),
 ('host.crossfadeMs', '0'::jsonb),
 ('admin.token', '""'::jsonb),
-('admin.password', '"changeme-password"'::jsonb),
 ('ytdlp.download_location', '"/media/downloads"'::jsonb),
 ('ytdlp.allow_downloads', 'true'::jsonb),
 ('requests.acceptance', '"local"'::jsonb),

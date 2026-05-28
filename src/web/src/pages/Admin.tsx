@@ -96,6 +96,7 @@ export default function Admin() {
   const [requestAcceptance, setRequestAcceptance] = useState<"local" | "external" | "disabled">("local");
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
+  const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [allowDownloads, setAllowDownloads] = useState(true);
   const [showDownloadBrowser, setShowDownloadBrowser] = useState(false);
@@ -622,6 +623,7 @@ export default function Admin() {
       setRequestAcceptance(settings["requests.acceptance"] || "local");
       setLocalLibraryEnabled(parseBooleanSetting(settings["libraries.local_enabled"]));
       setExternalLibraryEnabled(parseBooleanSetting(settings["libraries.external_enabled"]));
+      setLocalBrowseEnabled(parseBooleanSetting(settings["requests.local_browse_enabled"]));
       setAllowDownloads(parseBooleanSetting(settings["ytdlp.allow_downloads"]));
       setBreakPlaylistsFolder(settings["break_music.playlists_folder"] || "/media/playlists");
       if (settings["admin.log_level"]) setLogLevel(settings["admin.log_level"]);
@@ -714,6 +716,19 @@ export default function Admin() {
         setTimeout(() => setBanner(""), 5000);
         setExternalLibraryEnabled(!enabled);
       }
+    }
+  }
+
+  async function handleLocalBrowseToggle(enabled: boolean) {
+    setLocalBrowseEnabled(enabled);
+    try {
+      await saveSetting("requests.local_browse_enabled", enabled);
+      setBanner(`✔ Request-page browse ${enabled ? "enabled" : "disabled"}`);
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update request-page browse: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+      setLocalBrowseEnabled(!enabled);
     }
   }
 
@@ -2073,6 +2088,16 @@ export default function Admin() {
                         style={{ width: 18, height: 18 }}
                       />
                       <span style={{ fontSize: 14 }}>Enable External Library (Karaoke Nerds)</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: localLibraryEnabled ? "pointer" : "not-allowed", opacity: localLibraryEnabled ? 1 : 0.6 }}>
+                      <input
+                        type="checkbox"
+                        checked={localBrowseEnabled}
+                        onChange={(e) => handleLocalBrowseToggle(e.target.checked)}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn || !localLibraryEnabled}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <span style={{ fontSize: 14 }}>Show Local Library Browse on Request Page</span>
                     </label>
                   </div>
                   <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>

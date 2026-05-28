@@ -1071,11 +1071,17 @@ export default function Player() {
     const tickerFontSize = Math.round(16 * scaleFactor);
     const padding = Math.round(15 * scaleFactor);
     const gap = Math.round(15 * scaleFactor);
-    const qrPadding = Math.round(5 * scaleFactor);
     const borderRadius = Math.round(8 * scaleFactor);
 
     // QR size is controlled separately
     const qrSizeValue = overlaySettings.qrSize;
+    const qrPadding = Math.max(4, Math.round(qrSizeValue / 12));
+    const qrBorderRadius = Math.max(8, Math.round(qrSizeValue / 8));
+    const qrBlockSize = qrSizeValue + qrPadding * 2;
+    const qrOffset = 15;
+    const leftInset = overlaySettings.showQrCode
+      ? Math.max(padding, qrOffset + qrBlockSize + gap)
+      : padding;
 
     return (
       <div
@@ -1085,13 +1091,8 @@ export default function Player() {
           bottom: 0,
           left: 0,
           right: 0,
-          height: `${overlaySettings.height}px`,
           background: "transparent",
           zIndex: 10,
-          display: "flex",
-          alignItems: "flex-end",
-          padding: `${padding}px`,
-          gap: `${gap}px`,
           opacity: 1,
         }}
       >
@@ -1099,12 +1100,14 @@ export default function Player() {
         {overlaySettings.showQrCode && (
           <div
             style={{
+              position: "absolute",
+              left: `${qrOffset}px`,
+              bottom: `${qrOffset}px`,
               width: `${qrSizeValue}px`,
               height: `${qrSizeValue}px`,
               background: "white",
-              borderRadius: `${borderRadius}px`,
+              borderRadius: `${qrBorderRadius}px`,
               padding: `${qrPadding}px`,
-              flexShrink: 0,
               boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
             }}
           >
@@ -1124,65 +1127,76 @@ export default function Player() {
           </div>
         )}
 
-        {/* Ticker container - takes full remaining width */}
-        {overlaySettings.showRoller && (
-          <div
-            style={{
-              flex: 1,
-              height: `${tickerHeight}px`,
-              overflow: "hidden",
-              position: "relative",
-              backgroundColor: "transparent",
-              borderRadius: `${borderRadius}px`,
-              display: "flex",
-              alignItems: "center",
-              paddingLeft: `${padding}px`,
-              paddingRight: `${padding}px`,
-            }}
-          >
+        <div
+          style={{
+            height: `${overlaySettings.height}px`,
+            display: "flex",
+            alignItems: "flex-end",
+            padding: `${padding}px`,
+            paddingLeft: `${leftInset}px`,
+            gap: `${gap}px`,
+          }}
+        >
+          {/* Ticker container - takes full remaining width */}
+          {overlaySettings.showRoller && (
             <div
-              className="ticker-text"
               style={{
-                fontSize: `${tickerFontSize}px`,
-                fontWeight: 600,
-                color: "#fff",
-                textShadow: "2px 2px 4px rgba(0,0,0,0.9)",
-                letterSpacing: "0.5px",
+                flex: 1,
+                height: `${tickerHeight}px`,
+                overflow: "hidden",
+                position: "relative",
+                backgroundColor: "transparent",
+                borderRadius: `${borderRadius}px`,
+                display: "flex",
+                alignItems: "center",
+                paddingLeft: `${padding}px`,
+                paddingRight: `${padding}px`,
               }}
             >
-              {tickerText}
+              <div
+                className="ticker-text"
+                style={{
+                  fontSize: `${tickerFontSize}px`,
+                  fontWeight: 600,
+                  color: "#fff",
+                  textShadow: "2px 2px 4px rgba(0,0,0,0.9)",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                {tickerText}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Fullscreen button - only rendered when controls are shown to avoid gap */}
-        {showControls && (
-          <button
-            onClick={toggleFullscreen}
-            style={{
-              flexShrink: 0,
-              padding: `${Math.round(10 * scaleFactor)}px ${Math.round(20 * scaleFactor)}px`,
-              background: "rgba(255,255,255,0.15)",
-              border: "1px solid rgba(255,255,255,0.3)",
-              borderRadius: `${borderRadius}px`,
-              color: "white",
-              cursor: "pointer",
-              fontSize: `${Math.round(14 * scaleFactor)}px`,
-              fontWeight: 500,
-              transition: "all 0.3s ease",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "rgba(255,255,255,0.25)";
-              e.currentTarget.style.transform = "scale(1.05)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "rgba(255,255,255,0.15)";
-              e.currentTarget.style.transform = "scale(1)";
-            }}
-          >
-            {isFullscreen ? "⊗ Exit Fullscreen" : "⛶ Fullscreen"}
-          </button>
-        )}
+          {/* Fullscreen button - only rendered when controls are shown to avoid gap */}
+          {showControls && (
+            <button
+              onClick={toggleFullscreen}
+              style={{
+                flexShrink: 0,
+                padding: `${Math.round(10 * scaleFactor)}px ${Math.round(20 * scaleFactor)}px`,
+                background: "rgba(255,255,255,0.15)",
+                border: "1px solid rgba(255,255,255,0.3)",
+                borderRadius: `${borderRadius}px`,
+                color: "white",
+                cursor: "pointer",
+                fontSize: `${Math.round(14 * scaleFactor)}px`,
+                fontWeight: 500,
+                transition: "all 0.3s ease",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "rgba(255,255,255,0.25)";
+                e.currentTarget.style.transform = "scale(1.05)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "rgba(255,255,255,0.15)";
+                e.currentTarget.style.transform = "scale(1)";
+              }}
+            >
+              {isFullscreen ? "⊗ Exit Fullscreen" : "⛶ Fullscreen"}
+            </button>
+          )}
+        </div>
       </div>
     );
   };

@@ -49,6 +49,7 @@ export default function Admin() {
     const [requestAcceptance, setRequestAcceptance] = useState("local");
     const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
     const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
+    const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
     const [showSettingsModal, setShowSettingsModal] = useState(false);
     const [allowDownloads, setAllowDownloads] = useState(true);
     const [showDownloadBrowser, setShowDownloadBrowser] = useState(false);
@@ -560,6 +561,7 @@ export default function Admin() {
             setRequestAcceptance(settings["requests.acceptance"] || "local");
             setLocalLibraryEnabled(parseBooleanSetting(settings["libraries.local_enabled"]));
             setExternalLibraryEnabled(parseBooleanSetting(settings["libraries.external_enabled"]));
+            setLocalBrowseEnabled(parseBooleanSetting(settings["requests.local_browse_enabled"]));
             setAllowDownloads(parseBooleanSetting(settings["ytdlp.allow_downloads"]));
             setBreakPlaylistsFolder(settings["break_music.playlists_folder"] || "/media/playlists");
             if (settings["admin.log_level"])
@@ -657,6 +659,19 @@ export default function Admin() {
                 setTimeout(() => setBanner(""), 5000);
                 setExternalLibraryEnabled(!enabled);
             }
+        }
+    }
+    async function handleLocalBrowseToggle(enabled) {
+        setLocalBrowseEnabled(enabled);
+        try {
+            await saveSetting("requests.local_browse_enabled", enabled);
+            setBanner(`✔ Request-page browse ${enabled ? "enabled" : "disabled"}`);
+            setTimeout(() => setBanner(""), 3000);
+        }
+        catch (err) {
+            setBanner(`⚠️ Failed to update request-page browse: ${err.message}`);
+            setTimeout(() => setBanner(""), 5000);
+            setLocalBrowseEnabled(!enabled);
         }
     }
     async function handleAllowDownloadsToggle(enabled) {
@@ -1580,7 +1595,7 @@ export default function Admin() {
                                                                                 // When unchecking disabled, enable local library by default
                                                                                 handleLibraryToggle("local", true);
                                                                             }
-                                                                        }, disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Disabled (no guest requests)" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: localLibraryEnabled, onChange: (e) => handleLibraryToggle("local", e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable Local Library" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: externalLibraryEnabled, onChange: (e) => handleLibraryToggle("external", e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable External Library (Karaoke Nerds)" })] })] }), _jsx("p", { style: { margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }, children: "Control which libraries are available for searching and requesting. When both are disabled, guests cannot request songs. Host can always add songs manually." })] }), _jsxs("div", { style: {
+                                                                        }, disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Disabled (no guest requests)" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: localLibraryEnabled, onChange: (e) => handleLibraryToggle("local", e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable Local Library" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: externalLibraryEnabled, onChange: (e) => handleLibraryToggle("external", e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable External Library (Karaoke Nerds)" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: localLibraryEnabled ? "pointer" : "not-allowed", opacity: localLibraryEnabled ? 1 : 0.6 }, children: [_jsx("input", { type: "checkbox", checked: localBrowseEnabled, onChange: (e) => handleLocalBrowseToggle(e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn || !localLibraryEnabled, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Show Local Library Browse on Request Page" })] })] }), _jsx("p", { style: { margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }, children: "Control which libraries are available for searching and requesting. When both are disabled, guests cannot request songs. Host can always add songs manually." })] }), _jsxs("div", { style: {
                                                     background: "var(--color-bg-secondary)",
                                                     border: "1px solid var(--color-border)",
                                                     borderRadius: 12,

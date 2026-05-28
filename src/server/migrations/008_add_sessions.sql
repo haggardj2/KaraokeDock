@@ -13,7 +13,5 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 
--- Add admin password to settings if not exists
-INSERT INTO settings (key, value) VALUES
-('admin.password', '"changeme-password"')
-ON CONFLICT (key) DO NOTHING;
+-- Fresh installs no longer seed a known default admin password here.
+-- Startup generates a one-time bootstrap password when ADMIN_PASSWORD is unset.

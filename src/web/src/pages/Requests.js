@@ -5,19 +5,29 @@ import { api } from '../api';
 const MIN_KEY_ADJUSTMENT = -6;
 const MAX_KEY_ADJUSTMENT = 6;
 const MOBILE_BREAKPOINT = 640;
+const BROWSE_LETTERS = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')];
 export default function Requests() {
     const [q, setQ] = useState('');
     const [requestedBy, setRequestedBy] = useState('');
     const [keyAdjustments, setKeyAdjustments] = useState(new Map());
     const [searchMode, setSearchMode] = useState('local');
+    const [localViewMode, setLocalViewMode] = useState('search');
     const [localRows, setLocalRows] = useState([]);
     const [karaokeNerdsRows, setKaraokeNerdsRows] = useState([]);
     const [busy, setBusy] = useState(false);
+    const [browseBusy, setBrowseBusy] = useState(false);
+    const [browseCategory, setBrowseCategory] = useState('artist');
+    const [browseLetters, setBrowseLetters] = useState([]);
+    const [selectedBrowseLetter, setSelectedBrowseLetter] = useState('');
+    const [browseArtists, setBrowseArtists] = useState([]);
+    const [selectedBrowseArtist, setSelectedBrowseArtist] = useState('');
+    const [browseSummary, setBrowseSummary] = useState('');
     const [addingLocal, setAddingLocal] = useState(null);
     const [addingKaraokeNerds, setAddingKaraokeNerds] = useState(null);
     const [recentlyAdded, setRecentlyAdded] = useState(new Set());
     const [showNamePrompt, setShowNamePrompt] = useState(false);
     const [kindFilter, setKindFilter] = useState('all');
+    const [searchFieldFilter, setSearchFieldFilter] = useState('all');
     const [showFilters, setShowFilters] = useState(false);
     const [actionMenuOpen, setActionMenuOpen] = useState(null);
     const [actionMenuAnchor, setActionMenuAnchor] = useState(null);
@@ -33,6 +43,7 @@ export default function Requests() {
     const [requestAcceptance, setRequestAcceptance] = useState('local');
     const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
     const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
+    const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
     useEffect(() => {
         // Close popup when clicking outside
         function handleDown(e) {
@@ -98,9 +109,11 @@ export default function Requests() {
                 const acceptance = settings['requests.acceptance'] || 'local';
                 const localEnabled = settings['libraries.local_enabled'] !== false;
                 const externalEnabled = settings['libraries.external_enabled'] !== false;
+                const browseEnabled = settings['requests.local_browse_enabled'] !== false;
                 setRequestAcceptance(acceptance);
                 setLocalLibraryEnabled(localEnabled);
                 setExternalLibraryEnabled(externalEnabled);
+                setLocalBrowseEnabled(browseEnabled);
                 // Set initial search mode based on what's enabled
                 if (localEnabled) {
                     setSearchMode('local');
@@ -126,6 +139,11 @@ export default function Requests() {
                 clearTimeout(toastTimeoutRef.current);
         };
     }, []);
+    useEffect(() => {
+        if (!localBrowseEnabled && localViewMode === 'browse') {
+            setLocalViewMode('search');
+        }
+    }, [localBrowseEnabled, localViewMode]);
     useLayoutEffect(() => {
         if (!actionMenuOpen)
             return;
@@ -257,6 +275,9 @@ export default function Requests() {
             if (kindFilter !== 'all') {
                 url += `&kind=${kindFilter}`;
             }
+            if (searchFieldFilter !== 'all') {
+                url += `&field=${searchFieldFilter}`;
+            }
             const r = await api(url);
             setLocalRows(Array.isArray(r) ? r : []);
         }
@@ -267,7 +288,7 @@ export default function Requests() {
         finally {
             setBusy(false);
         }
-    }, [q, kindFilter]);
+    }, [q, kindFilter, searchFieldFilter]);
     // Karaoke Nerds search
     const doKaraokeNerdsSearch = useCallback(async () => {
         if (!q.trim()) {
@@ -287,10 +308,85 @@ export default function Requests() {
             setBusy(false);
         }
     }, [q]);
+    const loadBrowseLetters = useCallback(async (category) => {
+        setBrowseBusy(true);
+        try {
+            const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : '';
+            const result = await api(`/api/search/browse/letters?mode=${category}${kindQuery}`);
+            const letters = Array.isArray(result?.letters) ? result.letters.filter((value) => typeof value === 'string') : [];
+            setBrowseLetters(letters);
+            setSelectedBrowseLetter((current) => (letters.includes(current) ? current : ''));
+        }
+        catch (err) {
+            console.error('Browse letters error:', err);
+            setBrowseLetters([]);
+            setSelectedBrowseLetter('');
+        }
+        finally {
+            setBrowseBusy(false);
+        }
+    }, [kindFilter]);
+    const loadBrowseArtists = useCallback(async (letter) => {
+        setBrowseBusy(true);
+        setBrowseArtists([]);
+        setLocalRows([]);
+        setBrowseSummary(`Artists starting with "${letter}"`);
+        try {
+            const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : '';
+            const result = await api(`/api/search/browse/artists?letter=${encodeURIComponent(letter)}${kindQuery}`);
+            const artists = Array.isArray(result?.artists) ? result.artists.filter((value) => typeof value === 'string' && value.trim().length > 0) : [];
+            setBrowseArtists(artists);
+        }
+        catch (err) {
+            console.error('Browse artists error:', err);
+            setBrowseArtists([]);
+        }
+        finally {
+            setBrowseBusy(false);
+        }
+    }, [kindFilter]);
+    const loadBrowseTitles = useCallback(async (letter) => {
+        setBrowseBusy(true);
+        setBrowseArtists([]);
+        setLocalRows([]);
+        setBrowseSummary(`Titles starting with "${letter}"`);
+        try {
+            const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : '';
+            const result = await api(`/api/search/browse/titles?letter=${encodeURIComponent(letter)}${kindQuery}`);
+            setLocalRows(Array.isArray(result) ? result : []);
+        }
+        catch (err) {
+            console.error('Browse titles error:', err);
+            setLocalRows([]);
+        }
+        finally {
+            setBrowseBusy(false);
+        }
+    }, [kindFilter]);
+    const loadBrowseArtistTracks = useCallback(async (artist) => {
+        setBrowseBusy(true);
+        setLocalRows([]);
+        setBrowseSummary(`Songs by ${artist}`);
+        try {
+            const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : '';
+            const result = await api(`/api/search/browse/artist-tracks?artist=${encodeURIComponent(artist)}${kindQuery}`);
+            setLocalRows(Array.isArray(result) ? result : []);
+        }
+        catch (err) {
+            console.error('Browse artist tracks error:', err);
+            setLocalRows([]);
+        }
+        finally {
+            setBrowseBusy(false);
+        }
+    }, [kindFilter]);
     // Debounced search
     useEffect(() => {
         if (searchTimeoutRef.current) {
             clearTimeout(searchTimeoutRef.current);
+        }
+        if (searchMode === 'local' && localViewMode === 'browse') {
+            return;
         }
         const delay = searchMode === 'local' ? 300 : 500;
         searchTimeoutRef.current = setTimeout(() => {
@@ -306,9 +402,12 @@ export default function Requests() {
                 clearTimeout(searchTimeoutRef.current);
             }
         };
-    }, [q, searchMode, doLocalSearch, doKaraokeNerdsSearch]);
+    }, [q, searchMode, localViewMode, doLocalSearch, doKaraokeNerdsSearch]);
     // DON'T clear results when switching modes - just trigger new search
     useEffect(() => {
+        if (searchMode === 'local' && localViewMode === 'browse') {
+            return;
+        }
         if (q.trim()) {
             if (searchMode === 'local') {
                 doLocalSearch();
@@ -317,7 +416,43 @@ export default function Requests() {
                 doKaraokeNerdsSearch();
             }
         }
-    }, [searchMode]);
+    }, [searchMode, localViewMode]);
+    useEffect(() => {
+        if (searchMode !== 'local' || localViewMode !== 'browse')
+            return;
+        setBrowseArtists([]);
+        setSelectedBrowseArtist('');
+        setLocalRows([]);
+        setBrowseSummary('');
+        loadBrowseLetters(browseCategory);
+    }, [searchMode, localViewMode, browseCategory, kindFilter, loadBrowseLetters]);
+    useEffect(() => {
+        if (searchMode !== 'local' || localViewMode !== 'browse')
+            return;
+        if (!selectedBrowseLetter) {
+            setBrowseArtists([]);
+            setSelectedBrowseArtist('');
+            setLocalRows([]);
+            setBrowseSummary('');
+            return;
+        }
+        setSelectedBrowseArtist('');
+        if (browseCategory === 'artist') {
+            loadBrowseArtists(selectedBrowseLetter);
+        }
+        else {
+            loadBrowseTitles(selectedBrowseLetter);
+        }
+    }, [searchMode, localViewMode, browseCategory, selectedBrowseLetter, loadBrowseArtists, loadBrowseTitles]);
+    useEffect(() => {
+        if (searchMode !== 'local' || localViewMode !== 'browse' || browseCategory !== 'artist')
+            return;
+        if (!selectedBrowseArtist) {
+            setLocalRows([]);
+            return;
+        }
+        loadBrowseArtistTracks(selectedBrowseArtist);
+    }, [searchMode, localViewMode, browseCategory, selectedBrowseArtist, loadBrowseArtistTracks]);
     const showToast = (message, type = 'success') => {
         const toast = document.createElement('div');
         toast.className = `toast-notification ${type}`;
@@ -339,6 +474,12 @@ export default function Requests() {
             }, 300);
         }, 3000);
     };
+    const isLocalBrowseMode = searchMode === 'local' && localViewMode === 'browse';
+    const showingBrowseArtistList = isLocalBrowseMode && browseCategory === 'artist' && !!selectedBrowseLetter && !selectedBrowseArtist;
+    const showLocalResults = searchMode === 'local' && localRows.length > 0;
+    const activeResultsCount = searchMode === 'local' ? localRows.length : karaokeNerdsRows.length;
+    const isLoading = busy || browseBusy;
+    const availableBrowseLetters = new Set(browseLetters);
     async function enqueueLocal(id, songTitle) {
         const name = requestedBy.trim();
         if (!name) {
@@ -1751,7 +1892,29 @@ export default function Requests() {
                                     padding: '40px',
                                     textAlign: 'center',
                                     color: 'var(--color-text-secondary)'
-                                }, children: [_jsx("div", { style: { fontSize: '48px', marginBottom: '16px' }, children: "\uD83C\uDFA4" }), _jsx("div", { style: { fontSize: '18px', fontWeight: 500 }, children: "We are not accepting requests at this time." })] })) : (_jsxs(_Fragment, { children: [_jsxs("div", { className: "search-wrapper", children: [_jsx("input", { className: "search-input", type: "search", placeholder: searchMode === 'local' ? 'Search local songs...' : 'Search online catalog...', value: q, onChange: (e) => setQ(e.target.value), autoComplete: "off", autoCorrect: "off", spellCheck: "false" }), _jsx("span", { className: "search-icon", children: "\uD83D\uDD0D" })] }), searchMode === 'local' && (_jsxs("div", { className: "search-filters", children: [_jsxs("button", { className: "filter-toggle", onClick: () => setShowFilters(!showFilters), "aria-label": "Toggle filters", children: [_jsx("span", { className: "filter-icon", children: "\u2699\uFE0F" }), _jsx("span", { children: "Filters" }), _jsx("span", { className: "filter-chevron", children: showFilters ? '▼' : '▶' })] }), showFilters && (_jsx("div", { className: "filter-options", children: _jsxs("div", { className: "filter-group", children: [_jsx("label", { className: "filter-label", children: "Format" }), _jsxs("div", { className: "filter-chips", children: [_jsx("button", { className: `filter-chip ${kindFilter === 'all' ? 'active' : ''}`, onClick: () => setKindFilter('all'), children: _jsx("span", { children: "All Formats" }) }), _jsx("button", { className: `filter-chip ${kindFilter === 'mp4' ? 'active' : ''}`, onClick: () => setKindFilter('mp4'), children: _jsx("span", { children: "\uD83C\uDFAC MP4 Video" }) }), _jsx("button", { className: `filter-chip ${kindFilter === 'cdgmp3' ? 'active' : ''}`, onClick: () => setKindFilter('cdgmp3'), children: _jsx("span", { children: "\uD83D\uDCC0 CDG+MP3" }) })] })] }) }))] })), busy ? (_jsxs("div", { className: "loading-container", children: [_jsx("div", { className: "loading-spinner" }), _jsx("div", { className: "loading-text", children: searchMode === 'local' ? 'Searching local library...' : 'Searching Karaoke Nerds...' })] })) : searchMode === 'local' && localRows.length > 0 ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "results-header", children: [_jsxs("span", { className: "results-count", children: [localRows.length, " ", localRows.length === 1 ? 'song' : 'songs', " found"] }), kindFilter !== 'all' && (_jsx("span", { className: "active-filter-badge", children: kindFilter === 'mp4' ? '🎬 MP4' : '📀 CDG+MP3' }))] }), _jsx("div", { className: "results-container", children: localRows.map((row, idx) => {
+                                }, children: [_jsx("div", { style: { fontSize: '48px', marginBottom: '16px' }, children: "\uD83C\uDFA4" }), _jsx("div", { style: { fontSize: '18px', fontWeight: 500 }, children: "We are not accepting requests at this time." })] })) : (_jsxs(_Fragment, { children: [searchMode === 'local' && (_jsxs("div", { style: { display: 'flex', gap: 10, marginBottom: 16 }, children: [_jsx("button", { className: `filter-chip ${localViewMode === 'search' ? 'active' : ''}`, onClick: () => setLocalViewMode('search'), style: { flex: 1, justifyContent: 'center' }, children: _jsx("span", { children: "\uD83D\uDD0E Search" }) }), localBrowseEnabled && (_jsx("button", { className: `filter-chip ${localViewMode === 'browse' ? 'active' : ''}`, onClick: () => setLocalViewMode('browse'), style: { flex: 1, justifyContent: 'center' }, children: _jsx("span", { children: "\uD83D\uDDC2\uFE0F Browse" }) }))] })), !isLocalBrowseMode && (_jsxs("div", { className: "search-wrapper", children: [_jsx("input", { className: "search-input", type: "search", placeholder: searchMode === 'local' ? 'Search local songs...' : 'Search online catalog...', value: q, onChange: (e) => setQ(e.target.value), autoComplete: "off", autoCorrect: "off", spellCheck: "false" }), _jsx("span", { className: "search-icon", children: "\uD83D\uDD0D" })] })), searchMode === 'local' && (_jsxs("div", { className: "search-filters", children: [_jsxs("button", { className: "filter-toggle", onClick: () => setShowFilters(!showFilters), "aria-label": "Toggle filters", children: [_jsx("span", { className: "filter-icon", children: "\u2699\uFE0F" }), _jsx("span", { children: "Filters" }), _jsx("span", { className: "filter-chevron", children: showFilters ? '▼' : '▶' })] }), showFilters && (_jsx("div", { className: "filter-options", children: _jsxs("div", { className: "filter-group", children: [_jsx("label", { className: "filter-label", children: "Search In" }), _jsxs("div", { className: "filter-chips", style: { marginBottom: 14 }, children: [_jsx("button", { className: `filter-chip ${searchFieldFilter === 'all' ? 'active' : ''}`, onClick: () => setSearchFieldFilter('all'), children: _jsx("span", { children: "All" }) }), _jsx("button", { className: `filter-chip ${searchFieldFilter === 'artist' ? 'active' : ''}`, onClick: () => setSearchFieldFilter('artist'), children: _jsx("span", { children: "Artist" }) }), _jsx("button", { className: `filter-chip ${searchFieldFilter === 'title' ? 'active' : ''}`, onClick: () => setSearchFieldFilter('title'), children: _jsx("span", { children: "Song Title" }) })] }), _jsx("label", { className: "filter-label", children: "Format" }), _jsxs("div", { className: "filter-chips", children: [_jsx("button", { className: `filter-chip ${kindFilter === 'all' ? 'active' : ''}`, onClick: () => setKindFilter('all'), children: _jsx("span", { children: "All Formats" }) }), _jsx("button", { className: `filter-chip ${kindFilter === 'mp4' ? 'active' : ''}`, onClick: () => setKindFilter('mp4'), children: _jsx("span", { children: "\uD83C\uDFAC MP4 Video" }) }), _jsx("button", { className: `filter-chip ${kindFilter === 'cdgmp3' ? 'active' : ''}`, onClick: () => setKindFilter('cdgmp3'), children: _jsx("span", { children: "\uD83D\uDCC0 CDG+MP3" }) })] })] }) }))] })), isLocalBrowseMode && (_jsxs("div", { style: {
+                                            marginBottom: 20,
+                                            padding: 16,
+                                            background: 'var(--color-bg-secondary)',
+                                            borderRadius: 14,
+                                            border: '1px solid var(--color-border)',
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: 16
+                                        }, children: [_jsxs("div", { children: [_jsx("div", { style: { fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }, children: "Browse by" }), _jsxs("div", { style: { display: 'flex', gap: 10 }, children: [_jsx("button", { className: `filter-chip ${browseCategory === 'artist' ? 'active' : ''}`, onClick: () => setBrowseCategory('artist'), style: { flex: 1, justifyContent: 'center' }, children: _jsx("span", { children: "Artist" }) }), _jsx("button", { className: `filter-chip ${browseCategory === 'title' ? 'active' : ''}`, onClick: () => setBrowseCategory('title'), style: { flex: 1, justifyContent: 'center' }, children: _jsx("span", { children: "Song Title" }) })] })] }), _jsxs("div", { children: [_jsx("div", { style: { fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }, children: "Letter" }), _jsxs("select", { className: "form-input", value: selectedBrowseLetter, onChange: (e) => setSelectedBrowseLetter(e.target.value), style: {
+                                                            width: '100%',
+                                                            cursor: 'pointer',
+                                                            background: 'var(--color-bg-card)',
+                                                            color: 'var(--color-text-primary)',
+                                                            border: '1px solid var(--color-border)',
+                                                            borderRadius: 12,
+                                                            padding: '12px 14px',
+                                                            boxSizing: 'border-box'
+                                                        }, children: [_jsx("option", { value: "", children: "Select a letter" }), BROWSE_LETTERS.map((letter) => (_jsx("option", { value: letter, disabled: !availableBrowseLetters.has(letter), children: letter }, letter)))] })] }), browseCategory === 'artist' && selectedBrowseLetter && (_jsxs("div", { children: [_jsx("div", { style: { fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }, children: "Artist" }), _jsx("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, maxHeight: 220, overflowY: 'auto' }, children: browseArtists.map((artist) => (_jsx("button", { className: `filter-chip ${selectedBrowseArtist === artist ? 'active' : ''}`, onClick: () => setSelectedBrowseArtist(artist), children: _jsx("span", { children: artist }) }, artist))) })] }))] })), isLoading ? (_jsxs("div", { className: "loading-container", children: [_jsx("div", { className: "loading-spinner" }), _jsx("div", { className: "loading-text", children: isLocalBrowseMode
+                                                    ? 'Loading library browse...'
+                                                    : searchMode === 'local'
+                                                        ? 'Searching local library...'
+                                                        : 'Searching Karaoke Nerds...' })] })) : showLocalResults ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "results-header", children: [_jsxs("span", { className: "results-count", children: [localRows.length, " ", localRows.length === 1 ? 'song' : 'songs', " found"] }), browseSummary && (_jsx("span", { className: "active-filter-badge", children: browseSummary })), kindFilter !== 'all' && (_jsx("span", { className: "active-filter-badge", children: kindFilter === 'mp4' ? '🎬 MP4' : '📀 CDG+MP3' }))] }), _jsx("div", { className: "results-container", children: localRows.map((row, idx) => {
                                                     const trackKey = `local-${row.id}`;
                                                     const isRecentlyAdded = recentlyAdded.has(trackKey);
                                                     const currentKey = keyAdjustments.get(trackKey) ?? 0;
@@ -1806,9 +1969,9 @@ export default function Requests() {
                                                                                                             fetchLyrics(trackKey, artist, title);
                                                                                                         }
                                                                                                     }, children: [_jsx("span", { className: "action-menu-item-icon", children: "\uD83D\uDCC4" }), _jsxs("div", { className: "action-menu-item-content", children: [_jsx("span", { className: "action-menu-item-label", children: "View Lyrics" }), _jsx("span", { className: "action-menu-item-description", children: "See song words" })] })] })] })] })] }), document.body)] }) })] }, track.url || idx));
-                                                }) })] })) : q.trim() ? (_jsxs("div", { className: "empty-state", children: [_jsx("div", { className: "empty-icon", children: "\uD83C\uDFB5" }), _jsx("div", { className: "empty-title", children: "No results found" }), _jsx("div", { className: "empty-message", children: searchMode === 'karaoke-nerds'
+                                                }) })] })) : showingBrowseArtistList ? (_jsxs("div", { className: "empty-state", children: [_jsx("div", { className: "empty-icon", children: "\uD83C\uDF99\uFE0F" }), _jsx("div", { className: "empty-title", children: "Choose an artist" }), _jsxs("div", { className: "empty-message", children: ["Pick an artist from the list above to see songs under \"", selectedBrowseLetter, "\"."] })] })) : q.trim() && !isLocalBrowseMode ? (_jsxs("div", { className: "empty-state", children: [_jsx("div", { className: "empty-icon", children: "\uD83C\uDFB5" }), _jsx("div", { className: "empty-title", children: "No results found" }), _jsx("div", { className: "empty-message", children: searchMode === 'karaoke-nerds'
                                                     ? `No songs found on Karaoke Nerds for "${q}"`
-                                                    : `No songs found in library for "${q}"` })] })) : (_jsxs("div", { className: "empty-state", children: [_jsx("div", { className: "empty-icon", children: "\uD83C\uDFA4" }), _jsx("div", { className: "empty-title", children: "Ready to search? " }), _jsx("div", { className: "empty-message", children: searchMode === 'karaoke-nerds'
+                                                    : `No songs found in library for "${q}"` })] })) : isLocalBrowseMode ? (_jsxs("div", { className: "empty-state", children: [_jsx("div", { className: "empty-icon", children: "\uD83D\uDDC2\uFE0F" }), _jsx("div", { className: "empty-title", children: "Browse the library" }), _jsxs("div", { className: "empty-message", children: ["Choose ", browseCategory === 'artist' ? 'Artist' : 'Song Title', " and then pick a letter", browseCategory === 'artist' ? ', followed by an artist,' : '', " to browse up to ", activeResultsCount || 500, " local songs alphabetically."] })] })) : (_jsxs("div", { className: "empty-state", children: [_jsx("div", { className: "empty-icon", children: "\uD83C\uDFA4" }), _jsx("div", { className: "empty-title", children: "Ready to search? " }), _jsx("div", { className: "empty-message", children: searchMode === 'karaoke-nerds'
                                                     ? 'Browse thousands of karaoke tracks online'
                                                     : 'Search our local karaoke library' })] }))] }))] })] }), lyricsPopupOpen && (() => {
                 // Find the track data for the popup
