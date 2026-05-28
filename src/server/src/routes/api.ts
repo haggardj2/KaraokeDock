@@ -15,7 +15,6 @@ import {
   cleanupExpiredSessions,
   hashPassword,
   verifyPassword,
-  ensureAdminUser,
   getUserByUsername,
   createUser,
   getUserByOidcSubject,
@@ -52,8 +51,6 @@ import {
 import { recalculateSingerStats } from '../singerStats.js';
 
 ensureHelpfulIndexes().catch(e => console.error('ensureHelpfulIndexes failed', e));
-// Migrate legacy admin credentials to users table on startup
-ensureAdminUser().catch(e => console.error('ensureAdminUser failed', e));
 
 export const apiRouter = express.Router();
 
@@ -62,6 +59,7 @@ interface PublicSettings {
   'libraries.local_enabled': boolean;
   'libraries.external_enabled': boolean;
   'requests.acceptance': 'local' | 'external' | 'disabled';
+  'requests.local_browse_enabled': boolean;
 }
 
 const DEFAULT_BREAK_PLAYLISTS_FOLDER = '/media/playlists';
@@ -1174,6 +1172,8 @@ apiRouter.post(
 async function getOidcFrontendUrl(req: express.Request): Promise<string> {
   const stored = await getSetting('oidc.frontend_url');
   if (stored) return stored.replace(/\/$/, '');
+  const webAppUrl = process.env.WEB_APP_URL?.trim();
+  if (webAppUrl) return webAppUrl.replace(/\/$/, '');
   // Derive from ORIGIN env variable (first one)
   const origins = process.env.ORIGIN?.split(',').map((o: string) => o.trim()).filter(Boolean);
   if (origins?.length) return origins[0].replace(/\/$/, '');
@@ -1344,26 +1344,91 @@ apiRouter.get(
 
 // ===================== SEARCH =====================
 
+const ARTIST_BROWSE_LETTER_SQL = `
+  CASE
+    WHEN substring(regexp_replace(COALESCE(a.name, ''), '^[^[:alnum:]]+', '') from 1 for 1) ~ '^[A-Za-z]$'
+      THEN upper(substring(regexp_replace(COALESCE(a.name, ''), '^[^[:alnum:]]+', '') from 1 for 1))
+    ELSE '#'
+  END
+`;
+
+const TITLE_BROWSE_LETTER_SQL = `
+  CASE
+    WHEN substring(regexp_replace(COALESCE(t.title, ''), '^[^[:alnum:]]+', '') from 1 for 1) ~ '^[A-Za-z]$'
+      THEN upper(substring(regexp_replace(COALESCE(t.title, ''), '^[^[:alnum:]]+', '') from 1 for 1))
+    ELSE '#'
+  END
+`;
+
+function parseLocalKindFilter(value: unknown): 'mp4' | 'cdgmp3' | undefined {
+  return value === 'mp4' || value === 'cdgmp3' ? value : undefined;
+}
+
+function parseLocalSearchField(value: unknown): 'all' | 'artist' | 'title' {
+  return value === 'artist' || value === 'title' ? value : 'all';
+}
+
+function normalizeBrowseMode(value: unknown): 'artist' | 'title' | null {
+  return value === 'artist' || value === 'title' ? value : null;
+}
+
+function normalizeBrowseLetter(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().toUpperCase();
+  if (trimmed === '#') return '#';
+  return /^[A-Z]$/.test(trimmed) ? trimmed : null;
+}
+
+async function isLocalLibraryEnabled(): Promise<boolean> {
+  return await getSetting('libraries.local_enabled') !== false;
+}
+
+async function isLocalBrowseEnabled(): Promise<boolean> {
+  return await getSetting('requests.local_browse_enabled') !== false;
+}
+
 apiRouter.get(
   '/search',
   searchLimiter, // Apply rate limiting to prevent search abuse
   ah(async (req, res) => {
     // Check if local library is enabled
-    const localLibraryEnabled = await getSetting('libraries.local_enabled');
-    if (localLibraryEnabled === false) {
+    if (!(await isLocalLibraryEnabled())) {
       return res.status(403).json({ error: 'Local library search is disabled' });
     }
     
     const q = String(req.query.q ?? '').trim();
     const kindFilter = req.query.kind as string | undefined;
+    const fieldFilter = parseLocalSearchField(req.query.field);
     const libraryIdFilter = req.query.library_id ? Number(req.query.library_id) : undefined;
     
     if (!q) return res.json([]);
 
     // Build filter conditions
     let filterConditions = '';
+    let rankedSearchConditions = `
+      LOWER(t.title) LIKE '%' || LOWER($1) || '%'
+      OR LOWER(a.name) LIKE '%' || LOWER($1) || '%'
+      OR t.disc_id ILIKE '%' || $1 || '%'
+      OR to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1)
+    `;
+    let fallbackSearchConditions = `
+      t.title ILIKE '%' || $1 || '%'
+      OR a.name ILIKE '%' || $1 || '%'
+      OR t.disc_id ILIKE '%' || $1 || '%'
+    `;
     const queryParams: any[] = [q];
     let paramIndex = 2;
+
+    if (fieldFilter === 'artist') {
+      rankedSearchConditions = `LOWER(a.name) LIKE '%' || LOWER($1) || '%'`;
+      fallbackSearchConditions = `a.name ILIKE '%' || $1 || '%'`;
+    } else if (fieldFilter === 'title') {
+      rankedSearchConditions = `
+        LOWER(t.title) LIKE '%' || LOWER($1) || '%'
+        OR to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1)
+      `;
+      fallbackSearchConditions = `t.title ILIKE '%' || $1 || '%'`;
+    }
 
     if (kindFilter && (kindFilter === 'mp4' || kindFilter === 'cdgmp3')) {
       filterConditions += ` AND t.kind = $${paramIndex}`;
@@ -1418,12 +1483,7 @@ apiRouter.get(
             FROM tracks t
             LEFT JOIN artists a ON a.id = t.artist_id
            WHERE (t.source IS NULL OR t.source = 'local')
-                 AND (
-                   LOWER(t.title) LIKE '%' || LOWER($1) || '%'
-                   OR LOWER(a.name) LIKE '%' || LOWER($1) || '%'
-                   OR t.disc_id ILIKE '%' || $1 || '%'
-                   OR to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1)
-                 )
+                 AND (${rankedSearchConditions})
                  ${filterConditions}
         )
         SELECT id, title, disc_id, kind, artist
@@ -1431,7 +1491,7 @@ apiRouter.get(
          ORDER BY rank ASC, 
                   LOWER(artist) NULLS LAST, 
                   LOWER(title)
-         LIMIT 100
+         LIMIT 1000
         `,
         queryParams
       );
@@ -1451,17 +1511,207 @@ apiRouter.get(
           FROM tracks t
           LEFT JOIN artists a ON a.id = t.artist_id
          WHERE (t.source IS NULL OR t.source = 'local')
-           AND (t.title ILIKE '%' || $1 || '%'
-            OR a.name ILIKE '%' || $1 || '%'
-            OR t.disc_id ILIKE '%' || $1 || '%')
+           AND (${fallbackSearchConditions})
             ${filterConditions}
          ORDER BY a.name NULLS LAST, t.title
-         LIMIT 100
+         LIMIT 1000
         `,
         queryParams
       );
       return res.json(like.rows);
     }
+  })
+);
+
+apiRouter.get(
+  '/search/browse/letters',
+  searchLimiter,
+  ah(async (req, res) => {
+    if (!(await isLocalLibraryEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+    if (!(await isLocalBrowseEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+
+    const mode = normalizeBrowseMode(req.query.mode);
+    if (!mode) {
+      return res.status(400).json({ error: 'Browse mode must be "artist" or "title"' });
+    }
+
+    const kindFilter = parseLocalKindFilter(req.query.kind);
+    const letterSql = mode === 'artist' ? ARTIST_BROWSE_LETTER_SQL : TITLE_BROWSE_LETTER_SQL;
+    const columnSql = mode === 'artist' ? 'a.name' : 't.title';
+    const params: any[] = [];
+    let kindClause = '';
+
+    if (kindFilter) {
+      params.push(kindFilter);
+      kindClause = ` AND t.kind = $${params.length}`;
+    }
+
+    const result = await query<{ letter: string }>(
+      `
+      SELECT letter
+        FROM (
+          SELECT DISTINCT ${letterSql} AS letter,
+                 CASE WHEN ${letterSql} = '#' THEN 1 ELSE 0 END AS sort_group
+            FROM tracks t
+            LEFT JOIN artists a ON a.id = t.artist_id
+           WHERE (t.source IS NULL OR t.source = 'local')
+             AND ${columnSql} IS NOT NULL
+             AND BTRIM(${columnSql}) <> ''
+             ${kindClause}
+        ) letters
+       ORDER BY sort_group, letter
+      `,
+      params
+    );
+
+    res.json({ letters: result.rows.map((row) => row.letter) });
+  })
+);
+
+apiRouter.get(
+  '/search/browse/artists',
+  searchLimiter,
+  ah(async (req, res) => {
+    if (!(await isLocalLibraryEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+    if (!(await isLocalBrowseEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+
+    const letter = normalizeBrowseLetter(req.query.letter);
+    if (!letter) {
+      return res.status(400).json({ error: 'A browse letter is required' });
+    }
+
+    const kindFilter = parseLocalKindFilter(req.query.kind);
+    const params: any[] = [letter];
+    let kindClause = '';
+
+    if (kindFilter) {
+      params.push(kindFilter);
+      kindClause = ` AND t.kind = $${params.length}`;
+    }
+
+    const result = await query<{ artist: string }>(
+      `
+      SELECT artist
+        FROM (
+          SELECT DISTINCT a.name AS artist,
+                 LOWER(a.name) AS sort_artist
+            FROM tracks t
+            LEFT JOIN artists a ON a.id = t.artist_id
+           WHERE (t.source IS NULL OR t.source = 'local')
+             AND a.name IS NOT NULL
+             AND BTRIM(a.name) <> ''
+             AND ${ARTIST_BROWSE_LETTER_SQL} = $1
+             ${kindClause}
+        ) artists
+       ORDER BY sort_artist
+      `,
+      params
+    );
+
+    res.json({ artists: result.rows.map((row) => row.artist) });
+  })
+);
+
+apiRouter.get(
+  '/search/browse/titles',
+  searchLimiter,
+  ah(async (req, res) => {
+    if (!(await isLocalLibraryEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+    if (!(await isLocalBrowseEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+
+    const letter = normalizeBrowseLetter(req.query.letter);
+    if (!letter) {
+      return res.status(400).json({ error: 'A browse letter is required' });
+    }
+
+    const kindFilter = parseLocalKindFilter(req.query.kind);
+    const params: any[] = [letter];
+    let kindClause = '';
+
+    if (kindFilter) {
+      params.push(kindFilter);
+      kindClause = ` AND t.kind = $${params.length}`;
+    }
+
+    const result = await query(
+      `
+      SELECT t.id,
+             t.title,
+             t.disc_id,
+             t.kind,
+             a.name AS artist
+        FROM tracks t
+        LEFT JOIN artists a ON a.id = t.artist_id
+       WHERE (t.source IS NULL OR t.source = 'local')
+         AND t.title IS NOT NULL
+         AND BTRIM(t.title) <> ''
+         AND ${TITLE_BROWSE_LETTER_SQL} = $1
+         ${kindClause}
+       ORDER BY LOWER(t.title), LOWER(a.name) NULLS LAST, t.disc_id NULLS LAST
+      `,
+      params
+    );
+
+    res.json(result.rows);
+  })
+);
+
+apiRouter.get(
+  '/search/browse/artist-tracks',
+  searchLimiter,
+  ah(async (req, res) => {
+    if (!(await isLocalLibraryEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+    if (!(await isLocalBrowseEnabled())) {
+      return res.status(403).json({ error: 'Local library browse is disabled' });
+    }
+
+    const artist = String(req.query.artist ?? '').trim();
+    if (!artist) {
+      return res.status(400).json({ error: 'An artist is required' });
+    }
+
+    const kindFilter = parseLocalKindFilter(req.query.kind);
+    const params: any[] = [artist];
+    let kindClause = '';
+
+    if (kindFilter) {
+      params.push(kindFilter);
+      kindClause = ` AND t.kind = $${params.length}`;
+    }
+
+    const result = await query(
+      `
+      SELECT t.id,
+             t.title,
+             t.disc_id,
+             t.kind,
+             a.name AS artist
+        FROM tracks t
+        LEFT JOIN artists a ON a.id = t.artist_id
+       WHERE (t.source IS NULL OR t.source = 'local')
+         AND a.name IS NOT NULL
+         AND LOWER(BTRIM(a.name)) = LOWER(BTRIM($1))
+         ${kindClause}
+       ORDER BY LOWER(t.title), t.disc_id NULLS LAST
+      `,
+      params
+    );
+
+    res.json(result.rows);
   })
 );
 
@@ -3183,7 +3433,8 @@ apiRouter.get(
     const publicKeys: Array<keyof PublicSettings> = [
       'libraries.local_enabled',
       'libraries.external_enabled',
-      'requests.acceptance'
+      'requests.acceptance',
+      'requests.local_browse_enabled'
     ];
     
     const result = await query('SELECT key, value FROM settings WHERE key = ANY($1)', [publicKeys]);
@@ -3196,7 +3447,8 @@ apiRouter.get(
     const completeSettings: PublicSettings = {
       'libraries.local_enabled': settings['libraries.local_enabled'] ?? true,
       'libraries.external_enabled': settings['libraries.external_enabled'] ?? true,
-      'requests.acceptance': settings['requests.acceptance'] ?? 'local'
+      'requests.acceptance': settings['requests.acceptance'] ?? 'local',
+      'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true
     };
     
     res.json(completeSettings);

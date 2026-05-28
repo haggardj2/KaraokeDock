@@ -15,10 +15,15 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 ## Overview
 
-Web Karaoke MVP is built for hosts who need reliable show control and for singers who need fast, mobile-friendly requests. The system combines local library playback (MP4/CDG+MP3/ZIP), external song sources, and live queue sync between host, player, and request pages.
+Docker Karaoke started because none of the apps out there really fit the way I wanted to run a show. I wanted something that gave me full control without forcing me to stand there all night acting as the DJ/KJ. The goal was to make hosting feel easier, more flexible, and less tied to one specific machine, setup, or location.
 
-Recent platform updates add:
+I also wanted a platform that could run anywhere, on almost anything, while still supporting the collection I’ve built over time. Just as important, I wanted it to work alongside the awesome creations the karaoke community has already made. Docker Karaoke brings that together with local library playback, external song sources, and live queue syncing between the host, player, and singer request pages.
 
+---
+
+## Recent platform updates add:
+
+- 🔐 **Library Browse** Added browse tab to request page
 - 🔐 **OIDC/SSO authentication** with auto-provisioning options, role defaults, and optional password-login fallback
 - 🔄 **Advanced rotation engine** with multiple rotation types (strict round robin, least recently sung, signup order, song-queue-only, manual, and hybrid) plus host overrides
 - 🎶 **Break music management** with playlists, active playlist sync, volume control, and crossfade settings between karaoke tracks
@@ -305,11 +310,14 @@ After starting the containers for the first time:
    http://your-server:5173/admin
    ```
 
-2. **Login with default credentials:**
+2. **Get the bootstrap admin password:**
    - Username: `admin`
-   - Password: `changeme-password`
+   - Password: check the API container logs from the first boot:
+     ```bash
+     docker compose logs karaoke-api
+     ```
 
-3. **⚠️ Change the default password immediately** (you'll be prompted)
+3. **⚠️ Change the bootstrap password immediately** after logging in
 
 4. **Add a media library:**
    - Click "Add Library"
@@ -365,10 +373,11 @@ After starting the containers for the first time:
 **Forgot Login**
 ```bash
 # Run password reset helper:
-docker exec -it karaoke-api npm run reset-credentials 
-# Will reset to default admin/changeme-password if no flags are set. 
-# Alternatively, it can be ran with desired credentials ie.
-docker exec -it karaoke-api npm run reset-credentials --username host --password supersecret"
+docker exec -it karaoke-api npm run reset-credentials
+# Defaults to username "admin" and generates a secure password if --password is omitted.
+docker exec -it karaoke-api npm run reset-credentials -- --password supersecret
+# Or set a specific username/password:
+docker exec -it karaoke-api npm run reset-credentials -- --username admin --password supersecret
 ```
 
 **Reenable Password Login**

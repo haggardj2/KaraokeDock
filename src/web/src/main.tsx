@@ -16,6 +16,11 @@ function Nav() {
   const auth = useAuth()
   const [showAccountMenu, setShowAccountMenu] = useState(false)
   const [avatarLoadFailed, setAvatarLoadFailed] = useState(false)
+  const navLinkStyle = {
+    textDecoration: 'none',
+    fontWeight: 500,
+    transition: 'color 0.3s ease'
+  }
   
   // Update page title based on route
   useEffect(() => {
@@ -86,33 +91,33 @@ function Nav() {
       <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
         <Link 
           to="/player" 
+          onClick={(e) => {
+            e.preventDefault()
+            window.open('/player', 'karaoke-player')
+          }}
           style={{
             color: location.pathname === '/player' ? '#6366f1' : '#a1a1aa',
-            textDecoration: 'none',
-            fontWeight: 500,
-            transition: 'color 0.3s ease'
+            ...navLinkStyle
           }}
         >
           Player
         </Link>
-        <Link 
-          to="/requests" 
+        <a 
+          href="/requests"
+          target="_blank"
+          rel="noreferrer"
           style={{
             color: location.pathname === '/requests' || location.pathname === '/' ? '#6366f1' : '#a1a1aa',
-            textDecoration: 'none',
-            fontWeight: 500,
-            transition: 'color 0.3s ease'
+            ...navLinkStyle
           }}
         >
           Request
-        </Link>
+        </a>
         <Link 
           to="/host" 
           style={{
             color: location.pathname === '/host' ? '#6366f1' : '#a1a1aa',
-            textDecoration: 'none',
-            fontWeight: 500,
-            transition: 'color 0.3s ease'
+            ...navLinkStyle
           }}
         >
           Host
@@ -121,9 +126,7 @@ function Nav() {
           to="/admin" 
           style={{
             color: location.pathname === '/admin' ? '#6366f1' : '#a1a1aa',
-            textDecoration: 'none',
-            fontWeight: 500,
-            transition: 'color 0.3s ease'
+            ...navLinkStyle
           }}
         >
           Admin

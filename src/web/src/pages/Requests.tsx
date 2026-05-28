@@ -5,6 +5,7 @@ import { api } from '../api'
 const MIN_KEY_ADJUSTMENT = -6
 const MAX_KEY_ADJUSTMENT = 6
 const MOBILE_BREAKPOINT = 640
+const BROWSE_LETTERS = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')]
 
 type SearchRow = { 
   id: number; 
@@ -22,19 +23,30 @@ type KaraokeNerdsTrack = {
   source: 'karaoke-nerds'
 }
 
+type BrowseCategory = 'artist' | 'title'
+
 export default function Requests() {
   const [q, setQ] = useState('')
   const [requestedBy, setRequestedBy] = useState('')
   const [keyAdjustments, setKeyAdjustments] = useState<Map<string, number>>(new Map())
   const [searchMode, setSearchMode] = useState<'local' | 'karaoke-nerds'>('local')
+  const [localViewMode, setLocalViewMode] = useState<'search' | 'browse'>('search')
   const [localRows, setLocalRows] = useState<SearchRow[]>([])
   const [karaokeNerdsRows, setKaraokeNerdsRows] = useState<KaraokeNerdsTrack[]>([])
   const [busy, setBusy] = useState(false)
+  const [browseBusy, setBrowseBusy] = useState(false)
+  const [browseCategory, setBrowseCategory] = useState<BrowseCategory>('artist')
+  const [browseLetters, setBrowseLetters] = useState<string[]>([])
+  const [selectedBrowseLetter, setSelectedBrowseLetter] = useState('')
+  const [browseArtists, setBrowseArtists] = useState<string[]>([])
+  const [selectedBrowseArtist, setSelectedBrowseArtist] = useState('')
+  const [browseSummary, setBrowseSummary] = useState('')
   const [addingLocal, setAddingLocal] = useState<number | null>(null)
   const [addingKaraokeNerds, setAddingKaraokeNerds] = useState<string | null>(null)
   const [recentlyAdded, setRecentlyAdded] = useState<Set<string>>(new Set())
   const [showNamePrompt, setShowNamePrompt] = useState(false)
   const [kindFilter, setKindFilter] = useState<'all' | 'mp4' | 'cdgmp3'>('all')
+  const [searchFieldFilter, setSearchFieldFilter] = useState<'all' | 'artist' | 'title'>('all')
   const [showFilters, setShowFilters] = useState(false)
   const [actionMenuOpen, setActionMenuOpen] = useState<string | null>(null)
   const [actionMenuAnchor, setActionMenuAnchor] = useState<{top: number, left: number, right: number, bottom: number, width: number} | null>(null)
@@ -51,6 +63,7 @@ export default function Requests() {
   const [requestAcceptance, setRequestAcceptance] = useState<'local' | 'external' | 'disabled'>('local')
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true)
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true)
+  const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true)
 
   useEffect(() => {
     // Close popup when clicking outside
@@ -120,10 +133,12 @@ export default function Requests() {
         const acceptance = settings['requests.acceptance'] || 'local';
         const localEnabled = settings['libraries.local_enabled'] !== false;
         const externalEnabled = settings['libraries.external_enabled'] !== false;
+        const browseEnabled = settings['requests.local_browse_enabled'] !== false;
         
         setRequestAcceptance(acceptance);
         setLocalLibraryEnabled(localEnabled);
         setExternalLibraryEnabled(externalEnabled);
+        setLocalBrowseEnabled(browseEnabled);
         
         // Set initial search mode based on what's enabled
         if (localEnabled) {
@@ -147,6 +162,12 @@ export default function Requests() {
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!localBrowseEnabled && localViewMode === 'browse') {
+      setLocalViewMode('search')
+    }
+  }, [localBrowseEnabled, localViewMode])
 
 
   useLayoutEffect(() => {
@@ -296,6 +317,9 @@ export default function Requests() {
       if (kindFilter !== 'all') {
         url += `&kind=${kindFilter}`
       }
+      if (searchFieldFilter !== 'all') {
+        url += `&field=${searchFieldFilter}`
+      }
       const r = await api(url)
       setLocalRows(Array.isArray(r) ? r : [])
     } catch (err) {
@@ -304,7 +328,7 @@ export default function Requests() {
     } finally { 
       setBusy(false) 
     }
-  }, [q, kindFilter])
+  }, [q, kindFilter, searchFieldFilter])
 
   // Karaoke Nerds search
   const doKaraokeNerdsSearch = useCallback(async () => {
@@ -324,10 +348,82 @@ export default function Requests() {
     }
   }, [q])
 
+  const loadBrowseLetters = useCallback(async (category: BrowseCategory) => {
+    setBrowseBusy(true)
+    try {
+      const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : ''
+      const result = await api(`/api/search/browse/letters?mode=${category}${kindQuery}`)
+      const letters = Array.isArray(result?.letters) ? result.letters.filter((value: unknown): value is string => typeof value === 'string') : []
+      setBrowseLetters(letters)
+      setSelectedBrowseLetter((current) => (letters.includes(current) ? current : ''))
+    } catch (err) {
+      console.error('Browse letters error:', err)
+      setBrowseLetters([])
+      setSelectedBrowseLetter('')
+    } finally {
+      setBrowseBusy(false)
+    }
+  }, [kindFilter])
+
+  const loadBrowseArtists = useCallback(async (letter: string) => {
+    setBrowseBusy(true)
+    setBrowseArtists([])
+    setLocalRows([])
+    setBrowseSummary(`Artists starting with "${letter}"`)
+    try {
+      const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : ''
+      const result = await api(`/api/search/browse/artists?letter=${encodeURIComponent(letter)}${kindQuery}`)
+      const artists = Array.isArray(result?.artists) ? result.artists.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0) : []
+      setBrowseArtists(artists)
+    } catch (err) {
+      console.error('Browse artists error:', err)
+      setBrowseArtists([])
+    } finally {
+      setBrowseBusy(false)
+    }
+  }, [kindFilter])
+
+  const loadBrowseTitles = useCallback(async (letter: string) => {
+    setBrowseBusy(true)
+    setBrowseArtists([])
+    setLocalRows([])
+    setBrowseSummary(`Titles starting with "${letter}"`)
+    try {
+      const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : ''
+      const result = await api(`/api/search/browse/titles?letter=${encodeURIComponent(letter)}${kindQuery}`)
+      setLocalRows(Array.isArray(result) ? result : [])
+    } catch (err) {
+      console.error('Browse titles error:', err)
+      setLocalRows([])
+    } finally {
+      setBrowseBusy(false)
+    }
+  }, [kindFilter])
+
+  const loadBrowseArtistTracks = useCallback(async (artist: string) => {
+    setBrowseBusy(true)
+    setLocalRows([])
+    setBrowseSummary(`Songs by ${artist}`)
+    try {
+      const kindQuery = kindFilter !== 'all' ? `&kind=${kindFilter}` : ''
+      const result = await api(`/api/search/browse/artist-tracks?artist=${encodeURIComponent(artist)}${kindQuery}`)
+      setLocalRows(Array.isArray(result) ? result : [])
+    } catch (err) {
+      console.error('Browse artist tracks error:', err)
+      setLocalRows([])
+    } finally {
+      setBrowseBusy(false)
+    }
+  }, [kindFilter])
+
   // Debounced search
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current)
+    }
+
+    if (searchMode === 'local' && localViewMode === 'browse') {
+      return
     }
     
     const delay = searchMode === 'local' ? 300 : 500
@@ -344,10 +440,13 @@ export default function Requests() {
         clearTimeout(searchTimeoutRef.current)
       }
     }
-  }, [q, searchMode, doLocalSearch, doKaraokeNerdsSearch])
+  }, [q, searchMode, localViewMode, doLocalSearch, doKaraokeNerdsSearch])
 
   // DON'T clear results when switching modes - just trigger new search
   useEffect(() => {
+    if (searchMode === 'local' && localViewMode === 'browse') {
+      return
+    }
     if (q. trim()) {
       if (searchMode === 'local') {
         doLocalSearch()
@@ -355,7 +454,47 @@ export default function Requests() {
         doKaraokeNerdsSearch()
       }
     }
-  }, [searchMode])
+  }, [searchMode, localViewMode])
+
+  useEffect(() => {
+    if (searchMode !== 'local' || localViewMode !== 'browse') return
+
+    setBrowseArtists([])
+    setSelectedBrowseArtist('')
+    setLocalRows([])
+    setBrowseSummary('')
+    loadBrowseLetters(browseCategory)
+  }, [searchMode, localViewMode, browseCategory, kindFilter, loadBrowseLetters])
+
+  useEffect(() => {
+    if (searchMode !== 'local' || localViewMode !== 'browse') return
+
+    if (!selectedBrowseLetter) {
+      setBrowseArtists([])
+      setSelectedBrowseArtist('')
+      setLocalRows([])
+      setBrowseSummary('')
+      return
+    }
+
+    setSelectedBrowseArtist('')
+    if (browseCategory === 'artist') {
+      loadBrowseArtists(selectedBrowseLetter)
+    } else {
+      loadBrowseTitles(selectedBrowseLetter)
+    }
+  }, [searchMode, localViewMode, browseCategory, selectedBrowseLetter, loadBrowseArtists, loadBrowseTitles])
+
+  useEffect(() => {
+    if (searchMode !== 'local' || localViewMode !== 'browse' || browseCategory !== 'artist') return
+
+    if (!selectedBrowseArtist) {
+      setLocalRows([])
+      return
+    }
+
+    loadBrowseArtistTracks(selectedBrowseArtist)
+  }, [searchMode, localViewMode, browseCategory, selectedBrowseArtist, loadBrowseArtistTracks])
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     const toast = document.createElement('div')
@@ -380,6 +519,13 @@ export default function Requests() {
       }, 300)
     }, 3000)
   }
+
+  const isLocalBrowseMode = searchMode === 'local' && localViewMode === 'browse'
+  const showingBrowseArtistList = isLocalBrowseMode && browseCategory === 'artist' && !!selectedBrowseLetter && !selectedBrowseArtist
+  const showLocalResults = searchMode === 'local' && localRows.length > 0
+  const activeResultsCount = searchMode === 'local' ? localRows.length : karaokeNerdsRows.length
+  const isLoading = busy || browseBusy
+  const availableBrowseLetters = new Set(browseLetters)
 
   async function enqueueLocal(id: number, songTitle: string) {
     const name = requestedBy.trim()
@@ -1888,20 +2034,42 @@ export default function Requests() {
             </div>
           ) : (
             <>
-              {/* Search Input - Fixed with Clear Button Inside */}
-              <div className="search-wrapper">
-                <input
-                  className="search-input"
-                  type="search"
-                  placeholder={searchMode === 'local' ? 'Search local songs...' : 'Search online catalog...'}
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  autoComplete="off"
-                  autoCorrect="off"
-                  spellCheck="false"
-                />
-                <span className="search-icon">🔍</span>
-              </div>
+              {searchMode === 'local' && (
+                <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+                  <button
+                    className={`filter-chip ${localViewMode === 'search' ? 'active' : ''}`}
+                    onClick={() => setLocalViewMode('search')}
+                    style={{ flex: 1, justifyContent: 'center' }}
+                  >
+                    <span>🔎 Search</span>
+                  </button>
+                  {localBrowseEnabled && (
+                    <button
+                      className={`filter-chip ${localViewMode === 'browse' ? 'active' : ''}`}
+                      onClick={() => setLocalViewMode('browse')}
+                      style={{ flex: 1, justifyContent: 'center' }}
+                    >
+                      <span>🗂️ Browse</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {!isLocalBrowseMode && (
+                <div className="search-wrapper">
+                  <input
+                    className="search-input"
+                    type="search"
+                    placeholder={searchMode === 'local' ? 'Search local songs...' : 'Search online catalog...'}
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck="false"
+                  />
+                  <span className="search-icon">🔍</span>
+                </div>
+              )}
 
           {/* Search Filters (Local only) */}
           {searchMode === 'local' && (
@@ -1919,6 +2087,28 @@ export default function Requests() {
               {showFilters && (
                 <div className="filter-options">
                   <div className="filter-group">
+                    <label className="filter-label">Search In</label>
+                    <div className="filter-chips" style={{ marginBottom: 14 }}>
+                      <button
+                        className={`filter-chip ${searchFieldFilter === 'all' ? 'active' : ''}`}
+                        onClick={() => setSearchFieldFilter('all')}
+                      >
+                        <span>All</span>
+                      </button>
+                      <button
+                        className={`filter-chip ${searchFieldFilter === 'artist' ? 'active' : ''}`}
+                        onClick={() => setSearchFieldFilter('artist')}
+                      >
+                        <span>Artist</span>
+                      </button>
+                      <button
+                        className={`filter-chip ${searchFieldFilter === 'title' ? 'active' : ''}`}
+                        onClick={() => setSearchFieldFilter('title')}
+                      >
+                        <span>Song Title</span>
+                      </button>
+                    </div>
+
                     <label className="filter-label">Format</label>
                     <div className="filter-chips">
                       <button
@@ -1946,20 +2136,113 @@ export default function Requests() {
             </div>
           )}
 
+          {isLocalBrowseMode && (
+            <div style={{
+              marginBottom: 20,
+              padding: 16,
+              background: 'var(--color-bg-secondary)',
+              borderRadius: 14,
+              border: '1px solid var(--color-border)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16
+            }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Browse by
+                </div>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button
+                    className={`filter-chip ${browseCategory === 'artist' ? 'active' : ''}`}
+                    onClick={() => setBrowseCategory('artist')}
+                    style={{ flex: 1, justifyContent: 'center' }}
+                  >
+                    <span>Artist</span>
+                  </button>
+                  <button
+                    className={`filter-chip ${browseCategory === 'title' ? 'active' : ''}`}
+                    onClick={() => setBrowseCategory('title')}
+                    style={{ flex: 1, justifyContent: 'center' }}
+                  >
+                    <span>Song Title</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Letter
+                </div>
+                <select
+                  className="form-input"
+                  value={selectedBrowseLetter}
+                  onChange={(e) => setSelectedBrowseLetter(e.target.value)}
+                  style={{
+                    width: '100%',
+                    cursor: 'pointer',
+                    background: 'var(--color-bg-card)',
+                    color: 'var(--color-text-primary)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 12,
+                    padding: '12px 14px',
+                    boxSizing: 'border-box'
+                  }}
+                >
+                  <option value="">Select a letter</option>
+                  {BROWSE_LETTERS.map((letter) => (
+                    <option
+                      key={letter}
+                      value={letter}
+                      disabled={!availableBrowseLetters.has(letter)}
+                    >
+                      {letter}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {browseCategory === 'artist' && selectedBrowseLetter && (
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Artist
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, maxHeight: 220, overflowY: 'auto' }}>
+                    {browseArtists.map((artist) => (
+                      <button
+                        key={artist}
+                        className={`filter-chip ${selectedBrowseArtist === artist ? 'active' : ''}`}
+                        onClick={() => setSelectedBrowseArtist(artist)}
+                      >
+                        <span>{artist}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Results */}
-          {busy ? (
+          {isLoading ? (
             <div className="loading-container">
               <div className="loading-spinner"></div>
               <div className="loading-text">
-                {searchMode === 'local' ?  'Searching local library...' : 'Searching Karaoke Nerds...'}
+                {isLocalBrowseMode
+                  ? 'Loading library browse...'
+                  : searchMode === 'local'
+                    ? 'Searching local library...'
+                    : 'Searching Karaoke Nerds...'}
               </div>
             </div>
-          ) : searchMode === 'local' && localRows.length > 0 ? (
+          ) : showLocalResults ? (
             <>
               <div className="results-header">
                 <span className="results-count">
                   {localRows.length} {localRows.length === 1 ? 'song' : 'songs'} found
                 </span>
+                {browseSummary && (
+                  <span className="active-filter-badge">{browseSummary}</span>
+                )}
                 {kindFilter !== 'all' && (
                   <span className="active-filter-badge">
                     {kindFilter === 'mp4' ? '🎬 MP4' : '📀 CDG+MP3'}
@@ -2327,7 +2610,15 @@ export default function Requests() {
               })}
               </div>
             </>
-          ) : q. trim() ? (
+          ) : showingBrowseArtistList ? (
+            <div className="empty-state">
+              <div className="empty-icon">🎙️</div>
+              <div className="empty-title">Choose an artist</div>
+              <div className="empty-message">
+                Pick an artist from the list above to see songs under "{selectedBrowseLetter}".
+              </div>
+            </div>
+          ) : q. trim() && !isLocalBrowseMode ? (
             <div className="empty-state">
               <div className="empty-icon">🎵</div>
               <div className="empty-title">No results found</div>
@@ -2335,6 +2626,14 @@ export default function Requests() {
                 {searchMode === 'karaoke-nerds' 
                   ? `No songs found on Karaoke Nerds for "${q}"`
                   : `No songs found in library for "${q}"`}
+              </div>
+            </div>
+          ) : isLocalBrowseMode ? (
+            <div className="empty-state">
+              <div className="empty-icon">🗂️</div>
+              <div className="empty-title">Browse the library</div>
+              <div className="empty-message">
+                Choose {browseCategory === 'artist' ? 'Artist' : 'Song Title'} and then pick a letter{browseCategory === 'artist' ? ', followed by an artist,' : ''} to browse up to {activeResultsCount || 500} local songs alphabetically.
               </div>
             </div>
           ) : (

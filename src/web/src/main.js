@@ -15,6 +15,11 @@ function Nav() {
     const auth = useAuth();
     const [showAccountMenu, setShowAccountMenu] = useState(false);
     const [avatarLoadFailed, setAvatarLoadFailed] = useState(false);
+    const navLinkStyle = {
+        textDecoration: 'none',
+        fontWeight: 500,
+        transition: 'color 0.3s ease'
+    };
     // Update page title based on route
     useEffect(() => {
         const titles = {
@@ -75,26 +80,21 @@ function Nav() {
             top: 0,
             zIndex: 100,
             boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)'
-        }, children: [_jsxs("div", { style: { display: 'flex', gap: 16, alignItems: 'center' }, children: [_jsx(Link, { to: "/player", style: {
+        }, children: [_jsxs("div", { style: { display: 'flex', gap: 16, alignItems: 'center' }, children: [_jsx(Link, { to: "/player", onClick: (e) => {
+                            e.preventDefault();
+                            window.open('/player', 'karaoke-player');
+                        }, style: {
                             color: location.pathname === '/player' ? '#6366f1' : '#a1a1aa',
-                            textDecoration: 'none',
-                            fontWeight: 500,
-                            transition: 'color 0.3s ease'
-                        }, children: "Player" }), _jsx(Link, { to: "/requests", style: {
+                            ...navLinkStyle
+                        }, children: "Player" }), _jsx("a", { href: "/requests", target: "_blank", rel: "noreferrer", style: {
                             color: location.pathname === '/requests' || location.pathname === '/' ? '#6366f1' : '#a1a1aa',
-                            textDecoration: 'none',
-                            fontWeight: 500,
-                            transition: 'color 0.3s ease'
+                            ...navLinkStyle
                         }, children: "Request" }), _jsx(Link, { to: "/host", style: {
                             color: location.pathname === '/host' ? '#6366f1' : '#a1a1aa',
-                            textDecoration: 'none',
-                            fontWeight: 500,
-                            transition: 'color 0.3s ease'
+                            ...navLinkStyle
                         }, children: "Host" }), _jsx(Link, { to: "/admin", style: {
                             color: location.pathname === '/admin' ? '#6366f1' : '#a1a1aa',
-                            textDecoration: 'none',
-                            fontWeight: 500,
-                            transition: 'color 0.3s ease'
+                            ...navLinkStyle
                         }, children: "Admin" })] }), showAuthButton && auth.isLoggedIn && (_jsxs("div", { style: { position: 'relative' }, children: [_jsx("button", { onClick: () => setShowAccountMenu(!showAccountMenu), style: {
                             width: 40,
                             height: 40,
