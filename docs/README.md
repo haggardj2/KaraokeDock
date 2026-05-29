@@ -155,7 +155,7 @@ Management interface for system configuration and media libraries.
    cd ~/karaokedock
    ```
 
-3. **Download or copy the AIO `docker-compose.yml` and `.env.example` into the `karaokedock` folder.**
+3. **Download or copy KaraokeDock's `docker-compose.yml` and `.env.example` into the `karaokedock` folder.**
 
    Download them directly:
    ```bash
@@ -194,7 +194,7 @@ Management interface for system configuration and media libraries.
    TRUST_PROXY=1
    ```
 
-   The AIO build serves the web app and API from the same container on port `5173`. To change the exposed host ports, update `APP_PORT` and `DB_PORT`.
+   KaraokeDock serves the web app and API from the same container on port `5173`. To change the exposed host ports, update `APP_PORT` and `DB_PORT`.
 
 6. **Create the host directories you configured** if they do not already exist:
    ```bash
@@ -213,7 +213,7 @@ Management interface for system configuration and media libraries.
    ```
 
    You should see two running containers:
-   - `karaokedock` (AIO app)
+   - `karaokedock` (KaraokeDock app)
    - `karaokedock-db` (PostgreSQL Database)
 
 9. **Access the application:**
@@ -266,7 +266,7 @@ All configuration is managed through the `.env` file. Key variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `APP_PORT` | Host port published for the AIO app container | `5173` or `6173` |
+| `APP_PORT` | Host port published for the KaraokeDock app container | `5173` or `6173` |
 | `DB_PORT` | Host port published for PostgreSQL | `5432` or `6543` |
 | `KARAOKE_PATH` | Host path for the karaoke library mount | `/mnt/karaoke/Karaoke Tracks` |
 | `DOWNLOADS_PATH` | Host path for downloaded media | `/mnt/karaoke/downloads` |
@@ -394,7 +394,7 @@ The application runs two Docker containers:
 ```
 ----------------------     ------------------
 |     karaokedock     |     | karaokedock-db |
-|   (Web + API AIO)   |---> |  (PostgreSQL)  |
+|   (Web + API App)   |---> |  (PostgreSQL)  |
 |     Port: 5173      |     |   Port: 5432   |
 ----------------------     ------------------
 ```
@@ -491,7 +491,7 @@ docker run -d \
 
 ### Building Docker Images
 
-To build the AIO image locally:
+To build the KaraokeDock image locally:
 
 ```bash
 docker build -f aio/Dockerfile -t haggardj2/karaokedock:latest .
@@ -533,5 +533,5 @@ For issues and questions:
 ---
 
 **Docker Images:** 
-- AIO app: `haggardj2/karaokedock:latest`
+- KaraokeDock app: `haggardj2/karaokedock:latest`
 - Database base image: `postgres:18-alpine`
