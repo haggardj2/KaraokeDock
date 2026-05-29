@@ -159,8 +159,8 @@ Management interface for system configuration and media libraries.
 
    Download them directly:
    ```bash
-   curl -o docker-compose.yml https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/aio/docker-compose.yml
-   curl -o .env.example https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/aio/.env.example
+   curl -o docker-compose.yml https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/docker-compose.yml
+   curl -o .env.example https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/.env.example
    ```
 
    Or copy them from a local checkout:
