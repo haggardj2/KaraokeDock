@@ -1,14 +1,19 @@
 #!/usr/bin/env ts-node
 
 import { Pool } from 'pg';
+import { resolveDatabaseUrl } from '../src/databaseUrl.js';
 
 async function reEnableUsernamePasswordLogin() {
-  if (!process.env.DATABASE_URL) {
-    console.error('❌ ERROR: DATABASE_URL environment variable is not set');
+  let connectionString: string;
+  try {
+    connectionString = resolveDatabaseUrl();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ ERROR: ${message}`);
     process.exit(1);
   }
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const pool = new Pool({ connectionString });
 
   try {
     await pool.query(

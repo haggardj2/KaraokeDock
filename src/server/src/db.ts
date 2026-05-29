@@ -3,11 +3,19 @@ import { Pool, type QueryResultRow } from 'pg';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { logger } from './logger';
+import { resolveDatabaseUrl } from './databaseUrl.js';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+let pool: Pool | undefined;
+
+function getPool() {
+  if (!pool) {
+    pool = new Pool({ connectionString: resolveDatabaseUrl() });
+  }
+  return pool;
+}
 
 export async function query<T extends QueryResultRow = any>(text: string, params?: any[]) {
-  const client = await pool.connect();
+  const client = await getPool().connect();
   const start = Date.now();
   try {
     const res = await client.query<T>(text, params);

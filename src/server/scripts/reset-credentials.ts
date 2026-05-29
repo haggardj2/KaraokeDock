@@ -15,6 +15,7 @@
 import { Pool } from 'pg';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
+import { resolveDatabaseUrl } from '../src/databaseUrl.js';
 
 const DEFAULT_USERNAME = 'admin';
 const SALT_ROUNDS = 10;
@@ -28,16 +29,17 @@ async function resetCredentials(options: ResetOptions) {
   const username = options.username.trim();
   const password = options.password || crypto.randomBytes(18).toString('base64url');
   const generatedPassword = !options.password;
-  
-  // Check if DATABASE_URL is set
-  if (!process.env.DATABASE_URL) {
-    console.error('❌ ERROR: DATABASE_URL environment variable is not set');
-    console.error('Please set DATABASE_URL to your PostgreSQL connection string');
-    console.error('Example: DATABASE_URL=postgresql://karaoke:karaoke@localhost:5432/karaoke');
+
+  let connectionString: string;
+  try {
+    connectionString = resolveDatabaseUrl();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ ERROR: ${message}`);
     process.exit(1);
   }
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const pool = new Pool({ connectionString });
 
   try {
     // Test database connection

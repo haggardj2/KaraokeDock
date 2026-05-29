@@ -274,8 +274,8 @@ All configuration is managed through the `.env` file. Key variables:
 | `MEDIA_ROOT` | Shared media root inside the container | `/media` |
 | `WEB_APP_URL` | Public URL for QR codes | `http://your-server-ip:5173` or `https://karaoke.example.com` |
 | `ORIGIN` | Allowed browser origins (comma-separated) | `http://your-server-ip:5173` or `https://karaoke.example.com` |
-| `POSTGRES_PASSWORD` | Database password | `karaoke` (change in production) |
-| `DATABASE_URL` | PostgreSQL connection string | `postgres://karaoke:karaoke@db:5432/karaoke` |
+| `POSTGRES_PASSWORD` | Database password for the bundled PostgreSQL container | `karaoke` (change in production) |
+| `DATABASE_URL` | Full PostgreSQL connection string for the app; overrides split DB variables when set | `postgres://karaoke:karaoke@db:5432/karaoke` |
 
 **Important Notes:**
 - Replace `your-server-ip` with your server's IP address for network access
@@ -283,6 +283,8 @@ All configuration is managed through the `.env` file. Key variables:
 - `KARAOKE_PATH`, `DOWNLOADS_PATH`, and `BREAKMUSIC_PATH` map to `/media/karaoke`, `/media/downloads`, and `/media/breakmusic`
 - Change `APP_PORT` / `DB_PORT` to remap host ports
 - Change default passwords before deploying to production
+
+If your container platform exposes environment variables more cleanly than full connection strings, the app can instead derive its database connection from `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. In that mode, `DB_PORT` is the database service port inside the app container, usually `5432`. The Docker Compose setup in this repo still uses `DATABASE_URL`, so existing installs do not need to change.
 
 ### Network Configuration
 
