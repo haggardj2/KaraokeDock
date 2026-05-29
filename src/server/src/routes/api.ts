@@ -41,6 +41,7 @@ import crypto from 'crypto';
 import * as oidc from 'openid-client';
 import { authLimiter, searchLimiter, queueLimiter } from '../middleware/rateLimiters';
 import { setLogLevel, logger, type LogLevel } from '../logger';
+import { syncBackgroundTaskState } from '../backgroundTasks';
 import { findOrCreateSinger, ensureSingerInActiveRotation } from '../queueIdentity.js';
 import {
   getQueueState,
@@ -3486,6 +3487,10 @@ apiRouter.put(
     // Apply log level change immediately without requiring a server restart
     if (key === 'admin.log_level' && value) {
       setLogLevel(value as LogLevel);
+    }
+
+    if (key === 'admin.background_tasks_enabled') {
+      await syncBackgroundTaskState({ runImmediately: value !== false });
     }
 
     res.json({ ok: true });

@@ -30,7 +30,7 @@ INSERT INTO settings (key, value) VALUES
 ('parsing.templates', '["discID - Artist - Title","Artist - Title"]'::jsonb),
 ('player.queueOverlayEnabled', 'true'::jsonb),
 ('player.qrEnabled', 'true'::jsonb),
-('ui.branding', '{"title":"Web Karaoke"}'::jsonb),
+('ui.branding', '{"title":"KaraokeDock"}'::jsonb),
 ('host.crossfadeMs', '0'::jsonb),
 ('admin.token', '""'::jsonb),
 ('ytdlp.download_location', '"/media/downloads"'::jsonb),
@@ -124,8 +124,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source);
 -- Unique constraints for tracks
 -- Partial unique index for local tracks (migration 006)
 -- This allows external tracks to have empty path/basename since they use external_url instead
-CREATE UNIQUE INDEX IF NOT EXISTS uq_tracks_local_kind_path_base 
-ON tracks (kind, path, basename) 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tracks_local_kind_path_base
+ON tracks (kind, path, basename)
 WHERE external_url IS NULL;
 
 -- Unique index for MP4 files
@@ -134,7 +134,7 @@ ON tracks (file_mp4)
 WHERE file_mp4 IS NOT NULL;
 
 -- Unique constraint for external tracks (migration 005)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_source_url ON tracks(source, external_url) 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_source_url ON tracks(source, external_url)
 WHERE external_url IS NOT NULL;
 
 -- ============================================================================

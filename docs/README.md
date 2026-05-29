@@ -1,4 +1,4 @@
-# Docker Web Karaoke
+# KaraokeDock
 
 A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
 
@@ -15,9 +15,9 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 ## Overview
 
-Docker Karaoke started because none of the apps out there really fit the way I wanted to run a show. I wanted something that gave me full control without forcing me to stand there all night acting as the DJ/KJ. The goal was to make hosting feel easier, more flexible, and less tied to one specific machine, setup, or location.
+KaraokeDock started because none of the apps out there really fit the way I wanted to run a show. I wanted something that gave me full control without forcing me to stand there all night acting as the DJ/KJ. The goal was to make hosting feel easier, more flexible, and less tied to one specific machine, setup, or location.
 
-I also wanted a platform that could run anywhere, on almost anything, while still supporting the collection I’ve built over time. Just as important, I wanted it to work alongside the awesome creations the karaoke community has already made. Docker Karaoke brings that together with local library playback, external song sources, and live queue syncing between the host, player, and singer request pages.
+I also wanted a platform that could run anywhere, on almost anything, while still supporting the collection I’ve built over time. Just as important, I wanted it to work alongside the awesome creations the karaoke community has already made. KaraokeDock brings that together with local library playback, external song sources, and live queue syncing between the host, player, and singer request pages.
 
 ---
 
@@ -149,24 +149,24 @@ Management interface for system configuration and media libraries.
    docker compose version
    ```
 
-2. **Create a `docker-karaoke` folder** for your deployment files:
+2. **Create a `karaokedock` folder** for your deployment files:
    ```bash
-   mkdir -p ~/docker-karaoke
-   cd ~/docker-karaoke
+   mkdir -p ~/karaokedock
+   cd ~/karaokedock
    ```
 
-3. **Download or copy `docker-compose.yml` and `.env.example` into the `docker-karaoke` folder.**
+3. **Download or copy the AIO `docker-compose.yml` and `.env.example` into the `karaokedock` folder.**
 
    Download them directly:
    ```bash
-   curl -O https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/docker-compose.yml
-   curl -O https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/.env.example
+   curl -o docker-compose.yml https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/aio/docker-compose.yml
+   curl -o .env.example https://raw.githubusercontent.com/haggardj2/docker-karaoke/main/aio/.env.example
    ```
 
    Or copy them from a local checkout:
    ```bash
-   cp /path/to/docker-karaoke/docker-compose.yml .
-   cp /path/to/docker-karaoke/.env.example .
+   cp /path/to/docker-karaoke/aio/docker-compose.yml .
+   cp /path/to/docker-karaoke/aio/.env.example .
    ```
 
 4. **Create `.env` from the new environment file:**
@@ -182,23 +182,23 @@ Management interface for system configuration and media libraries.
    At minimum, review and update these values from `.env.example`:
    ```env
    POSTGRES_PASSWORD=karaoke
-   DB_PATH=/home/user/docker-karaoke/db
-   MEDIA_PATH=/mnt/karaoke/Karaoke Tracks/
-   DOWNLOAD_PATH=/mnt/karaoke/downloads
-   BREAK_PATH=/mnt/karaoke/Break Music
+   DB_PATH=/home/user/karaokedock/db
+   APP_PORT=5173
+   MEDIA_ROOT=/media
+   KARAOKE_PATH=/mnt/karaoke/Karaoke Tracks
+   DOWNLOADS_PATH=/mnt/karaoke/downloads
+   BREAKMUSIC_PATH=/mnt/karaoke/Break Music
    WEB_APP_URL=http://localhost:5173
-   API_PORT=5174
-   WEB_PORT=5173
-   VITE_API_BASE=http://localhost:5174
    ORIGIN=http://localhost:5173,http://127.0.0.1:5173
+   DB_PORT=5432
    TRUST_PROXY=1
    ```
 
-   To change the exposed host ports, update `API_PORT` and `WEB_PORT`. The containers keep their internal ports fixed at `5174` and `5173`, so Docker healthchecks continue to work when you remap the host ports.
+   The AIO build serves the web app and API from the same container on port `5173`. To change the exposed host ports, update `APP_PORT` and `DB_PORT`.
 
 6. **Create the host directories you configured** if they do not already exist:
    ```bash
-   mkdir -p /home/user/docker-karaoke/db
+   mkdir -p /home/user/karaokedock/db
    mkdir -p /mnt/karaoke/downloads
    ```
 
@@ -212,10 +212,9 @@ Management interface for system configuration and media libraries.
    docker compose -f docker-compose.yml ps
    ```
 
-   You should see three running containers:
-   - `karaoke-web` (Web Frontend)
-   - `karaoke-api` (API Server)
-   - `karaoke-db` (PostgreSQL Database)
+   You should see two running containers:
+   - `karaokedock` (AIO app)
+   - `karaokedock-db` (PostgreSQL Database)
 
 9. **Access the application:**
    - Web Interface: `http://your-server:5173`
@@ -233,8 +232,8 @@ Management interface for system configuration and media libraries.
 docker compose logs -f
 
 # Specific service
-docker compose logs -f karaoke-api
-docker compose logs -f karaoke-web
+docker compose logs -f karaokedock
+docker compose logs -f karaokedock-db
 ```
 
 **Stop the application:**
@@ -255,8 +254,8 @@ docker compose restart
 
 **Build locally (development):**
 ```bash
-docker compose -f docker-compose.build.yml build
-docker compose -f docker-compose.build.yml up -d
+docker build -f aio/Dockerfile -t haggardj2/karaokedock:latest .
+docker compose -f docker-compose.yml up -d
 ```
 ---
 ## Configuration
@@ -267,20 +266,22 @@ All configuration is managed through the `.env` file. Key variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `API_PORT` | Host port published for the API container | `5174` or `6174` |
-| `WEB_PORT` | Host port published for the web container | `5173` or `6173` |
-| `MEDIA_PATH` | Path to karaoke files on host | `./media/local` or `/mnt/karaoke` |
+| `APP_PORT` | Host port published for the AIO app container | `5173` or `6173` |
+| `DB_PORT` | Host port published for PostgreSQL | `5432` or `6543` |
+| `KARAOKE_PATH` | Host path for the karaoke library mount | `/mnt/karaoke/Karaoke Tracks` |
+| `DOWNLOADS_PATH` | Host path for downloaded media | `/mnt/karaoke/downloads` |
+| `BREAKMUSIC_PATH` | Host path for break music | `/mnt/karaoke/Break Music` |
+| `MEDIA_ROOT` | Shared media root inside the container | `/media` |
 | `WEB_APP_URL` | Public URL for QR codes | `http://your-server-ip:5173` or `https://karaoke.example.com` |
-| `VITE_API_BASE` | API server URL for frontend | `http://your-server-ip:5174`  or `https://api.example.com` |
-| `ORIGIN` | CORS allowed origins (comma-separated) | `http://your-server-ip:5173`, or `https://karaoke.example.com`,`https://api.example.com` |
+| `ORIGIN` | Allowed browser origins (comma-separated) | `http://your-server-ip:5173` or `https://karaoke.example.com` |
 | `POSTGRES_PASSWORD` | Database password | `karaoke` (change in production) |
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://karaoke:karaoke@db:5432/karaoke` |
 
 **Important Notes:**
 - Replace `your-server-ip` with your server's IP address for network access
-- Ensure `ORIGIN` includes all URLs where the web app will be accessed
-- The `MEDIA_PATH` on the host maps to `/media` inside the API container
-- Change `API_PORT` / `WEB_PORT` to remap host ports; container ports remain fixed for healthchecks
+- Ensure `ORIGIN` includes every URL where the app will be opened
+- `KARAOKE_PATH`, `DOWNLOADS_PATH`, and `BREAKMUSIC_PATH` map to `/media/karaoke`, `/media/downloads`, and `/media/breakmusic`
+- Change `APP_PORT` / `DB_PORT` to remap host ports
 - Change default passwords before deploying to production
 
 ### Network Configuration
@@ -288,16 +289,15 @@ All configuration is managed through the `.env` file. Key variables:
 To access from other devices on your network:
 
 1. Set `WEB_APP_URL` to your server's IP: `http://your-server-ip:5173`
-2. Set `VITE_API_BASE` to your server's IP: `http://your-server-ip:5174`
-3. Update `ORIGIN` to include your server's IP
-4. Ensure firewall allows ports 5173 and 5174
+2. Update `ORIGIN` to include your server's IP
+3. Ensure firewall allows port 5173
 
 To setup reverse proxy for SSL termination:
 
-1. Set `WEB_APP_URL` to your to your FQDN: `https://karaoke.example.com`
-2. Update `ORIGIN` to include your to include the URLs for the api & web servers `https://api.karaoke.example.com`,`https://karaoke.example.com`
-3. Set `VITE_API_BASE` to your URL for the API: `https://api.karaoke.example.com`
-4. Ensure your proxy points to the correct ports
+1. Set `WEB_APP_URL` to your FQDN: `https://karaoke.example.com`
+2. Update `ORIGIN` to include that public URL
+3. Set `TRUST_PROXY=1` when running behind the proxy
+4. Point the proxy to the app container on port `5173`
 
 ---
 <a id="first-time-setup"></a>
@@ -312,9 +312,9 @@ After starting the containers for the first time:
 
 2. **Get the bootstrap admin password:**
    - Username: `admin`
-   - Password: check the API container logs from the first boot:
+   - Password: check the app container logs from the first boot:
      ```bash
-     docker compose logs karaoke-api
+     docker compose logs karaokedock
      ```
 
 3. **⚠️ Change the bootstrap password immediately** after logging in
@@ -322,7 +322,7 @@ After starting the containers for the first time:
 4. **Add a media library:**
    - Click "Add Library"
    - Name: Give it a descriptive name (e.g., "My Karaoke Collection")
-   - Path: Enter `/media` (this is the container path, not your host path)
+   - Path: Enter `/media/karaoke` (this is the container path, not your host path)
    - Click "Add Library"
 
 5. **Scan your files:**
@@ -350,20 +350,20 @@ After starting the containers for the first time:
 - Solution: Set `WEB_APP_URL` in `.env` to your server's IP address
 
 **Cannot connect to API from other devices:**
-- Solution: Set `VITE_API_BASE` to your server's IP address
-- Check firewall allows port 5174
+- Solution: Set `WEB_APP_URL` and `ORIGIN` to your server's IP or public URL
+- Check firewall allows port 5173
 
 **CORS errors in browser console:**
 - Solution: Add your access URL to `ORIGIN` in `.env`
 
 **No songs appearing after scan:**
-- Check `MEDIA_PATH` points to correct directory
+- Check `KARAOKE_PATH` points to the correct host directory
 - Verify files are in supported formats
-- Check API logs: `docker compose logs karaoke-api`
+- Check app logs: `docker compose logs karaokedock`
 
 **Database connection errors:**
 - Wait 10-15 seconds for database to initialize on first start
-- Restart API container: `docker compose restart karaoke-api`
+- Restart the stack: `docker compose restart karaokedock karaokedock-db`
 
 **Permission denied errors:**
 - Ensure media files are readable by Docker
@@ -373,44 +373,43 @@ After starting the containers for the first time:
 **Forgot Login**
 ```bash
 # Run password reset helper:
-docker exec -it karaoke-api npm run reset-credentials
+docker exec -it karaokedock npm run reset-credentials
 # Defaults to username "admin" and generates a secure password if --password is omitted.
-docker exec -it karaoke-api npm run reset-credentials -- --password supersecret
+docker exec -it karaokedock npm run reset-credentials -- --password supersecret
 # Or set a specific username/password:
-docker exec -it karaoke-api npm run reset-credentials -- --username admin --password supersecret
+docker exec -it karaokedock npm run reset-credentials -- --username admin --password supersecret
 ```
 
 **Reenable Password Login**
 ```bash
 # Run the re-enable-login helper
-docker exec -it karaoke-api npm run re-enable-login
+docker exec -it karaokedock npm run re-enable-login
 ```
 
 ---
 ### Docker Compose Architecture
 
-The application runs three Docker containers:
+The application runs two Docker containers:
 
 ```
-----------------     --------------------     ------------------
-|  karaoke-web |     |    karaoke-api   |     |   karaoke-db   |
-|  (Frontend)  |---> |    (Backend)     |---> |  (PostgreSQL)  | 
-|  Port: 5173  |     |    Port: 5174    |     |   Port: 5432   | 
-----------------     --------------------     ------------------ 
+----------------------     ------------------
+|     karaokedock     |     | karaokedock-db |
+|   (Web + API AIO)   |---> |  (PostgreSQL)  |
+|     Port: 5173      |     |   Port: 5432   |
+----------------------     ------------------
 ```
 
 **Container Details:**
 
-- **karaoke-web**: React + TypeScript frontend served via Vite
-  - Image: `haggardj2/karaoke-web:latest`
+- **karaokedock**: Combined React frontend + Node.js/Express backend
+  - Image: `haggardj2/karaokedock:latest`
   - Exposed port: 5173
+  - Mounts:
+    - `KARAOKE_PATH` → `/media/karaoke`
+    - `DOWNLOADS_PATH` → `/media/downloads`
+    - `BREAKMUSIC_PATH` → `/media/breakmusic`
 
-- **karaoke-api**: Node.js + Express backend
-  - Image: `haggardj2/karaoke-api:latest`
-  - Exposed port: 5174
-  - Mounts: `MEDIA_PATH` → `/media` inside container
-
-- **karaoke-db**: PostgreSQL 18 database
+- **karaokedock-db**: PostgreSQL 18 database
   - Image: `postgres:18`
   - Exposed port: 5432
 ---
@@ -482,7 +481,7 @@ npm run dev
 ```bash
 # Start PostgreSQL in Docker
 docker run -d \
-  --name karaoke-db \
+  --name karaokedock-db \
   -e POSTGRES_DB=karaoke \
   -e POSTGRES_USER=karaoke \
   -e POSTGRES_PASSWORD=karaoke \
@@ -492,16 +491,10 @@ docker run -d \
 
 ### Building Docker Images
 
-To build images locally:
+To build the AIO image locally:
 
 ```bash
-# Build all images
-docker compose -f docker-compose.build.yml build --no-cache
-
-# Build specific service
-docker compose -f docker-compose.build.yml build api --no-cache
-docker compose -f docker-compose.build.yml build web --no-cache
-
+docker build -f aio/Dockerfile -t haggardj2/karaokedock:latest .
 ```
 
 
@@ -510,9 +503,8 @@ docker compose -f docker-compose.build.yml build web --no-cache
 ```bash
 
 # Specific container
-docker compose logs -f karaoke-api
-docker compose logs -f karaoke-web
-docker compose logs -f karaoke-db
+docker compose logs -f karaokedock
+docker compose logs -f karaokedock-db
 ```
 
 ## Security Considerations
@@ -541,5 +533,5 @@ For issues and questions:
 ---
 
 **Docker Images:** 
-- API: `haggardj2/karaoke-api:latest`
-- Web: `haggardj2/karaoke-web:latest`
+- AIO app: `haggardj2/karaokedock:latest`
+- Database base image: `postgres:18-alpine`

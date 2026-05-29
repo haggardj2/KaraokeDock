@@ -2,14 +2,17 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
+import type { Duplex } from 'node:stream';
 import { apiRouter, setPostQueueUpdate } from './routes/api';
 import { mediaRouter } from './routes/media';
 import { WebSocketServer } from 'ws';
 import { qrRouter } from './routes/qr';
 import { rotationRouter } from './routes/rotation';
-import { processMissingDurations } from './scanner';
 import { logger, setLogLevel, type LogLevel } from './logger';
-import { ensureAdminUser, validateSessionInfo } from './db';
+import { ensureAdminUser, getSetting, validateSessionInfo } from './db';
+import { syncBackgroundTaskState } from './backgroundTasks';
 
 // Helper to add timestamps to console logs
 function timestamp() {
@@ -19,11 +22,44 @@ function timestamp() {
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
-const BOOTSTRAP_PASSWORD_LOG_DELAY_MS = 60_000;
+const BOOTSTRAP_PASSWORD_LOG_DELAY_MS = 5_000;
+const webDistDir = process.env.WEB_DIST_DIR?.trim();
 const bootstrapAdminPromise = ensureAdminUser().catch((e) => {
   console.error('ensureAdminUser failed', e);
   return null;
 });
+
+const injectedRuntimeConfigScript = process.env.WEB_RUNTIME_API_BASE?.trim()
+  ? `<script>window.__ENV__={API_BASE:${JSON.stringify(process.env.WEB_RUNTIME_API_BASE.trim())}}</script>`
+  : '<script>window.__ENV__={API_BASE:window.location.origin}</script>';
+let cachedSpaHtmlPromise: Promise<string> | null = null;
+
+function shouldServeSpaFallback(requestPath: string) {
+  if (
+    requestPath === '/health' ||
+    requestPath === '/ws' ||
+    requestPath.startsWith('/api/') ||
+    requestPath.startsWith('/media/')
+  ) {
+    return false;
+  }
+
+  return !path.posix.basename(requestPath).includes('.');
+}
+
+async function getSpaHtml(distDir: string) {
+  if (!cachedSpaHtmlPromise) {
+    const indexPath = path.join(distDir, 'index.html');
+    cachedSpaHtmlPromise = fs.readFile(indexPath, 'utf8').then((html) => {
+      const withoutExistingRuntimeConfig = html.replace(/<script>window\.__ENV__=.*?<\/script>/g, '');
+      if (withoutExistingRuntimeConfig.includes('</head>')) {
+        return withoutExistingRuntimeConfig.replace('</head>', `${injectedRuntimeConfigScript}</head>`);
+      }
+      return `${injectedRuntimeConfigScript}${withoutExistingRuntimeConfig}`;
+    });
+  }
+  return cachedSpaHtmlPromise;
+}
 
 // Configure trust proxy for apps behind reverse proxies/load balancers
 // This allows Express to properly identify client IPs from X-Forwarded-For headers
@@ -53,6 +89,7 @@ app.use(helmet({
   contentSecurityPolicy: false, // Disabled to allow inline scripts/styles and external media
   crossOriginEmbedderPolicy: false, // Allow external media embedding from YouTube, etc.
   crossOriginResourcePolicy: false, // Allow cross-origin loading of images, videos, and other media resources
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 
 // CORS configuration
@@ -80,7 +117,7 @@ function isOriginAllowed(origin: string | undefined) {
   return allowedOrigins.includes(origin.trim());
 }
 
-function rejectUpgrade(socket: import('node:net').Socket, statusCode: number, message: string) {
+function rejectUpgrade(socket: Duplex, statusCode: number, message: string) {
   socket.write(`HTTP/1.1 ${statusCode} ${message}\r\nConnection: close\r\n\r\n`);
   socket.destroy();
 }
@@ -137,6 +174,20 @@ app.use('/api', rotationRouter);
 app.use('/media', mediaRouter);  // ADD THIS LINE - mount media router at /media
 app.use(qrRouter);
 
+if (webDistDir) {
+  app.use(express.static(webDistDir, { index: false }));
+  app.get('/{*path}', async (req, res, next) => {
+    if (!shouldServeSpaFallback(req.path)) {
+      return next();
+    }
+    try {
+      res.type('html').send(await getSpaHtml(webDistDir));
+    } catch (err) {
+      next(err);
+    }
+  });
+}
+
 // websockets: broadcast exact message types Player expects
 const wss = new WebSocketServer({ noServer: true });
 
@@ -158,6 +209,9 @@ setPostQueueUpdate((type = 'queue.updated', data?: any) => {
 
 const server = app.listen(port, () => {
   console.log(`API running on http://localhost:${port}`);
+  if (webDistDir) {
+    console.log(`Serving web app from ${webDistDir}`);
+  }
   void bootstrapAdminPromise.then((bootstrapAdmin) => {
     if (!bootstrapAdmin) return;
     setTimeout(() => {
@@ -201,32 +255,12 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
-// Background task to process tracks with missing duration
-// Runs every 30 seconds to gradually fill in missing durations
-const DURATION_PROCESSING_INTERVAL = 1 * 30 * 1000; // 30 seconds
-const DURATION_BATCH_SIZE = 10; // Process 10 tracks at a time
 const STARTUP_DELAY = 10000; // 10 seconds
-
-let durationProcessingInterval: NodeJS.Timeout | null = null;
-
-async function runDurationProcessing() {
-  try {
-    const processed = await processMissingDurations(DURATION_BATCH_SIZE);
-    if (processed > 0) {
-      logger.warn(`Background task: Processed ${processed} tracks with missing duration`);
-    }
-  } catch (err) {
-    console.error('Background duration processing error:', err);
-  }
-}
 
 // Start the background task after a short delay to allow the server to fully start
 // Only starts if background tasks are enabled in settings
 setTimeout(async () => {
   try {
-    // Import getSetting dynamically to avoid circular dependencies
-    const { getSetting } = await import('./db');
-
     // Load persisted log level
     const savedLogLevel = await getSetting('admin.log_level');
     if (savedLogLevel) {
@@ -234,16 +268,7 @@ setTimeout(async () => {
       logger.info(`[startup] Log level set to: ${savedLogLevel}`);
     }
 
-    const backgroundTasksEnabled = await getSetting('admin.background_tasks_enabled');
-    
-    // Check if background tasks are enabled (default to true if setting doesn't exist)
-    if (backgroundTasksEnabled === false) {
-      console.log('Background tasks are disabled in settings');
-      return;
-    }
-    
-    runDurationProcessing(); // Run immediately on startup
-    durationProcessingInterval = setInterval(runDurationProcessing, DURATION_PROCESSING_INTERVAL);
+    await syncBackgroundTaskState({ runImmediately: true });
   } catch (err) {
     console.error('Failed to start background task:', err);
   }

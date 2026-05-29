@@ -43,17 +43,41 @@ type BreakMusicState = {
 function getYouTubeVideoId(url: string): string | null {
   if (!url) return null;
 
-  // Handle various YouTube URL formats
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\?\/]+)/,
-    /^([a-zA-Z0-9_-]{11})$/, // Direct video ID
-  ];
+  const normalizedUrl = url.trim();
+  const directIdMatch = normalizedUrl.match(/^([a-zA-Z0-9_-]{11})$/);
+  if (directIdMatch?.[1]) {
+    return directIdMatch[1];
+  }
 
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match && match[1]) {
-      return match[1];
+  const normalizeVideoId = (candidate: string | null | undefined) =>
+    candidate && /^[a-zA-Z0-9_-]{11}$/.test(candidate) ? candidate : null;
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    const hostname = parsedUrl.hostname.toLowerCase().replace(/^www\./, "");
+    const segments = parsedUrl.pathname.split("/").filter(Boolean);
+
+    if (hostname === "youtu.be") {
+      return normalizeVideoId(segments[0]);
     }
+
+    if (
+      hostname.endsWith("youtube.com") ||
+      hostname.endsWith("youtube-nocookie.com")
+    ) {
+      const queryVideoId = normalizeVideoId(parsedUrl.searchParams.get("v"));
+      if (queryVideoId) return queryVideoId;
+
+      if (
+        segments[0] === "embed" ||
+        segments[0] === "shorts" ||
+        segments[0] === "live"
+      ) {
+        return normalizeVideoId(segments[1]);
+      }
+    }
+  } catch {
+    return null;
   }
 
   return null;
@@ -1435,8 +1459,9 @@ export default function Player() {
           <iframe
             id={`youtube-player-${youtubeVideoId}`}
             ref={iframeRef}
-            src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=1&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1`}
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=1&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`}
+            referrerPolicy="strict-origin-when-cross-origin"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
             style={{
               position: "absolute",
