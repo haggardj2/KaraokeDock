@@ -46,6 +46,9 @@ export default function Admin() {
     const [ytdlpUpdating, setYtdlpUpdating] = useState(false);
     const [downloadLocation, setDownloadLocation] = useState("/media/downloads");
     const [backgroundTasksEnabled, setBackgroundTasksEnabled] = useState(true);
+    const [backgroundMediaScanEnabled, setBackgroundMediaScanEnabled] = useState(false);
+    const [backgroundDownloadScanEnabled, setBackgroundDownloadScanEnabled] = useState(false);
+    const [backgroundBreakMusicScanEnabled, setBackgroundBreakMusicScanEnabled] = useState(false);
     const [requestAcceptance, setRequestAcceptance] = useState("local");
     const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
     const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
@@ -558,6 +561,9 @@ export default function Admin() {
             const settings = await api("/api/admin/settings", { headers: sessionHeaders });
             setDownloadLocation(settings["ytdlp.download_location"] || "/media/downloads");
             setBackgroundTasksEnabled(parseBooleanSetting(settings["admin.background_tasks_enabled"]));
+            setBackgroundMediaScanEnabled(parseBooleanSetting(settings["admin.background_media_scan_enabled"] ?? false));
+            setBackgroundDownloadScanEnabled(parseBooleanSetting(settings["admin.background_download_scan_enabled"] ?? false));
+            setBackgroundBreakMusicScanEnabled(parseBooleanSetting(settings["admin.background_break_music_scan_enabled"] ?? false));
             setRequestAcceptance(settings["requests.acceptance"] || "local");
             setLocalLibraryEnabled(parseBooleanSetting(settings["libraries.local_enabled"]));
             setExternalLibraryEnabled(parseBooleanSetting(settings["libraries.external_enabled"]));
@@ -619,6 +625,19 @@ export default function Admin() {
             setBanner(`⚠️ Failed to update background tasks: ${err.message}`);
             setTimeout(() => setBanner(""), 5000);
             setBackgroundTasksEnabled(!enabled); // Revert on error
+        }
+    }
+    async function handleSpecificBackgroundTaskToggle(key, enabled, setState, label) {
+        setState(enabled);
+        try {
+            await saveSetting(key, enabled);
+            setBanner(`✔ ${label} ${enabled ? "enabled" : "disabled"}`);
+            setTimeout(() => setBanner(""), 3000);
+        }
+        catch (err) {
+            setBanner(`⚠️ Failed to update ${label.toLowerCase()}: ${err.message}`);
+            setTimeout(() => setBanner(""), 5000);
+            setState(!enabled);
         }
     }
     async function handleRequestAcceptanceChange(value) {
@@ -1607,7 +1626,7 @@ export default function Admin() {
                                                     borderRadius: 12,
                                                     padding: 16,
                                                     marginBottom: 16
-                                                }, children: [_jsx("h3", { style: { margin: "0 0 12px", fontSize: 16 }, children: "\uD83D\uDD04 Background Tasks" }), _jsx("div", { style: { display: "flex", alignItems: "center", gap: 12 }, children: _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: backgroundTasksEnabled, onChange: (e) => handleBackgroundTasksToggle(e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable duration processing task" })] }) }), _jsx("p", { style: { margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }, children: "When enabled, the server will automatically process tracks with missing durations in the background." })] }), _jsxs("div", { style: {
+                                                }, children: [_jsx("h3", { style: { margin: "0 0 12px", fontSize: 16 }, children: "\uD83D\uDD04 Background Tasks" }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [_jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: backgroundTasksEnabled, onChange: (e) => handleBackgroundTasksToggle(e.target.checked), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable duration processing task" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: backgroundMediaScanEnabled, onChange: (e) => handleSpecificBackgroundTaskToggle("admin.background_media_scan_enabled", e.target.checked, setBackgroundMediaScanEnabled, "Background media library scan"), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable periodic media library scan" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: backgroundDownloadScanEnabled, onChange: (e) => handleSpecificBackgroundTaskToggle("admin.background_download_scan_enabled", e.target.checked, setBackgroundDownloadScanEnabled, "Background download folder scan"), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable periodic download folder scan" })] }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: backgroundBreakMusicScanEnabled, onChange: (e) => handleSpecificBackgroundTaskToggle("admin.background_break_music_scan_enabled", e.target.checked, setBackgroundBreakMusicScanEnabled, "Background break music scan"), disabled: !auth.sessionToken || !auth.isLoggedIn, style: { width: 18, height: 18 } }), _jsx("span", { style: { fontSize: 14 }, children: "Enable periodic break music scan" })] })] }), _jsx("p", { style: { margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }, children: "Each task runs independently in the background. Duration processing fills in missing track lengths, while the scan tasks periodically look for new or removed files in the configured media, download, and break music folders." })] }), _jsxs("div", { style: {
                                                     background: "var(--color-bg-secondary)",
                                                     border: "1px solid var(--color-border)",
                                                     borderRadius: 12,

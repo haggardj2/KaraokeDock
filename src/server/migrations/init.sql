@@ -365,10 +365,20 @@ CREATE TABLE IF NOT EXISTS rotation_turns (
 CREATE INDEX IF NOT EXISTS idx_rotation_turns_rotation ON rotation_turns(rotation_id, status);
 CREATE INDEX IF NOT EXISTS idx_rotation_turns_singer ON rotation_turns(singer_id);
 
-ALTER TABLE rotations
-  ADD CONSTRAINT fk_rotations_current_turn
-  FOREIGN KEY (current_turn_id) REFERENCES rotation_turns(id) ON DELETE SET NULL
-  NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'fk_rotations_current_turn'
+      AND conrelid = 'rotations'::regclass
+  ) THEN
+    ALTER TABLE rotations
+      ADD CONSTRAINT fk_rotations_current_turn
+      FOREIGN KEY (current_turn_id) REFERENCES rotation_turns(id) ON DELETE SET NULL
+      NOT VALID;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS manual_overrides (
   id                BIGSERIAL PRIMARY KEY,

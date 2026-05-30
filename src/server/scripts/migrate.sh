@@ -5,8 +5,13 @@
 
 set -e
 
+if [ -z "$DATABASE_URL" ]; then
+  DATABASE_URL="$(./node_modules/.bin/tsx scripts/print-database-url.ts)"
+  export DATABASE_URL
+fi
+
 # Initial Database build
-psql "$DATABASE_URL" -f migrations/init.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/init.sql
 
 # # Base schema migrations (must succeed)
 # psql "$DATABASE_URL" -f migrations/001_init.sql
@@ -24,6 +29,6 @@ psql "$DATABASE_URL" -f migrations/init.sql
 # psql "$DATABASE_URL" -f migrations/011_add_ytdlp_settings.sql || true
 
 # Patch: extend track_status enum with 'done' and 'removed' (non-fatal for new DBs)
-psql "$DATABASE_URL" -f migrations/016_fix_queue_status_enum.sql || true
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/016_fix_queue_status_enum.sql || true
 
 echo "Migrations completed successfully"

@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
 import { getSetting } from './db';
+import { logger } from './logger.js';
 
 // Video format preference: best quality MP4 with audio, max 1080p
 // Format selection priority:
@@ -22,6 +23,21 @@ const TITLE_PATTERN_WITH_DISCID = /^([A-Z0-9]+)\s*-\s*(.+?)\s*-\s*(.+)$/i;
 
 // Format: "Artist - Title" (e.g., "Taylor Swift - Shake It Off")
 const TITLE_PATTERN_SIMPLE = /^(.+?)\s*-\s*(.+)$/;
+
+export class DownloadScanAlreadyInProgressError extends Error {
+  constructor() {
+    super('download scan already in progress');
+    this.name = 'DownloadScanAlreadyInProgressError';
+  }
+}
+
+let downloadScanInFlight: Promise<{
+  success: boolean;
+  added: number;
+  removed: number;
+  skipped: number;
+  message?: string;
+}> | null = null;
 
 /**
  * Check if yt-dlp is installed and get version
@@ -364,86 +380,90 @@ export async function scanDownloadLocation(): Promise<{
   skipped: number; 
   message?: string 
 }> {
-  try {
-    const { query } = await import('./db');
-    
-    // Get download location from settings
-    const downloadLocationSetting = await getSetting('ytdlp.download_location');
-    const downloadLocation = downloadLocationSetting || '/media/downloads';
-    
-    // Check if directory exists
+  if (downloadScanInFlight) {
+    throw new DownloadScanAlreadyInProgressError();
+  }
+
+  downloadScanInFlight = (async () => {
     try {
-      await fs.access(downloadLocation);
-    } catch (err) {
+      const { query } = await import('./db');
+      
+      const downloadLocationSetting = await getSetting('ytdlp.download_location');
+      const downloadLocation = downloadLocationSetting || '/media/downloads';
+      
+      try {
+        await fs.access(downloadLocation);
+      } catch (err) {
+        return {
+          success: false,
+          added: 0,
+          removed: 0,
+          skipped: 0,
+          message: `Download location does not exist: ${downloadLocation}`
+        };
+      }
+      
+      let addedCount = 0;
+      let skippedCount = 0;
+      let removedCount = 0;
+      
+      const files = await fs.readdir(downloadLocation);
+      const mp4Files = files.filter(f => f.toLowerCase().endsWith('.mp4'));
+      
+      logger.info(`[ytdlp] Scanning ${downloadLocation}: found ${mp4Files.length} MP4 files`);
+      
+      for (const file of mp4Files) {
+        const filePath = path.join(downloadLocation, file);
+        const result = await addDownloadedFileToDatabase(filePath);
+        
+        if (result.success) {
+          addedCount++;
+          logger.info(`[ytdlp] Added downloaded track: ${file}`);
+        } else {
+          skippedCount++;
+          logger.info(`[ytdlp] Skipped downloaded track ${file}: ${result.message}`);
+        }
+      }
+      
+      const tracksResult = await query(
+        `SELECT id, file_mp4, basename FROM tracks WHERE path = $1 AND library_id IS NULL AND file_mp4 IS NOT NULL`,
+        [downloadLocation]
+      );
+      
+      for (const track of tracksResult.rows) {
+        const filePath = track.file_mp4;
+        
+        try {
+          await fs.access(filePath);
+        } catch (err) {
+          logger.info(`[ytdlp] Removing missing downloaded track from DB: ${track.basename}`);
+          await query(`DELETE FROM tracks WHERE id = $1`, [track.id]);
+          removedCount++;
+        }
+      }
+      
+      return {
+        success: true,
+        added: addedCount,
+        removed: removedCount,
+        skipped: skippedCount,
+        message: `Scan complete: ${addedCount} added, ${removedCount} removed, ${skippedCount} skipped`
+      };
+    } catch (err: any) {
+      console.error('Error scanning download location:', err);
       return {
         success: false,
         added: 0,
         removed: 0,
         skipped: 0,
-        message: `Download location does not exist: ${downloadLocation}`
+        message: `Error scanning: ${err.message}`
       };
     }
-    
-    let addedCount = 0;
-    let skippedCount = 0;
-    let removedCount = 0;
-    
-    // Scan directory for MP4 files
-    const files = await fs.readdir(downloadLocation);
-    const mp4Files = files.filter(f => f.toLowerCase().endsWith('.mp4'));
-    
-    console.log(`Scanning ${downloadLocation}: found ${mp4Files.length} MP4 files`);
-    
-    // Add new files to database
-    for (const file of mp4Files) {
-      const filePath = path.join(downloadLocation, file);
-      const result = await addDownloadedFileToDatabase(filePath);
-      
-      if (result.success) {
-        addedCount++;
-        console.log(`✓ Added: ${file}`);
-      } else {
-        skippedCount++;
-        console.log(`⊘ Skipped: ${file} - ${result.message}`);
-      }
-    }
-    
-    // Check for tracks in DB with missing files in download location
-    // Get all tracks that have path = downloadLocation and library_id is null (downloaded tracks)
-    const tracksResult = await query(
-      `SELECT id, file_mp4, basename FROM tracks WHERE path = $1 AND library_id IS NULL AND file_mp4 IS NOT NULL`,
-      [downloadLocation]
-    );
-    
-    for (const track of tracksResult.rows) {
-      const filePath = track.file_mp4;
-      
-      // Check if file exists
-      try {
-        await fs.access(filePath);
-      } catch (err) {
-        // File doesn't exist, remove track from database
-        console.log(`✕ Removing missing file from DB: ${track.basename}`);
-        await query(`DELETE FROM tracks WHERE id = $1`, [track.id]);
-        removedCount++;
-      }
-    }
-    
-    return {
-      success: true,
-      added: addedCount,
-      removed: removedCount,
-      skipped: skippedCount,
-      message: `Scan complete: ${addedCount} added, ${removedCount} removed, ${skippedCount} skipped`
-    };
-  } catch (err: any) {
-    console.error('Error scanning download location:', err);
-    return {
-      success: false,
-      added: 0,
-      removed: 0,
-      skipped: 0,
-      message: `Error scanning: ${err.message}`
-    };
+  })();
+
+  try {
+    return await downloadScanInFlight;
+  } finally {
+    downloadScanInFlight = null;
   }
 }

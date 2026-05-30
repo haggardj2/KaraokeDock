@@ -1,0 +1,4 @@
+.git
+**/node_modules
+src/web/dist
+src/server/dist

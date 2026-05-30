@@ -165,8 +165,8 @@ Management interface for system configuration and media libraries.
 
    Or copy them from a local checkout:
    ```bash
-   cp /path/to/docker-karaoke/aio/docker-compose.yml .
-   cp /path/to/docker-karaoke/aio/.env.example .
+   cp /path/to/KaraokeDock/docker-compose.yml .
+   cp /path/to/KaraokeDock/.env.example .
    ```
 
 4. **Create `.env` from the new environment file:**
@@ -254,7 +254,7 @@ docker compose restart
 
 **Build locally (development):**
 ```bash
-docker build -f aio/Dockerfile -t haggardj2/karaokedock:latest .
+docker build -f dev/Dockerfile -t haggardj2/karaokedock:latest .
 docker compose -f docker-compose.yml up -d
 ```
 ---
@@ -284,7 +284,7 @@ All configuration is managed through the `.env` file. Key variables:
 - Change `APP_PORT` / `DB_PORT` to remap host ports
 - Change default passwords before deploying to production
 
-If your container platform exposes environment variables more cleanly than full connection strings, the app can instead derive its database connection from `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. In that mode, `DB_PORT` is the database service port inside the app container, usually `5432`. The Docker Compose setup in this repo still uses `DATABASE_URL`, so existing installs do not need to change.
+If your container platform exposes environment variables more cleanly than full connection strings, the app can instead derive its database connection from `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. In that mode, `DB_PORT` is the database service port inside the app container, usually `5432`. If you are running PostgreSQL as a separate container, `DB_HOST` must be a hostname the app container can actually resolve on a shared network. For Unraid custom networks, the container must join that network with `--network=<name>` in Extra Parameters; setting the XML `<Network>` field to the custom name is not enough. The Docker Compose setup in this repo still uses `DATABASE_URL`, so existing installs do not need to change.
 
 ### Network Configuration
 
@@ -496,7 +496,7 @@ docker run -d \
 To build the KaraokeDock image locally:
 
 ```bash
-docker build -f aio/Dockerfile -t haggardj2/karaokedock:latest .
+docker build -f dev/Dockerfile -t haggardj2/karaokedock:latest .
 ```
 
 

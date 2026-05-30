@@ -108,14 +108,55 @@ function isPathWithinRoot(rootPath: string, candidatePath: string) {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function getSearchableMediaRoots(rootPath: string): string[] {
+  const roots = [rootPath];
+  try {
+    for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const childPath = path.join(rootPath, entry.name);
+      try {
+        roots.push(fs.realpathSync.native(childPath));
+      } catch {
+        roots.push(path.resolve(childPath));
+      }
+    }
+  } catch {}
+  return [...new Set(roots)];
+}
+
+export function remapMediaPathCandidate(candidatePath: string, mediaRoots: string[]): string | null {
+  if (!candidatePath) return null;
+
+  const normalizedCandidate = path.resolve(candidatePath);
+  const segments = normalizedCandidate.split(path.sep).filter(Boolean);
+
+  for (const mediaRoot of mediaRoots) {
+    for (let start = 0; start < segments.length; start++) {
+      const remappedPath = path.join(mediaRoot, ...segments.slice(start));
+      try {
+        const resolvedPath = fs.realpathSync.native(remappedPath);
+        if (isPathWithinRoot(mediaRoot, resolvedPath)) {
+          return resolvedPath;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return null;
+}
+
 export function resolveExistingMediaPath(candidatePath: string): string | null {
   if (!candidatePath) return null;
+  const resolvedRoot = getResolvedMediaRoot();
+  const mediaRoots = getSearchableMediaRoots(resolvedRoot);
+
   try {
-    const resolvedRoot = getResolvedMediaRoot();
     const resolvedPath = fs.realpathSync.native(candidatePath);
     return isPathWithinRoot(resolvedRoot, resolvedPath) ? resolvedPath : null;
   } catch {
-    return null;
+    return remapMediaPathCandidate(candidatePath, mediaRoots);
   }
 }
 

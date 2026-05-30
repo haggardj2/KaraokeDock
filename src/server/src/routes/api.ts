@@ -2,7 +2,6 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
-import { EventEmitter } from 'events';
 import {
   query,
   ensureHelpfulIndexes,
@@ -26,23 +25,28 @@ import {
   countAdminUsers
 } from '../db';
 import {
-  scanPath,
   getMediaDuration,
   getZipMp3Duration,
   extractTrackDuration,
-  extractAudioMetadata,
-  isBreakMusicFile
+  extractAudioMetadata
 } from '../scanner';
 import { resolveExistingMediaPath } from './media';
-import { parseBreakMusicFromFilename, parseFromFilename } from '../parsing';
+import { parseFromFilename } from '../parsing';
 import QRCode from 'qrcode';
 import { searchKaraokeNerds } from '../karaoke-nerds';
 import crypto from 'crypto';
 import * as oidc from 'openid-client';
 import { authLimiter, searchLimiter, queueLimiter } from '../middleware/rateLimiters';
 import { setLogLevel, logger, type LogLevel } from '../logger';
-import { syncBackgroundTaskState } from '../backgroundTasks';
+import {
+  syncBackgroundTaskState,
+  syncDurationProcessingTaskState,
+  syncMediaLibraryScanTaskState,
+  syncDownloadScanTaskState,
+  syncBreakMusicScanTaskState,
+} from '../backgroundTasks';
 import { findOrCreateSinger, ensureSingerInActiveRotation } from '../queueIdentity.js';
+import { parseZipMediaRef } from '../zipMediaRef.js';
 import {
   getQueueState,
   getSingerHistory,
@@ -50,6 +54,21 @@ import {
   reorderSingerQueue,
 } from '../queueState.js';
 import { recalculateSingerStats } from '../singerStats.js';
+import {
+  getLibraryScanStatus,
+  LibraryScanAlreadyInProgressError,
+  offLibraryScanEvent,
+  onLibraryScanEvent,
+  runLibraryScan,
+} from '../libraryScanner.js';
+import {
+  BreakMusicScanAlreadyInProgressError,
+  runBreakMusicScan,
+} from '../breakMusicScanner.js';
+import {
+  DownloadScanAlreadyInProgressError,
+  scanDownloadLocation,
+} from '../ytdlp.js';
 
 ensureHelpfulIndexes().catch(e => console.error('ensureHelpfulIndexes failed', e));
 
@@ -202,20 +221,6 @@ type BreakMusicState = {
   playlistIndex: number;
   activePlaylistId: number | null;
 };
-
-async function walkFilesRecursive(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const abs = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...await walkFilesRecursive(abs));
-    } else {
-      out.push(abs);
-    }
-  }
-  return out;
-}
 
 async function getBreakMusicState(): Promise<BreakMusicState> {
   const [
@@ -1184,53 +1189,33 @@ async function getOidcFrontendUrl(req: express.Request): Promise<string> {
   return `${proto}://${host}`;
 }
 
-
-const scanBus = new EventEmitter();
-let scanInProgress = false;
-let lastScan: { finishedAt?: string; perLibrary?: Record<number, any> } | null = null;
-
-// Load persisted lastScan from settings on startup
-getSetting('scan.last_scan').then((saved: any) => {
-  if (saved) lastScan = saved;
-}).catch((err) => {
-  console.error('Failed to load persisted lastScan:', err);
-});
-
-async function persistLastScan(data: typeof lastScan) {
-  try {
-    await setSetting('scan.last_scan', data);
-  } catch (err) {
-    console.error('Failed to persist lastScan:', err);
-  }
-}
-
 function sseSend(res: express.Response, event: string, data: any) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-apiRouter.get('/scan/events', (req, res) => {
+apiRouter.get('/scan/events', ah(async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
-  sseSend(res, 'hello', { scanInProgress, lastScan });
+  sseSend(res, 'hello', await getLibraryScanStatus());
 
   const onStart = () => sseSend(res, 'scan_start', { at: new Date().toISOString() });
   const onProgress = (payload: any) => sseSend(res, 'scan_progress', payload);
   const onDone = (payload: any) => sseSend(res, 'scan_done', payload);
 
-  scanBus.on('start', onStart);
-  scanBus.on('progress', onProgress);
-  scanBus.on('done', onDone);
+  onLibraryScanEvent('start', onStart);
+  onLibraryScanEvent('progress', onProgress);
+  onLibraryScanEvent('done', onDone);
 
   req.on('close', () => {
-    scanBus.off('start', onStart);
-    scanBus.off('progress', onProgress);
-    scanBus.off('done', onDone);
+    offLibraryScanEvent('start', onStart);
+    offLibraryScanEvent('progress', onProgress);
+    offLibraryScanEvent('done', onDone);
     res.end();
   });
-});
+}));
 
 // ===================== LIBRARIES =====================
 
@@ -1274,51 +1259,17 @@ apiRouter.post(
   adminGuard,
   ah(async (req, res) => {
     const libraryId = Number.isFinite(+req.body?.libraryId) ? +req.body.libraryId : null;
-
-    if (scanInProgress) {
-      return res.status(409).json({ ok: false, message: 'scan already in progress' });
-    }
-
-    scanInProgress = true;
-    scanBus.emit('start');
-
-    const progress = (evt: any) => scanBus.emit('progress', evt);
-
     try {
-      if (libraryId != null) {
-        const r = await query<{ id: number; path: string }>(`SELECT id, path FROM libraries WHERE id = $1`, [libraryId]);
-        if (!r.rows.length) return res.status(404).send('library not found');
-
-        const lib = r.rows[0];
-        const stats = await scanPath(lib.id, lib.path, progress);
-        lastScan = { finishedAt: new Date().toISOString(), perLibrary: { [lib.id]: stats } };
-        await persistLastScan(lastScan);
-        scanBus.emit('done', { ...lastScan });
-        return res.json({ ok: true, stats });
+      const result = await runLibraryScan(libraryId);
+      res.json({ ok: true, stats: result.stats });
+    } catch (error) {
+      if (error instanceof LibraryScanAlreadyInProgressError) {
+        return res.status(409).json({ ok: false, message: error.message });
       }
-
-      const libs = await query<{ id: number; path: string }>(`SELECT id, path FROM libraries ORDER BY id`);
-      const allStats: Record<number, any> = {};
-
-      for (const lib of libs.rows) {
-        try {
-          scanBus.emit('progress', { libraryId: lib.id, state: 'scanning', path: lib.path });
-          allStats[lib.id] = await scanPath(lib.id, lib.path, (evt) =>
-            scanBus.emit('progress', { libraryId: lib.id, ...evt })
-          );
-          scanBus.emit('progress', { libraryId: lib.id, state: 'done', stats: allStats[lib.id] });
-        } catch (e: any) {
-          allStats[lib.id] = { error: String(e?.message || e) };
-          scanBus.emit('progress', { libraryId: lib.id, state: 'error', error: allStats[lib.id].error });
-        }
+      if (error instanceof Error && error.message === 'library not found') {
+        return res.status(404).send('library not found');
       }
-
-      lastScan = { finishedAt: new Date().toISOString(), perLibrary: allStats };
-      await persistLastScan(lastScan);
-      scanBus.emit('done', { ...lastScan });
-      res.json({ ok: true, stats: allStats });
-    } finally {
-      scanInProgress = false;
+      throw error;
     }
   })
 );
@@ -1329,7 +1280,8 @@ apiRouter.get(
   '/admin/stats',
   adminGuard,
   ah(async (_req, res) => {
-    const [artists, tracks, queued] = await Promise.all([
+    const [{ lastScan }, artists, tracks, queued] = await Promise.all([
+      getLibraryScanStatus(),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM tracks`),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue`),
@@ -1892,13 +1844,9 @@ apiRouter.get(
       const p = String(req.query.path || '');
       if (!p) return res.status(400).send('path required');
       if (p.startsWith('zip://')) {
-        // Parse zip://path#entry format - split at .zip# to handle # in filenames
-        const ZIP_EXT = '.zip';
-        const ZIP_SEPARATOR = '.zip#';
-        const withoutPrefix = p.replace(/^zip:\/\//, '');
-        const separatorIdx = withoutPrefix.indexOf(ZIP_SEPARATOR);
-        const zipPath = separatorIdx >= 0 ? withoutPrefix.substring(0, separatorIdx + ZIP_EXT.length) : withoutPrefix;
-        const inner = separatorIdx >= 0 ? withoutPrefix.substring(separatorIdx + ZIP_SEPARATOR.length) : '';
+        const parsed = parseZipMediaRef(p);
+        const zipPath = parsed?.zipPath || '';
+        const inner = parsed?.entryName || '';
         const safeZipPath = resolveExistingMediaPath(zipPath);
         if (!safeZipPath) return res.status(400).send('invalid path');
         res.redirect(`/media/zip?zip=${encodeURIComponent(safeZipPath)}&file=${encodeURIComponent(inner)}`);
@@ -2438,18 +2386,11 @@ apiRouter.post(
         const isFromZip = track.file_cdg?.startsWith('zip://');
         
         if (isFromZip) {
-          // Parse zip://path#entry format - split at .zip# to handle # in filenames
-          const ZIP_EXT = '.zip';
-          const ZIP_SEPARATOR = '.zip#';
-          const cdgWithoutPrefix = track.file_cdg.replace('zip://', '');
-          const mp3WithoutPrefix = track.file_mp3.replace('zip://', '');
-          
-          const cdgSeparatorIdx = cdgWithoutPrefix.indexOf(ZIP_SEPARATOR);
-          const mp3SeparatorIdx = mp3WithoutPrefix.indexOf(ZIP_SEPARATOR);
-          
-          const zipPath = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(0, cdgSeparatorIdx + ZIP_EXT.length) : cdgWithoutPrefix;
-          const cdgEntry = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(cdgSeparatorIdx + ZIP_SEPARATOR.length) : '';
-          const mp3Entry = mp3SeparatorIdx >= 0 ? mp3WithoutPrefix.substring(mp3SeparatorIdx + ZIP_SEPARATOR.length) : '';
+          const parsedCdg = track.file_cdg ? parseZipMediaRef(track.file_cdg) : null;
+          const parsedMp3 = track.file_mp3 ? parseZipMediaRef(track.file_mp3) : null;
+          const zipPath = parsedCdg?.zipPath || parsedMp3?.zipPath || '';
+          const cdgEntry = parsedCdg?.entryName || '';
+          const mp3Entry = parsedMp3?.entryName || '';
           
           fetch(`http://localhost:${process.env.PORT || 5174}/media/precache`, {
             method: 'POST',
@@ -3397,9 +3338,15 @@ apiRouter.post(
   '/admin/ytdlp/scan',
   adminGuard,
   ah(async (req, res) => {
-    const { scanDownloadLocation } = await import('../ytdlp');
-    const result = await scanDownloadLocation();
-    res.json(result);
+    try {
+      const result = await scanDownloadLocation();
+      res.json(result);
+    } catch (error) {
+      if (error instanceof DownloadScanAlreadyInProgressError) {
+        return res.status(409).json({ ok: false, message: error.message });
+      }
+      throw error;
+    }
   })
 );
 
@@ -3490,7 +3437,19 @@ apiRouter.put(
     }
 
     if (key === 'admin.background_tasks_enabled') {
-      await syncBackgroundTaskState({ runImmediately: value !== false });
+      await syncDurationProcessingTaskState({ runImmediately: value !== false });
+    }
+
+    if (key === 'admin.background_media_scan_enabled') {
+      await syncMediaLibraryScanTaskState({ runImmediately: value !== false });
+    }
+
+    if (key === 'admin.background_download_scan_enabled') {
+      await syncDownloadScanTaskState({ runImmediately: value !== false });
+    }
+
+    if (key === 'admin.background_break_music_scan_enabled') {
+      await syncBreakMusicScanTaskState({ runImmediately: value !== false });
     }
 
     res.json({ ok: true });
@@ -3574,59 +3533,14 @@ apiRouter.post(
   adminGuard,
   ah(async (req, res) => {
     const folderId = toInt(req.body?.folderId);
-    const folders = folderId == null
-      ? await query<{ id: number; path: string }>(`SELECT id, path FROM break_music_folders ORDER BY id`)
-      : await query<{ id: number; path: string }>(`SELECT id, path FROM break_music_folders WHERE id = $1`, [folderId]);
-
     let indexed = 0;
-    for (const folder of folders.rows) {
-      let files: string[] = [];
-      try {
-        files = await walkFilesRecursive(folder.path);
-      } catch (err) {
-        console.warn('Failed to scan break music folder:', folder.path, err);
-        continue;
+    try {
+      ({ indexed } = await runBreakMusicScan(folderId));
+    } catch (error) {
+      if (error instanceof BreakMusicScanAlreadyInProgressError) {
+        return res.status(409).json({ ok: false, message: error.message });
       }
-
-      const seen = new Set<string>();
-      for (const filePath of files) {
-        if (!isBreakMusicFile(filePath)) continue;
-        const base = path.basename(filePath);
-        const parsed = parseBreakMusicFromFilename(base);
-
-        // Extract ID3/metadata tags from the actual audio file via ffprobe,
-        // falling back to filename-parsed values when tags are absent.
-        const meta = await extractAudioMetadata(filePath);
-        const title = meta.title || parsed.title || base.replace(/\.[^.]+$/, '');
-        const artist = meta.artist || parsed.artist || null;
-        const genre = meta.genre || null;
-        const duration_ms = meta.duration_ms || null;
-
-        await query(
-          `INSERT INTO break_music_tracks(folder_id, title, artist, genre, duration_ms, file_path)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (file_path) DO UPDATE
-           SET folder_id = EXCLUDED.folder_id,
-               title = EXCLUDED.title,
-               artist = EXCLUDED.artist,
-               genre = EXCLUDED.genre,
-               duration_ms = EXCLUDED.duration_ms`,
-          [folder.id, title, artist, genre, duration_ms, filePath]
-        );
-        seen.add(filePath);
-        indexed++;
-      }
-
-      if (seen.size > 0) {
-        await query(
-          `DELETE FROM break_music_tracks
-            WHERE folder_id = $1
-              AND file_path <> ALL($2::text[])`,
-          [folder.id, Array.from(seen)]
-        );
-      } else {
-        await query(`DELETE FROM break_music_tracks WHERE folder_id = $1`, [folder.id]);
-      }
+      throw error;
     }
 
     const resolved = await resolveBreakMusicPlaybackState(0);

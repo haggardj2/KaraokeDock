@@ -8,3 +8,4 @@ redeploy-webkaraoke.sh
 src/web/dist/assets/
 db/
 aio/.env
+dev/my-karaokedock.xml

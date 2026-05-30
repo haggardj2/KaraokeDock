@@ -268,7 +268,7 @@ setTimeout(async () => {
       logger.info(`[startup] Log level set to: ${savedLogLevel}`);
     }
 
-    await syncBackgroundTaskState({ runImmediately: true });
+    await syncBackgroundTaskState({ runDurationImmediately: true });
   } catch (err) {
     console.error('Failed to start background task:', err);
   }

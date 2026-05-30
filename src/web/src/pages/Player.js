@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useCallback, useEffect, useMemo, useRef, useState, } from "react";
 import { API_BASE, api, getWsUrl } from "../api";
+import { parseZipMediaRef } from "../zipMediaRef";
 // Helper function to extract YouTube video ID from URL
 function getYouTubeVideoId(url) {
     if (!url)
@@ -440,17 +441,11 @@ export default function Player() {
             const isFromZip = now.file_cdg.startsWith("zip://") || now.file_mp3.startsWith("zip://");
             const params = new URLSearchParams();
             if (isFromZip) {
-                // Parse zip://path#entry format - split at .zip# to handle # in filenames
-                const cdgWithoutPrefix = now.file_cdg.replace("zip://", "");
-                const mp3WithoutPrefix = now.file_mp3.replace("zip://", "");
-                // Find .zip# separator - this handles # in both zip filename and entry name
-                const ZIP_EXT = ".zip";
-                const ZIP_SEPARATOR = ".zip#";
-                const cdgSeparatorIdx = cdgWithoutPrefix.indexOf(ZIP_SEPARATOR);
-                const mp3SeparatorIdx = mp3WithoutPrefix.indexOf(ZIP_SEPARATOR);
-                const zipFile = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(0, cdgSeparatorIdx + ZIP_EXT.length) : cdgWithoutPrefix;
-                const cdgEntry = cdgSeparatorIdx >= 0 ? cdgWithoutPrefix.substring(cdgSeparatorIdx + ZIP_SEPARATOR.length) : "";
-                const mp3Entry = mp3SeparatorIdx >= 0 ? mp3WithoutPrefix.substring(mp3SeparatorIdx + ZIP_SEPARATOR.length) : "";
+                const parsedCdg = parseZipMediaRef(now.file_cdg);
+                const parsedMp3 = parseZipMediaRef(now.file_mp3);
+                const zipFile = parsedCdg?.zipPath || parsedMp3?.zipPath || "";
+                const cdgEntry = parsedCdg?.entryName || "";
+                const mp3Entry = parsedMp3?.entryName || "";
                 params.set("file", zipFile);
                 params.set("cdg", cdgEntry || "");
                 params.set("mp3", mp3Entry || "");

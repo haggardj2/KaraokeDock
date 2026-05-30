@@ -26,10 +26,13 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
     throw new Error(`${DATABASE_CONFIGURATION_ERROR} Missing: ${missing.join(', ')}`);
   }
 
+  const resolvedUser = user!;
+  const resolvedPassword = password!;
+  const resolvedName = name!;
   const connectionUrl = new URL(`postgres://${host}:${port}`);
-  connectionUrl.username = user;
-  connectionUrl.password = password;
-  connectionUrl.pathname = `/${name}`;
+  connectionUrl.username = resolvedUser;
+  connectionUrl.password = resolvedPassword;
+  connectionUrl.pathname = `/${resolvedName}`;
   return connectionUrl.toString();
 }
 

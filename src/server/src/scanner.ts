@@ -5,14 +5,19 @@ import os from 'os';
 import { upsertArtist, upsertTrack } from './db';
 import { parseFromFilename } from './parsing';
 import { createRequire } from 'module';
-import { spawn } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import { logger } from './logger';
+import { parseZipMediaRef } from './zipMediaRef.js';
 const require = createRequire(import.meta.url);
 const yauzl = require('yauzl');
 const execFile = promisify(spawn);
 
 type ProgressCb = (evt: { type: 'file' | 'summary'; data: any }) => void;
+type ScanPathOptions = {
+  scanRoot?: string;
+  cleanupRoot?: string;
+};
 
 const VIDEO_RE = /\.mp4$/i;
 const ZIP_RE   = /\.zip$/i;
@@ -53,8 +58,54 @@ class Semaphore {
   }
 }
 
-// Limit concurrent ffprobe processes to avoid EMFILE errors
-const ffprobeSemaphore = new Semaphore(10);
+function getDefaultMediaProbeConcurrency(): number {
+  const availableParallelism =
+    typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+
+  return Math.max(10, Math.min(24, availableParallelism * 2));
+}
+
+const DEFAULT_MEDIA_PROBE_TIMEOUT_MS = 5 * 60 * 1000;
+
+function parsePositiveIntegerEnv(name: string): number | null {
+  const raw = process.env[name]?.trim();
+  if (!raw) return null;
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+const MEDIA_DURATION_PROBE_TIMEOUT_MS =
+  parsePositiveIntegerEnv('MEDIA_DURATION_PROBE_TIMEOUT_MS') ?? DEFAULT_MEDIA_PROBE_TIMEOUT_MS;
+const AUDIO_METADATA_PROBE_TIMEOUT_MS =
+  parsePositiveIntegerEnv('AUDIO_METADATA_PROBE_TIMEOUT_MS') ?? DEFAULT_MEDIA_PROBE_TIMEOUT_MS;
+const MEDIA_PROBE_CONCURRENCY =
+  parsePositiveIntegerEnv('MEDIA_PROBE_CONCURRENCY') ?? getDefaultMediaProbeConcurrency();
+const DEFAULT_MISSING_DURATION_BATCH_SIZE = Math.max(25, MEDIA_PROBE_CONCURRENCY * 2);
+
+// Limit concurrent ffprobe processes to avoid EMFILE errors while still keeping the scanner busy.
+const ffprobeSemaphore = new Semaphore(MEDIA_PROBE_CONCURRENCY);
+
+function killTimedOutProcess(
+  proc: ChildProcessWithoutNullStreams,
+  label: string,
+  timeoutMs: number
+): void {
+  logger.warn(`[scanner] ${label} exceeded ${timeoutMs}ms, terminating process`);
+
+  try {
+    proc.kill('SIGTERM');
+  } catch {}
+
+  const forceKillTimer = setTimeout(() => {
+    if (!proc.killed) {
+      try {
+        proc.kill('SIGKILL');
+      } catch {}
+    }
+  }, 5000);
+  forceKillTimer.unref?.();
+}
 
 async function* walkFiles(dir: string): AsyncGenerator<string> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -68,6 +119,10 @@ async function* walkFiles(dir: string): AsyncGenerator<string> {
   }
 }
 
+function isPathWithinRoot(candidatePath: string, rootPath: string): boolean {
+  return candidatePath === rootPath || candidatePath.startsWith(`${rootPath}${path.sep}`);
+}
+
 /**
  * Get duration of a media file using ffprobe
  */
@@ -76,6 +131,14 @@ export async function getMediaDuration(filePath: string): Promise<number | null>
   
   try {
     return await new Promise((resolve) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const finish = (value: number | null) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        resolve(value);
+      };
       let ffprobe;
       try {
         ffprobe = spawn('ffprobe', [
@@ -87,16 +150,24 @@ export async function getMediaDuration(filePath: string): Promise<number | null>
       } catch (err) {
         // Handle synchronous spawn errors (e.g., EMFILE)
         console.error(`Failed to spawn ffprobe for ${filePath}:`, err);
-        resolve(null);
+        finish(null);
         return;
       }
 
       // Handle spawn errors where process is returned but is invalid
       if (!ffprobe || !ffprobe.stdout) {
         console.error(`Invalid ffprobe process for ${filePath}`);
-        resolve(null);
+        finish(null);
         return;
       }
+
+      ffprobe.stderr?.resume();
+
+      timeout = setTimeout(() => {
+        killTimedOutProcess(ffprobe, `Duration probe for ${filePath}`, MEDIA_DURATION_PROBE_TIMEOUT_MS);
+        finish(null);
+      }, MEDIA_DURATION_PROBE_TIMEOUT_MS);
+      timeout.unref?.();
 
       let output = '';
       ffprobe.stdout.on('data', (data) => {
@@ -108,18 +179,18 @@ export async function getMediaDuration(filePath: string): Promise<number | null>
           const duration = parseFloat(output.trim());
           if (!isNaN(duration)) {
             // Convert seconds to milliseconds
-            resolve(Math.round(duration * 1000));
+            finish(Math.round(duration * 1000));
           } else {
-            resolve(null);
+            finish(null);
           }
         } else {
-          resolve(null);
+          finish(null);
         }
       });
 
       ffprobe.on('error', (err) => {
         console.error(`ffprobe error for ${filePath}:`, err);
-        resolve(null);
+        finish(null);
       });
     });
   } catch (err) {
@@ -157,22 +228,37 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
       // when ffmetadata is directed to stdout.
       const tmpMetaFile = path.join(os.tmpdir(), `ffmeta_${Date.now()}_${Math.random().toString(36).slice(2)}.txt`);
       return await new Promise<AudioMetadata>((resolve) => {
+        let settled = false;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        const finish = (value: AudioMetadata) => {
+          if (settled) return;
+          settled = true;
+          if (timeout) clearTimeout(timeout);
+          resolve(value);
+        };
         let proc;
         try {
           proc = spawn('ffmpeg', ['-y', '-i', filePath, '-f', 'ffmetadata', tmpMetaFile]);
         } catch {
-          resolve({ title: null, artist: null, genre: null, duration_ms: null });
+          finish({ title: null, artist: null, genre: null, duration_ms: null });
           return;
         }
 
         if (!proc || !proc.stderr) {
-          resolve({ title: null, artist: null, genre: null, duration_ms: null });
+          finish({ title: null, artist: null, genre: null, duration_ms: null });
           return;
         }
 
         // Drain stdout — ffmpeg may still emit some output to stdout even when the
         // primary output is a file, and not consuming it can cause the process to block.
         proc.stdout?.resume();
+
+        timeout = setTimeout(() => {
+          killTimedOutProcess(proc, `Audio metadata probe for ${filePath}`, AUDIO_METADATA_PROBE_TIMEOUT_MS);
+          fs.unlink(tmpMetaFile).catch(() => {});
+          finish({ title: null, artist: null, genre: null, duration_ms: null });
+        }, AUDIO_METADATA_PROBE_TIMEOUT_MS);
+        timeout.unref?.();
 
         let stderrData = '';
         proc.stderr.on('data', (data: Buffer) => { stderrData += data.toString(); });
@@ -183,7 +269,7 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
             try {
               metaContent = await fs.readFile(tmpMetaFile, 'utf8');
             } catch {
-              resolve({ title: null, artist: null, genre: null, duration_ms: null });
+              finish({ title: null, artist: null, genre: null, duration_ms: null });
               return;
             }
 
@@ -202,7 +288,7 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
               if (total > 0) duration_ms = Math.round(total * 1000);
             }
 
-            resolve({ title, artist, genre, duration_ms });
+            finish({ title, artist, genre, duration_ms });
           } finally {
             fs.unlink(tmpMetaFile).catch(() => {});
           }
@@ -210,12 +296,20 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
 
         proc.on('error', () => {
           fs.unlink(tmpMetaFile).catch(() => {});
-          resolve({ title: null, artist: null, genre: null, duration_ms: null });
+          finish({ title: null, artist: null, genre: null, duration_ms: null });
         });
       });
     }
 
     return await new Promise<AudioMetadata>((resolve) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const finish = (value: AudioMetadata) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        resolve(value);
+      };
       let ffprobe;
       try {
         ffprobe = spawn('ffprobe', [
@@ -225,14 +319,22 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
           filePath
         ]);
       } catch {
-        resolve({ title: null, artist: null, genre: null, duration_ms: null });
+        finish({ title: null, artist: null, genre: null, duration_ms: null });
         return;
       }
 
       if (!ffprobe || !ffprobe.stdout) {
-        resolve({ title: null, artist: null, genre: null, duration_ms: null });
+        finish({ title: null, artist: null, genre: null, duration_ms: null });
         return;
       }
+
+      ffprobe.stderr?.resume();
+
+      timeout = setTimeout(() => {
+        killTimedOutProcess(ffprobe, `Audio metadata probe for ${filePath}`, AUDIO_METADATA_PROBE_TIMEOUT_MS);
+        finish({ title: null, artist: null, genre: null, duration_ms: null });
+      }, AUDIO_METADATA_PROBE_TIMEOUT_MS);
+      timeout.unref?.();
 
       let output = '';
       ffprobe.stdout.on('data', (data) => {
@@ -241,7 +343,7 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
 
       ffprobe.on('close', (code) => {
         if (code !== 0) {
-          resolve({ title: null, artist: null, genre: null, duration_ms: null });
+          finish({ title: null, artist: null, genre: null, duration_ms: null });
           return;
         }
 
@@ -259,19 +361,19 @@ export async function extractAudioMetadata(filePath: string): Promise<AudioMetad
             : {};
           const tags = { ...streamTags, ...formatTags };
           const duration = Number(parsed?.format?.duration);
-          resolve({
+          finish({
             title: typeof tags.title === 'string' ? tags.title.trim() || null : null,
             artist: typeof tags.artist === 'string' ? tags.artist.trim() || null : null,
             genre: typeof tags.genre === 'string' ? tags.genre.trim() || null : null,
             duration_ms: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null
           });
         } catch {
-          resolve({ title: null, artist: null, genre: null, duration_ms: null });
+          finish({ title: null, artist: null, genre: null, duration_ms: null });
         }
       });
 
       ffprobe.on('error', () => {
-        resolve({ title: null, artist: null, genre: null, duration_ms: null });
+        finish({ title: null, artist: null, genre: null, duration_ms: null });
       });
     });
   } finally {
@@ -295,13 +397,9 @@ export async function extractTrackDuration(track: {
     
     if (isFromZip) {
       // Extract duration from MP3 inside ZIP
-      // Parse zip://path#entry format - split at .zip# to handle # in filenames
-      const ZIP_EXT = '.zip';
-      const ZIP_SEPARATOR = '.zip#';
-      const withoutPrefix = track.file_mp3.replace('zip://', '');
-      const separatorIdx = withoutPrefix.indexOf(ZIP_SEPARATOR);
-      const zipPath = separatorIdx >= 0 ? withoutPrefix.substring(0, separatorIdx + ZIP_EXT.length) : withoutPrefix;
-      const mp3Name = separatorIdx >= 0 ? withoutPrefix.substring(separatorIdx + ZIP_SEPARATOR.length) : '';
+      const parsed = parseZipMediaRef(track.file_mp3);
+      const zipPath = parsed?.zipPath || '';
+      const mp3Name = parsed?.entryName || '';
       
       if (zipPath && mp3Name) {
         extractedDuration = await getZipMp3Duration(zipPath, mp3Name);
@@ -444,18 +542,30 @@ async function getZipContents(zipPath: string): Promise<{ cdg: string | null; mp
   });
 }
 
-export async function scanPath(libraryId: number, libPath: string, onProgress?: ProgressCb) {
+export async function scanPath(
+  libraryId: number,
+  libPath: string,
+  onProgress?: ProgressCb,
+  options: ScanPathOptions = {}
+) {
   let mp4Indexed = 0;
   let zipsSeen = 0;
   let zipPairsIndexed = 0;
   let loosePairsIndexed = 0;
+  const libraryRoot = path.resolve(libPath);
+  const scanRoot = path.resolve(options.scanRoot ?? libPath);
+  const cleanupRoot = path.resolve(options.cleanupRoot ?? scanRoot);
+
+  if (!isPathWithinRoot(scanRoot, libraryRoot) || !isPathWithinRoot(cleanupRoot, libraryRoot)) {
+    throw new Error('scan root must stay within the library path');
+  }
 
   // Track scanned files to remove orphaned tracks later
   const scannedKeys = new Set<string>();
 
-  console.log(`Scanning library path: ${libPath}`);
+  console.log(`Scanning library path: ${libPath} (scan root: ${scanRoot})`);
 
-  for await (const abs of walkFiles(libPath)) {
+  for await (const abs of walkFiles(scanRoot)) {
     const basename = path.basename(abs);
     const dir = path.dirname(abs);
 
@@ -579,8 +689,9 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
      LEFT JOIN queue q ON t.id = q.track_id
      WHERE t.library_id = $1 
        AND t.external_url IS NULL
-       AND q.track_id IS NULL`,
-    [libraryId]
+       AND q.track_id IS NULL
+       AND (t.path = $2 OR t.path LIKE $3)`,
+    [libraryId, cleanupRoot, `${cleanupRoot}${path.sep}%`]
   );
   
   const tracksToDelete: number[] = [];
@@ -612,7 +723,9 @@ export async function scanPath(libraryId: number, libPath: string, onProgress?: 
  * Background task to process tracks with missing duration_ms
  * Processes a batch of tracks at a time to avoid overwhelming the system
  */
-export async function processMissingDurations(batchSize: number = 10): Promise<number> {
+export async function processMissingDurations(
+  batchSize: number = DEFAULT_MISSING_DURATION_BATCH_SIZE
+): Promise<number> {
   const { query } = await import('./db');
   
   // Get tracks without duration
@@ -629,30 +742,33 @@ export async function processMissingDurations(batchSize: number = 10): Promise<n
     return 0;
   }
   
-  logger.warn(`Processing ${result.rows.length} tracks with missing duration...`);
-  let processed = 0;
-  
-  // Process tracks sequentially with a delay to prevent file descriptor exhaustion
-  for (const track of result.rows) {
-    try {
-      const extractedDuration = await extractTrackDuration(track);
-      
-      // Update the database with the extracted duration
-      if (extractedDuration !== null) {
+  logger.warn(
+    `Processing ${result.rows.length} tracks with missing duration ` +
+    `(batch=${batchSize}, concurrency=${MEDIA_PROBE_CONCURRENCY})...`
+  );
+
+  const settled = await Promise.allSettled(
+    result.rows.map(async (track) => {
+      try {
+        const extractedDuration = await extractTrackDuration(track);
+
+        if (extractedDuration === null) {
+          console.warn(`Failed to extract duration for track ${track.id} (${track.title})`);
+          return false;
+        }
+
         await query('UPDATE tracks SET duration_ms = $1 WHERE id = $2', [extractedDuration, track.id]);
         logger.warn(`Updated duration for track ${track.id} (${track.title}): ${Math.round(extractedDuration / 1000)}s`);
-        processed++;
-      } else {
-        console.warn(`Failed to extract duration for track ${track.id} (${track.title})`);
+        return true;
+      } catch (err) {
+        console.error(`Error processing track ${track.id}:`, err);
+        return false;
       }
-    } catch (err) {
-      console.error(`Error processing track ${track.id}:`, err);
-    }
-    
-    // Add a small delay between tracks to allow file descriptors to be released
-    // This prevents EMFILE errors when processing many tracks
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  
-  return processed;
+    })
+  );
+
+  return settled.reduce((processed, item) => {
+    if (item.status === 'fulfilled' && item.value) return processed + 1;
+    return processed;
+  }, 0);
 }

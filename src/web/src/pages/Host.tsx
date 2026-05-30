@@ -216,6 +216,8 @@ export default function Host() {
   const [manualRequestTitle, setManualRequestTitle] = useState('')
   const [manualRequestArtist, setManualRequestArtist] = useState('')
   const [manualRequestDiscId, setManualRequestDiscId] = useState('')
+  const [showManualSingerSuggestions, setShowManualSingerSuggestions] = useState(false)
+  const [manualSingerHighlightIndex, setManualSingerHighlightIndex] = useState(0)
   
   // Library availability settings
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true)
@@ -289,6 +291,27 @@ export default function Host() {
   const breakVolumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const headers = useMemo(() => ({ 'x-session-token': auth.sessionToken, 'Content-Type': 'application/json' }), [auth.sessionToken])
+  const manualSingerSuggestions = useMemo(() => {
+    const normalizedQuery = manualRequestName.trim().toLocaleLowerCase()
+    const seen = new Set<string>()
+
+    return (queueState?.queueOrder ?? [])
+      .map((singer) => singer.displayName.trim())
+      .filter((name) => {
+        if (!name) return false
+        const normalizedName = name.toLocaleLowerCase()
+        if (seen.has(normalizedName)) return false
+        seen.add(normalizedName)
+        return !normalizedQuery || normalizedName.includes(normalizedQuery)
+      })
+      .sort((a, b) => {
+        const aStarts = a.toLocaleLowerCase().startsWith(normalizedQuery)
+        const bStarts = b.toLocaleLowerCase().startsWith(normalizedQuery)
+        if (aStarts !== bStarts) return aStarts ? -1 : 1
+        return a.localeCompare(b)
+      })
+      .slice(0, 8)
+  }, [manualRequestName, queueState])
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -1683,6 +1706,26 @@ export default function Host() {
     }
   }, [manualRequestQuery, manualRequestMode])
 
+  function resetManualRequestModal() {
+    setShowManualRequest(false)
+    setManualRequestQuery('')
+    setManualRequestResults([])
+    setManualRequestName('')
+    setManualRequestUrl('')
+    setManualRequestTitle('')
+    setManualRequestArtist('')
+    setManualRequestDiscId('')
+    setManualRequestMode('local')
+    setShowManualSingerSuggestions(false)
+    setManualSingerHighlightIndex(0)
+  }
+
+  function selectManualRequestSinger(name: string) {
+    setManualRequestName(name)
+    setShowManualSingerSuggestions(false)
+    setManualSingerHighlightIndex(0)
+  }
+
   // Add manual request to queue - Local track
   async function addManualRequestLocal(trackId: number) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
@@ -1698,12 +1741,7 @@ export default function Host() {
         })
       })
       
-      // Close modal and reset state
-      setShowManualRequest(false)
-      setManualRequestQuery('')
-      setManualRequestResults([])
-      setManualRequestName('')
-      setManualRequestMode('local')
+      resetManualRequestModal()
     } finally {
       setBusy(false)
       await refreshQueue()
@@ -1727,12 +1765,7 @@ export default function Host() {
         })
       })
       
-      // Close modal and reset state
-      setShowManualRequest(false)
-      setManualRequestQuery('')
-      setManualRequestResults([])
-      setManualRequestName('')
-      setManualRequestMode('local')
+      resetManualRequestModal()
     } finally {
       setBusy(false)
       await refreshQueue()
@@ -1807,15 +1840,7 @@ export default function Host() {
         })
       })
       
-      // Close modal and reset state
-      setShowManualRequest(false)
-      setManualRequestQuery('')
-      setManualRequestResults([])
-      setManualRequestName('')
-      setManualRequestUrl('')
-      setManualRequestTitle('')
-      setManualRequestArtist('')
-      setManualRequestMode('local')
+      resetManualRequestModal()
     } finally {
       setBusy(false)
       await refreshQueue()
@@ -2685,6 +2710,51 @@ function closeDetails(e: React.SyntheticEvent) {
 
         .form-group {
           margin-bottom: 20px;
+        }
+
+        .manual-singer-suggestions {
+          position: absolute;
+          top: calc(100% + 6px);
+          left: 0;
+          right: 0;
+          z-index: 20;
+          display: flex;
+          flex-direction: column;
+          border: 1px solid var(--color-border);
+          border-radius: 12px;
+          background: var(--color-bg-secondary);
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+          overflow: hidden;
+        }
+
+        .manual-singer-suggestion {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          width: 100%;
+          padding: 10px 14px;
+          border: none;
+          border-bottom: 1px solid var(--color-border);
+          background: transparent;
+          color: var(--color-text-primary);
+          text-align: left;
+          cursor: pointer;
+        }
+
+        .manual-singer-suggestion:last-child {
+          border-bottom: none;
+        }
+
+        .manual-singer-suggestion:hover,
+        .manual-singer-suggestion.active {
+          background: var(--color-bg-hover);
+        }
+
+        .manual-singer-suggestion-hint {
+          font-size: 12px;
+          color: var(--color-text-secondary);
+          white-space: nowrap;
         }
 
         .form-label {
@@ -5107,17 +5177,7 @@ function closeDetails(e: React.SyntheticEvent) {
             {/* Manual Request Modal */}
             {showManualRequest && (
               <>
-                <div className="modal-backdrop" onClick={() => { 
-                  setShowManualRequest(false); 
-                  setManualRequestQuery(''); 
-                  setManualRequestResults([]); 
-                  setManualRequestName(''); 
-                  setManualRequestUrl('');
-                  setManualRequestTitle('');
-                  setManualRequestArtist('');
-                  setManualRequestDiscId('');
-                  setManualRequestMode('local');
-                }} />
+                <div className="modal-backdrop" onClick={resetManualRequestModal} />
                 <div className="modal">
                   <div className="modal-header">
                     <h3 style={{ margin: 0 }}>➕ Add to Queue</h3>
@@ -5139,41 +5199,83 @@ function closeDetails(e: React.SyntheticEvent) {
                       }}
                       onMouseEnter={e => e.currentTarget.style.background = 'var(--color-bg-hover)'}
                       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                      onClick={() => { 
-                        setShowManualRequest(false); 
-                        setManualRequestQuery(''); 
-                        setManualRequestResults([]); 
-                        setManualRequestName(''); 
-                        setManualRequestUrl('');
-                        setManualRequestTitle('');
-                        setManualRequestArtist('');
-                        setManualRequestDiscId('');
-                        setManualRequestMode('local');
-                      }}
+                      onClick={resetManualRequestModal}
                     >
                       ✕
                     </button>
                   </div>
                   
                   {/* Singer Name Field */}
-                  <div className="form-group">
+                  <div className="form-group" style={{ position: 'relative' }}>
                     <label className="form-label">Singer Name (Optional)</label>
                     <input
                       className="form-input"
-                      list="singer-queue-names"
                       placeholder="Enter singer name..."
                       value={manualRequestName}
-                      onChange={e => setManualRequestName(e.target.value)}
+                      autoComplete="off"
+                      onChange={e => {
+                        setManualRequestName(e.target.value)
+                        setShowManualSingerSuggestions(true)
+                        setManualSingerHighlightIndex(0)
+                      }}
+                      onFocus={() => {
+                        setShowManualSingerSuggestions(true)
+                        setManualSingerHighlightIndex(0)
+                      }}
+                      onBlur={() => {
+                        window.setTimeout(() => setShowManualSingerSuggestions(false), 120)
+                      }}
+                      onKeyDown={e => {
+                        if (!showManualSingerSuggestions || manualSingerSuggestions.length === 0) {
+                          if (e.key === 'Escape') setShowManualSingerSuggestions(false)
+                          return
+                        }
+
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault()
+                          setManualSingerHighlightIndex((idx) => (idx + 1) % manualSingerSuggestions.length)
+                          return
+                        }
+
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault()
+                          setManualSingerHighlightIndex((idx) => (idx - 1 + manualSingerSuggestions.length) % manualSingerSuggestions.length)
+                          return
+                        }
+
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          selectManualRequestSinger(manualSingerSuggestions[manualSingerHighlightIndex] ?? manualSingerSuggestions[0])
+                          return
+                        }
+
+                        if (e.key === 'Escape') {
+                          setShowManualSingerSuggestions(false)
+                        }
+                      }}
                       style={{
                         width: '100%',
                         boxSizing: 'border-box'
                       }}
                     />
-                    <datalist id="singer-queue-names">
-                      {queueState?.queueOrder.map(s => (
-                        <option key={s.singerId} value={s.displayName} />
-                      ))}
-                    </datalist>
+                    {showManualSingerSuggestions && manualSingerSuggestions.length > 0 && (
+                      <div className="manual-singer-suggestions">
+                        {manualSingerSuggestions.map((name, index) => (
+                          <button
+                            key={name}
+                            type="button"
+                            className={`manual-singer-suggestion${index === manualSingerHighlightIndex ? ' active' : ''}`}
+                            onMouseDown={(e) => {
+                              e.preventDefault()
+                              selectManualRequestSinger(name)
+                            }}
+                          >
+                            <span>{name}</span>
+                            <span className="manual-singer-suggestion-hint">Use existing singer</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Mode Toggle */}
@@ -5394,17 +5496,19 @@ function closeDetails(e: React.SyntheticEvent) {
                                   <button 
                                     className="control-btn primary" 
                                     style={{ 
-                                      padding: '6px 14px',
+                                      padding: '6px 10px',
                                       fontSize: '13px',
-                                      minWidth: '70px'
+                                      minWidth: '40px'
                                     }}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       addManualRequestLocal(track.id);
                                     }}
                                     disabled={busy}
+                                    aria-label="Add to queue"
+                                    title="Add to queue"
                                   >
-                                    {busy ? '...' : 'Add'}
+                                    {busy ? '…' : '➕'}
                                   </button>
                                 </div>
                               ))
@@ -5441,9 +5545,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                       <button 
                                         className="control-btn" 
                                         style={{ 
-                                          padding: '6px 14px',
+                                          padding: '6px 10px',
                                           fontSize: '13px',
-                                          minWidth: '90px',
+                                          minWidth: '40px',
                                           background: downloadingTrack === track.url ? 'var(--color-bg-secondary)' : 'linear-gradient(135deg, #10b981, #059669)',
                                           color: 'white'
                                         }}
@@ -5452,17 +5556,18 @@ function closeDetails(e: React.SyntheticEvent) {
                                           downloadVideo(track.url, track.title, track.artist, track.brand);
                                         }}
                                         disabled={busy || downloadingTrack === track.url}
+                                        aria-label={downloadingTrack === track.url ? 'Downloading to local library' : 'Download to local library'}
                                         title="Download to local library"
                                       >
-                                        {downloadingTrack === track.url ? '⏳ Downloading...' : '📥 Download'}
+                                        {downloadingTrack === track.url ? '⏳' : '📥'}
                                       </button>
                                     )}
                                     <button 
                                       className="control-btn" 
                                       style={{ 
-                                        padding: '6px 14px',
+                                        padding: '6px 10px',
                                         fontSize: '13px',
-                                        minWidth: '70px',
+                                        minWidth: '40px',
                                         background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
                                       }}
                                       onClick={(e) => {
@@ -5470,8 +5575,10 @@ function closeDetails(e: React.SyntheticEvent) {
                                         addManualRequestExternal(track);
                                       }}
                                       disabled={busy}
+                                      aria-label="Add to queue"
+                                      title="Add to queue"
                                     >
-                                      {busy ? '...' : 'Add'}
+                                      {busy ? '…' : '➕'}
                                     </button>
                                   </div>
                                 </div>
@@ -5490,17 +5597,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       background: 'transparent',
                       border: '2px solid var(--color-border)'
                     }}
-                    onClick={() => { 
-                      setShowManualRequest(false); 
-                      setManualRequestQuery(''); 
-                      setManualRequestResults([]); 
-                      setManualRequestName(''); 
-                      setManualRequestUrl('');
-                      setManualRequestTitle('');
-                      setManualRequestArtist('');
-                      setManualRequestDiscId('');
-                      setManualRequestMode('local');
-                    }}
+                    onClick={resetManualRequestModal}
                   >
                     Cancel
                   </button>

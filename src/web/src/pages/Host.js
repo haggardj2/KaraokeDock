@@ -87,6 +87,8 @@ export default function Host() {
     const [manualRequestTitle, setManualRequestTitle] = useState('');
     const [manualRequestArtist, setManualRequestArtist] = useState('');
     const [manualRequestDiscId, setManualRequestDiscId] = useState('');
+    const [showManualSingerSuggestions, setShowManualSingerSuggestions] = useState(false);
+    const [manualSingerHighlightIndex, setManualSingerHighlightIndex] = useState(0);
     // Library availability settings
     const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
     const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
@@ -154,6 +156,29 @@ export default function Host() {
     const breakPlaylistSyncRequestRef = useRef(0);
     const breakVolumeSaveTimeoutRef = useRef(null);
     const headers = useMemo(() => ({ 'x-session-token': auth.sessionToken, 'Content-Type': 'application/json' }), [auth.sessionToken]);
+    const manualSingerSuggestions = useMemo(() => {
+        const normalizedQuery = manualRequestName.trim().toLocaleLowerCase();
+        const seen = new Set();
+        return (queueState?.queueOrder ?? [])
+            .map((singer) => singer.displayName.trim())
+            .filter((name) => {
+            if (!name)
+                return false;
+            const normalizedName = name.toLocaleLowerCase();
+            if (seen.has(normalizedName))
+                return false;
+            seen.add(normalizedName);
+            return !normalizedQuery || normalizedName.includes(normalizedQuery);
+        })
+            .sort((a, b) => {
+            const aStarts = a.toLocaleLowerCase().startsWith(normalizedQuery);
+            const bStarts = b.toLocaleLowerCase().startsWith(normalizedQuery);
+            if (aStarts !== bStarts)
+                return aStarts ? -1 : 1;
+            return a.localeCompare(b);
+        })
+            .slice(0, 8);
+    }, [manualRequestName, queueState]);
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
         const oidcCode = params.get('oidc_code');
@@ -1517,6 +1542,24 @@ export default function Host() {
             }
         };
     }, [manualRequestQuery, manualRequestMode]);
+    function resetManualRequestModal() {
+        setShowManualRequest(false);
+        setManualRequestQuery('');
+        setManualRequestResults([]);
+        setManualRequestName('');
+        setManualRequestUrl('');
+        setManualRequestTitle('');
+        setManualRequestArtist('');
+        setManualRequestDiscId('');
+        setManualRequestMode('local');
+        setShowManualSingerSuggestions(false);
+        setManualSingerHighlightIndex(0);
+    }
+    function selectManualRequestSinger(name) {
+        setManualRequestName(name);
+        setShowManualSingerSuggestions(false);
+        setManualSingerHighlightIndex(0);
+    }
     // Add manual request to queue - Local track
     async function addManualRequestLocal(trackId) {
         if (!auth.sessionToken || !auth.isLoggedIn)
@@ -1531,12 +1574,7 @@ export default function Host() {
                     requestedBy: manualRequestName || null
                 })
             });
-            // Close modal and reset state
-            setShowManualRequest(false);
-            setManualRequestQuery('');
-            setManualRequestResults([]);
-            setManualRequestName('');
-            setManualRequestMode('local');
+            resetManualRequestModal();
         }
         finally {
             setBusy(false);
@@ -1559,12 +1597,7 @@ export default function Host() {
                     requestedBy: manualRequestName || null
                 })
             });
-            // Close modal and reset state
-            setShowManualRequest(false);
-            setManualRequestQuery('');
-            setManualRequestResults([]);
-            setManualRequestName('');
-            setManualRequestMode('local');
+            resetManualRequestModal();
         }
         finally {
             setBusy(false);
@@ -1637,15 +1670,7 @@ export default function Host() {
                     requestedBy: manualRequestName || null
                 })
             });
-            // Close modal and reset state
-            setShowManualRequest(false);
-            setManualRequestQuery('');
-            setManualRequestResults([]);
-            setManualRequestName('');
-            setManualRequestUrl('');
-            setManualRequestTitle('');
-            setManualRequestArtist('');
-            setManualRequestMode('local');
+            resetManualRequestModal();
         }
         finally {
             setBusy(false);
@@ -2529,6 +2554,51 @@ export default function Host() {
           margin-bottom: 20px;
         }
 
+        .manual-singer-suggestions {
+          position: absolute;
+          top: calc(100% + 6px);
+          left: 0;
+          right: 0;
+          z-index: 20;
+          display: flex;
+          flex-direction: column;
+          border: 1px solid var(--color-border);
+          border-radius: 12px;
+          background: var(--color-bg-secondary);
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+          overflow: hidden;
+        }
+
+        .manual-singer-suggestion {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          width: 100%;
+          padding: 10px 14px;
+          border: none;
+          border-bottom: 1px solid var(--color-border);
+          background: transparent;
+          color: var(--color-text-primary);
+          text-align: left;
+          cursor: pointer;
+        }
+
+        .manual-singer-suggestion:last-child {
+          border-bottom: none;
+        }
+
+        .manual-singer-suggestion:hover,
+        .manual-singer-suggestion.active {
+          background: var(--color-bg-hover);
+        }
+
+        .manual-singer-suggestion-hint {
+          font-size: 12px;
+          color: var(--color-text-secondary);
+          white-space: nowrap;
+        }
+
         .form-label {
           display: block;
           font-size: 14px;
@@ -3364,17 +3434,7 @@ export default function Host() {
                                                     setReplaceArtist('');
                                                     setReplaceDiscId('');
                                                     setReplaceSearchMode('local');
-                                                }, children: "Cancel" })] })] })), showManualRequest && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: () => {
-                                            setShowManualRequest(false);
-                                            setManualRequestQuery('');
-                                            setManualRequestResults([]);
-                                            setManualRequestName('');
-                                            setManualRequestUrl('');
-                                            setManualRequestTitle('');
-                                            setManualRequestArtist('');
-                                            setManualRequestDiscId('');
-                                            setManualRequestMode('local');
-                                        } }), _jsxs("div", { className: "modal", children: [_jsxs("div", { className: "modal-header", children: [_jsx("h3", { style: { margin: 0 }, children: "\u2795 Add to Queue" }), _jsx("button", { style: {
+                                                }, children: "Cancel" })] })] })), showManualRequest && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: resetManualRequestModal }), _jsxs("div", { className: "modal", children: [_jsxs("div", { className: "modal-header", children: [_jsx("h3", { style: { margin: 0 }, children: "\u2795 Add to Queue" }), _jsx("button", { style: {
                                                             background: 'transparent',
                                                             border: 'none',
                                                             color: 'var(--color-text-secondary)',
@@ -3388,20 +3448,46 @@ export default function Host() {
                                                             height: '32px',
                                                             borderRadius: '8px',
                                                             transition: 'all 0.3s ease'
-                                                        }, onMouseEnter: e => e.currentTarget.style.background = 'var(--color-bg-hover)', onMouseLeave: e => e.currentTarget.style.background = 'transparent', onClick: () => {
-                                                            setShowManualRequest(false);
-                                                            setManualRequestQuery('');
-                                                            setManualRequestResults([]);
-                                                            setManualRequestName('');
-                                                            setManualRequestUrl('');
-                                                            setManualRequestTitle('');
-                                                            setManualRequestArtist('');
-                                                            setManualRequestDiscId('');
-                                                            setManualRequestMode('local');
-                                                        }, children: "\u2715" })] }), _jsxs("div", { className: "form-group", children: [_jsx("label", { className: "form-label", children: "Singer Name (Optional)" }), _jsx("input", { className: "form-input", list: "singer-queue-names", placeholder: "Enter singer name...", value: manualRequestName, onChange: e => setManualRequestName(e.target.value), style: {
+                                                        }, onMouseEnter: e => e.currentTarget.style.background = 'var(--color-bg-hover)', onMouseLeave: e => e.currentTarget.style.background = 'transparent', onClick: resetManualRequestModal, children: "\u2715" })] }), _jsxs("div", { className: "form-group", style: { position: 'relative' }, children: [_jsx("label", { className: "form-label", children: "Singer Name (Optional)" }), _jsx("input", { className: "form-input", placeholder: "Enter singer name...", value: manualRequestName, autoComplete: "off", onChange: e => {
+                                                            setManualRequestName(e.target.value);
+                                                            setShowManualSingerSuggestions(true);
+                                                            setManualSingerHighlightIndex(0);
+                                                        }, onFocus: () => {
+                                                            setShowManualSingerSuggestions(true);
+                                                            setManualSingerHighlightIndex(0);
+                                                        }, onBlur: () => {
+                                                            window.setTimeout(() => setShowManualSingerSuggestions(false), 120);
+                                                        }, onKeyDown: e => {
+                                                            if (!showManualSingerSuggestions || manualSingerSuggestions.length === 0) {
+                                                                if (e.key === 'Escape')
+                                                                    setShowManualSingerSuggestions(false);
+                                                                return;
+                                                            }
+                                                            if (e.key === 'ArrowDown') {
+                                                                e.preventDefault();
+                                                                setManualSingerHighlightIndex((idx) => (idx + 1) % manualSingerSuggestions.length);
+                                                                return;
+                                                            }
+                                                            if (e.key === 'ArrowUp') {
+                                                                e.preventDefault();
+                                                                setManualSingerHighlightIndex((idx) => (idx - 1 + manualSingerSuggestions.length) % manualSingerSuggestions.length);
+                                                                return;
+                                                            }
+                                                            if (e.key === 'Enter') {
+                                                                e.preventDefault();
+                                                                selectManualRequestSinger(manualSingerSuggestions[manualSingerHighlightIndex] ?? manualSingerSuggestions[0]);
+                                                                return;
+                                                            }
+                                                            if (e.key === 'Escape') {
+                                                                setShowManualSingerSuggestions(false);
+                                                            }
+                                                        }, style: {
                                                             width: '100%',
                                                             boxSizing: 'border-box'
-                                                        } }), _jsx("datalist", { id: "singer-queue-names", children: queueState?.queueOrder.map(s => (_jsx("option", { value: s.displayName }, s.singerId))) })] }), _jsxs("div", { className: "search-mode-toggle", children: [localLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'local' ? 'active' : ''}`, onClick: () => setManualRequestMode('local'), children: [_jsx("img", { src: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg", alt: "Local Library", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "Local"] })), externalLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'external' ? 'active karaoke-nerds' : ''}`, onClick: () => setManualRequestMode('external'), children: [_jsx("img", { src: "https://karaokenerds.com/Content/Icons/favicon.ico", alt: "Karaoke Nerds", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "External"] })), _jsx("button", { className: `mode-button ${manualRequestMode === 'url' ? 'active' : ''}`, onClick: () => setManualRequestMode('url'), children: "\uD83D\uDD17 URL" })] }), manualRequestMode === 'url' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "form-group", children: [_jsx("label", { className: "form-label", children: "Video URL" }), _jsx("input", { className: "form-input", placeholder: "Enter YouTube or video URL...", value: manualRequestUrl, onChange: e => setManualRequestUrl(e.target.value), autoFocus: true, style: {
+                                                        } }), showManualSingerSuggestions && manualSingerSuggestions.length > 0 && (_jsx("div", { className: "manual-singer-suggestions", children: manualSingerSuggestions.map((name, index) => (_jsxs("button", { type: "button", className: `manual-singer-suggestion${index === manualSingerHighlightIndex ? ' active' : ''}`, onMouseDown: (e) => {
+                                                                e.preventDefault();
+                                                                selectManualRequestSinger(name);
+                                                            }, children: [_jsx("span", { children: name }), _jsx("span", { className: "manual-singer-suggestion-hint", children: "Use existing singer" })] }, name))) }))] }), _jsxs("div", { className: "search-mode-toggle", children: [localLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'local' ? 'active' : ''}`, onClick: () => setManualRequestMode('local'), children: [_jsx("img", { src: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg", alt: "Local Library", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "Local"] })), externalLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'external' ? 'active karaoke-nerds' : ''}`, onClick: () => setManualRequestMode('external'), children: [_jsx("img", { src: "https://karaokenerds.com/Content/Icons/favicon.ico", alt: "Karaoke Nerds", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "External"] })), _jsx("button", { className: `mode-button ${manualRequestMode === 'url' ? 'active' : ''}`, onClick: () => setManualRequestMode('url'), children: "\uD83D\uDD17 URL" })] }), manualRequestMode === 'url' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "form-group", children: [_jsx("label", { className: "form-label", children: "Video URL" }), _jsx("input", { className: "form-input", placeholder: "Enter YouTube or video URL...", value: manualRequestUrl, onChange: e => setManualRequestUrl(e.target.value), autoFocus: true, style: {
                                                                     width: '100%',
                                                                     boxSizing: 'border-box',
                                                                     marginBottom: '16px'
@@ -3443,13 +3529,13 @@ export default function Host() {
                                                                                             borderRadius: '4px',
                                                                                             opacity: 0.8
                                                                                         }, children: track.disc_id }))] })] }), _jsx("button", { className: "control-btn primary", style: {
-                                                                            padding: '6px 14px',
+                                                                            padding: '6px 10px',
                                                                             fontSize: '13px',
-                                                                            minWidth: '70px'
+                                                                            minWidth: '40px'
                                                                         }, onClick: (e) => {
                                                                             e.stopPropagation();
                                                                             addManualRequestLocal(track.id);
-                                                                        }, disabled: busy, children: busy ? '...' : 'Add' })] }, track.id)))) : (
+                                                                        }, disabled: busy, "aria-label": "Add to queue", title: "Add to queue", children: busy ? '…' : '➕' })] }, track.id)))) : (
                                                             // External results
                                                             manualRequestResults.map((track, idx) => (_jsxs("div", { className: "search-result", onClick: () => addManualRequestExternal(track), children: [_jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [_jsx("div", { style: { fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: track.title || 'Unknown' }), _jsxs("div", { style: { fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: [track.artist || 'Unknown', track.brand && (_jsx("span", { style: {
                                                                                             marginLeft: 8,
@@ -3459,37 +3545,27 @@ export default function Host() {
                                                                                             borderRadius: '4px',
                                                                                             color: '#a855f7'
                                                                                         }, children: track.brand }))] })] }), _jsxs("div", { style: { display: 'flex', gap: 8, flexShrink: 0 }, children: [allowDownloads && (_jsx("button", { className: "control-btn", style: {
-                                                                                    padding: '6px 14px',
+                                                                                    padding: '6px 10px',
                                                                                     fontSize: '13px',
-                                                                                    minWidth: '90px',
+                                                                                    minWidth: '40px',
                                                                                     background: downloadingTrack === track.url ? 'var(--color-bg-secondary)' : 'linear-gradient(135deg, #10b981, #059669)',
                                                                                     color: 'white'
                                                                                 }, onClick: (e) => {
                                                                                     e.stopPropagation();
                                                                                     downloadVideo(track.url, track.title, track.artist, track.brand);
-                                                                                }, disabled: busy || downloadingTrack === track.url, title: "Download to local library", children: downloadingTrack === track.url ? '⏳ Downloading...' : '📥 Download' })), _jsx("button", { className: "control-btn", style: {
-                                                                                    padding: '6px 14px',
+                                                                                }, disabled: busy || downloadingTrack === track.url, "aria-label": downloadingTrack === track.url ? 'Downloading to local library' : 'Download to local library', title: "Download to local library", children: downloadingTrack === track.url ? '⏳' : '📥' })), _jsx("button", { className: "control-btn", style: {
+                                                                                    padding: '6px 10px',
                                                                                     fontSize: '13px',
-                                                                                    minWidth: '70px',
+                                                                                    minWidth: '40px',
                                                                                     background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
                                                                                 }, onClick: (e) => {
                                                                                     e.stopPropagation();
                                                                                     addManualRequestExternal(track);
-                                                                                }, disabled: busy, children: busy ? '...' : 'Add' })] })] }, track.url || idx)))) })) })] })), _jsx("button", { className: "control-btn", style: {
+                                                                                }, disabled: busy, "aria-label": "Add to queue", title: "Add to queue", children: busy ? '…' : '➕' })] })] }, track.url || idx)))) })) })] })), _jsx("button", { className: "control-btn", style: {
                                                     width: '100%',
                                                     background: 'transparent',
                                                     border: '2px solid var(--color-border)'
-                                                }, onClick: () => {
-                                                    setShowManualRequest(false);
-                                                    setManualRequestQuery('');
-                                                    setManualRequestResults([]);
-                                                    setManualRequestName('');
-                                                    setManualRequestUrl('');
-                                                    setManualRequestTitle('');
-                                                    setManualRequestArtist('');
-                                                    setManualRequestDiscId('');
-                                                    setManualRequestMode('local');
-                                                }, children: "Cancel" })] })] }))] }))] })] }));
+                                                }, onClick: resetManualRequestModal, children: "Cancel" })] })] }))] }))] })] }));
 }
 // Inline Edit Helper Component
 function InlineEdit({ value, onSave, disabled }) {
