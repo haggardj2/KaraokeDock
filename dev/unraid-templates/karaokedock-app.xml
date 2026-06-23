@@ -18,7 +18,7 @@
   <License>GPLv2</License>
   <WebUI>http://[IP]:[PORT:5173]</WebUI>
   <TemplateURL
-    >https://raw.githubusercontent.com/haggardj2/unraid/refs/heads/main/templates/karaokedock-app.xml</TemplateURL>
+    >https://github.com/haggardj2/KaraokeDock/blob/main/dev/unraid-templates/karaokedock-app.xml</TemplateURL>
   <Icon
     >https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/docs/images/icon.png</Icon>
   <ExtraParams />
