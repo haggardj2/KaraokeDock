@@ -1,0 +1,186 @@
+<?xml version="1.0" ?>
+<Container version="2">
+  <Name>KaraokeDock</Name>
+  <Repository>haggardj2/karaokedock:latest</Repository>
+  <Registry>https://hub.docker.com/r/haggardj2/karaokedock</Registry>
+  <Network>bridge</Network>
+  <MyIP />
+  <MyMAC />
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/haggardj2/docker-karaoke/issues</Support>
+  <Project>https://github.com/haggardj2/docker-karaoke</Project>
+  <ReadMe
+    >https://github.com/haggardj2/KaraokeDock/tree/main/docs/unraid_readme.md</ReadMe>
+  <Overview
+    >A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.</Overview>
+  <Category>MediaApp:Music MediaServer:Other</Category>
+  <License>GPLv2</License>
+  <WebUI>http://[IP]:[PORT:5173]</WebUI>
+  <TemplateURL
+    >https://raw.githubusercontent.com/haggardj2/unraid/refs/heads/main/templates/karaokedock-app.xml</TemplateURL>
+  <Icon
+    >https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/docs/images/icon.png</Icon>
+  <ExtraParams />
+  <PostArgs />
+  <CPUset />
+  <DateInstalled />
+  <DonateText />
+  <DonateLink />
+  <Requires />
+  <Config
+        Name="WebUI Port"
+        Target="5173"
+        Default="5173"
+        Mode="tcp"
+        Description="Host port for the KaraokeDock web interface."
+        Type="Port"
+        Display="always"
+        Required="true"
+        Mask="false"
+    >5173</Config>
+  <Config
+        Name="Karaoke Tracks"
+        Target="/media/karaoke"
+        Default="/mnt/user/karaoke/Karaoke Tracks"
+        Mode="ro"
+        Description="Path to your karaoke tracks. Mounted read-only."
+        Type="Path"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Downloads"
+        Target="/media/downloads"
+        Default="/mnt/user/karaoke/downloads"
+        Mode="rw"
+        Description="Path for downloaded/imported tracks."
+        Type="Path"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Break Music"
+        Target="/media/breakmusic"
+        Default="/mnt/user/karaoke/Break Music"
+        Mode="ro"
+        Description="Path to break music. Mounted read-only."
+        Type="Path"
+        Display="always"
+        Required="false"
+        Mask="false"
+    />
+  <Config
+        Name="Database Host"
+        Target="DB_HOST"
+        Default="postgresql_alpine"
+        Mode=""
+        Description="PostgreSQL hostname or container name. "
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Database Port"
+        Target="DB_PORT"
+        Default="5432"
+        Mode=""
+        Description="PostgreSQL port. Use 5432 for the shared Postgres container."
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="false"
+    >5432</Config>
+  <Config
+        Name="Database Name"
+        Target="DB_NAME"
+        Default="karaoke"
+        Mode=""
+        Description="PostgreSQL database name."
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Database User"
+        Target="DB_USER"
+        Default="karaoke"
+        Mode=""
+        Description="PostgreSQL database username."
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Database Password"
+        Target="DB_PASSWORD"
+        Default=""
+        Mode=""
+        Description="PostgreSQL database password."
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="true"
+    />
+  <Config
+        Name="Web App URL"
+        Target="WEB_APP_URL"
+        Default="http://localhost:5173"
+        Mode=""
+        Description="Public URL for the app, such as http://192.168.100.63:5173 or https://karaoke.example.com."
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Allowed Origins"
+        Target="ORIGIN"
+        Default="http://localhost:5173,http://127.0.0.1:5173"
+        Mode=""
+        Description="Comma-separated CORS/WebSocket origins. Include your LAN URL and reverse proxy URL if used."
+        Type="Variable"
+        Display="always"
+        Required="true"
+        Mask="false"
+    />
+  <Config
+        Name="Host Key 8"
+        Target="MEDIA_PROBE_CONCURRENCY"
+        Default=""
+        Mode=""
+        Description="Use this rule of thumb:&#13;&#10;**4-core CPU:** 8 to 12, **6-core CPU:** 12 to 16, **8+ cores:** 16 to 24.&#13;&#10;&#13;&#10;If your server is otherwise idle and the media lives on fast storage, 20` or 24` is reasonable. If you notice high CPU, disk thrash, or sluggishness during scans, back it down.&#13;&#10;&#13;&#10;If you **don&#x2019;t set it at all**, the app now auto-picks a value based on CPU count, capped between **10** and **24**."
+        Type="Variable"
+        Display="always"
+        Required="false"
+        Mask="false"
+    />
+  <Config
+        Name="Media Root"
+        Target="MEDIA_ROOT"
+        Default="/media"
+        Mode=""
+        Description="Root media path inside the container."
+        Type="Variable"
+        Display="advanced"
+        Required="true"
+        Mask="false"
+    >/media</Config>
+  <Config
+        Name="Trust Proxy"
+        Target="TRUST_PROXY"
+        Default="1"
+        Mode=""
+        Description="Set to 1 when running behind a reverse proxy."
+        Type="Variable"
+        Display="advanced"
+        Required="true"
+        Mask="false"
+    >1</Config>
+  <TailscaleStateDir />
+</Container>
