@@ -39,7 +39,7 @@ type QueueSinger = {
   singerId: string
   displayName: string
   status: string
-  position: number | null
+  rotationPosition: number | null
   lastSangAt: string | null
   totalSongsSung: number
   nextSong: QueueSong | null
@@ -94,6 +94,22 @@ type SingerHistory = {
   allSongs: SingerHistorySong[]
 }
 
+type SingerHistoryKdSinger = {
+  singer?: {
+    id?: string
+    displayName?: string
+    normalizedName?: string
+  }
+  songs?: unknown[]
+}
+
+type SingerHistoryKdFile = {
+  format?: string
+  version?: number
+  exportedAt?: string
+  singers?: SingerHistoryKdSinger[]
+}
+
 const LOCAL_SEARCH_DELAY_MS = 300
 const KARAOKE_NERDS_SEARCH_DELAY_MS = 500
 
@@ -146,6 +162,41 @@ const DEFAULT_BREAK_COLUMNS: BreakColumnVisibility = {
 const BREAK_COLUMNS_STORAGE_KEY = 'host.breakMusicColumns'
 const HOST_CONTROL_BUTTON_COUNT = 6
 
+function downloadJsonFile(filename: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function safeHistoryFilename(name: string): string {
+  return `${name.trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'singer-history'}.kd`
+}
+
+function getKdSingerDisplayName(singer: SingerHistoryKdSinger, index: number): string {
+  return singer.singer?.displayName?.trim() || `Singer ${index + 1}`
+}
+
+function readJsonFile(file: File): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        resolve(JSON.parse(String(reader.result ?? '')))
+      } catch (error) {
+        reject(error)
+      }
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read file'))
+    reader.readAsText(file)
+  })
+}
+
 function getInitialBreakColumns(): BreakColumnVisibility {
   if (typeof window === 'undefined') return DEFAULT_BREAK_COLUMNS
   try {
@@ -194,6 +245,8 @@ export default function Host() {
   const [showRoller, setShowRoller] = useState(true)
   const [showQrCode, setShowQrCode] = useState(true)
   const [hideSingerQueue, setHideSingerQueue] = useState(false)
+  const [keepRotationScrollerSingers, setKeepRotationScrollerSingers] = useState(false)
+  const [showRequestsUrl, setShowRequestsUrl] = useState(true)
   const [showPlayerWindowControl, setShowPlayerWindowControl] = useState(false)
   const [showAccountManagement, setShowAccountManagement] = useState(false)
   const [changingPassword, setChangingPassword] = useState(false)
@@ -205,7 +258,7 @@ export default function Host() {
   const [newUsername, setNewUsername] = useState('')
   const [usernamePassword, setUsernamePassword] = useState('')
   const [usernameError, setUsernameError] = useState('')
-  
+
   // Manual request modal state
   const [showManualRequest, setShowManualRequest] = useState(false)
   const [manualRequestMode, setManualRequestMode] = useState<'local' | 'external' | 'url'>('local')
@@ -218,11 +271,11 @@ export default function Host() {
   const [manualRequestDiscId, setManualRequestDiscId] = useState('')
   const [showManualSingerSuggestions, setShowManualSingerSuggestions] = useState(false)
   const [manualSingerHighlightIndex, setManualSingerHighlightIndex] = useState(0)
-  
+
   // Library availability settings
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true)
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true)
-  
+
   // Download settings
   const [allowDownloads, setAllowDownloads] = useState(true)
   const [downloadingTrack, setDownloadingTrack] = useState<string | null>(null)
@@ -267,11 +320,26 @@ export default function Host() {
   const [selectedSingerHistory, setSelectedSingerHistory] = useState<SingerHistory | null>(null)
   const [singerModalOpen, setSingerModalOpen] = useState(false)
   const [singerModalLoading, setSingerModalLoading] = useState(false)
+  const [renameSingerDialogOpen, setRenameSingerDialogOpen] = useState(false)
+  const [editingSingerName, setEditingSingerName] = useState('')
+  const [savingSingerName, setSavingSingerName] = useState(false)
   const [singerDraggedId, setSingerDraggedId] = useState<string | null>(null)
   const [singerDragOverId, setSingerDragOverId] = useState<string | null>(null)
   const [modalSongDraggedId, setModalSongDraggedId] = useState<number | null>(null)
   const [modalSongDragOverId, setModalSongDragOverId] = useState<number | null>(null)
-  
+  const [historyManagerOpen, setHistoryManagerOpen] = useState(false)
+  const [historyManagerMode, setHistoryManagerMode] = useState<'menu' | 'export' | 'import'>('menu')
+  const [historyExportSelectedSingerIds, setHistoryExportSelectedSingerIds] = useState<Set<string>>(new Set())
+  const [pendingHistoryImportData, setPendingHistoryImportData] = useState<SingerHistoryKdFile | null>(null)
+  const [historyImportSelectedIndexes, setHistoryImportSelectedIndexes] = useState<Set<number>>(new Set())
+  // Merge singer state
+  const [mergeSingerDialogOpen, setMergeSingerDialogOpen] = useState(false)
+  const [mergeSingerQuery, setMergeSingerQuery] = useState('')
+  const [mergeSingerError, setMergeSingerError] = useState('')
+  const [mergingSinger, setMergingSinger] = useState(false)
+  // Add song to queue from singer modal — delegates to showManualRequest with singer pre-filled
+  const [manualRequestForSingerId, setManualRequestForSingerId] = useState<string | null>(null)
+
   const wsRef = useRef<WebSocket | null>(null)
   const autoPlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const songTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -289,6 +357,7 @@ export default function Host() {
   const breakManagerLayoutRef = useRef<HTMLDivElement | null>(null)
   const breakPlaylistSyncRequestRef = useRef(0)
   const breakVolumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hostHistoryImportInputRef = useRef<HTMLInputElement | null>(null)
 
   const headers = useMemo(() => ({ 'x-session-token': auth.sessionToken, 'Content-Type': 'application/json' }), [auth.sessionToken])
   const manualSingerSuggestions = useMemo(() => {
@@ -361,7 +430,7 @@ export default function Host() {
       --color-border: rgba(255, 255, 255, 0.08);
       --color-border-focus: rgba(99, 102, 241, 0.5);
     `;
-    
+
     document.body.style.cssText = `
       background: linear-gradient(135deg, #0a0a0f 0%, #16161d 100%);
       color: #ffffff;
@@ -392,14 +461,14 @@ export default function Host() {
     e.preventDefault()
     setLoginError('')
     setBusy(true)
-    
+
     try {
       const result = await api('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: loginUsername, password: loginPassword })
       })
-      
+
       if (result.ok && result.sessionToken) {
         auth.setSessionToken(result.sessionToken)
         writeStoredSessionToken(result.sessionToken)
@@ -412,7 +481,7 @@ export default function Host() {
           displayName: result.displayName || '',
           picture: result.picture || ''
         })
-        
+
         if (result.isDefaultPassword) {
           setBanner('⚠️ You are using the default password. Please change it in Account Settings.')
         }
@@ -425,7 +494,7 @@ export default function Host() {
       setBusy(false)
     }
   }
-  
+
   // Validate session on mount
   useEffect(() => {
     async function validateSession() {
@@ -433,12 +502,12 @@ export default function Host() {
         auth.setIsLoggedIn(false)
         return
       }
-      
+
       try {
         const result = await api('/api/auth/validate', {
           headers: { 'x-session-token': auth.sessionToken }
         })
-        
+
         if (result.valid) {
           auth.setIsLoggedIn(true)
           auth.setRole(result.role || 'user')
@@ -460,7 +529,7 @@ export default function Host() {
         clearStoredSessionToken()
       }
     }
-    
+
     validateSession()
   }, [auth.sessionToken])
 
@@ -557,17 +626,17 @@ export default function Host() {
       if (!auth.sessionToken || !auth.isLoggedIn) {
         return;
       }
-      
+
       try {
         const settings = await api('/api/admin/settings', { headers });
         const localEnabled = parseBooleanSetting(settings['libraries.local_enabled']);
         const externalEnabled = parseBooleanSetting(settings['libraries.external_enabled']);
         const downloadsAllowed = parseBooleanSetting(settings['ytdlp.allow_downloads']);
-        
+
         setLocalLibraryEnabled(localEnabled);
         setExternalLibraryEnabled(externalEnabled);
         setAllowDownloads(downloadsAllowed);
-        
+
         // Switch to an enabled mode, preferring local
         if (localEnabled) {
           setReplaceSearchMode('local');
@@ -579,7 +648,7 @@ export default function Host() {
         console.error('Failed to load settings:', err);
       }
     }
-    
+
     loadSettings();
     loadBreakMusicState();
   }, [auth.sessionToken, auth.isLoggedIn, headers])
@@ -1065,6 +1134,7 @@ export default function Host() {
     try {
       const history = await api(`/api/singers/${singerId}/history`, { headers })
       setSelectedSingerHistory(history || null)
+      setEditingSingerName(history?.singer?.displayName || '')
     } catch (err) {
       console.error('Failed to load singer history:', err)
     } finally {
@@ -1074,8 +1144,161 @@ export default function Host() {
 
   function closeSingerModal() {
     setSingerModalOpen(false)
+    setRenameSingerDialogOpen(false)
     setSelectedSingerId(null)
     setSelectedSingerHistory(null)
+    setEditingSingerName('')
+  }
+
+  function openHistoryManager() {
+    setHistoryManagerOpen(true)
+    setHistoryManagerMode('menu')
+    setHistoryExportSelectedSingerIds(new Set((queueState?.queueOrder ?? []).map((singer) => singer.singerId)))
+    setPendingHistoryImportData(null)
+    setHistoryImportSelectedIndexes(new Set())
+  }
+
+  function closeHistoryManager() {
+    setHistoryManagerOpen(false)
+    setHistoryManagerMode('menu')
+    setPendingHistoryImportData(null)
+    setHistoryImportSelectedIndexes(new Set())
+    if (hostHistoryImportInputRef.current) hostHistoryImportInputRef.current.value = ''
+  }
+
+  async function exportAllSingerHistory() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    try {
+      const data = await api('/api/history/export-all', { headers })
+      downloadJsonFile(`karaokedock-singer-history-${new Date().toISOString().slice(0, 10)}.kd`, data)
+      setBanner('✔ All singer history exported')
+      setTimeout(() => setBanner(''), 4000)
+      closeHistoryManager()
+    } catch (err) {
+      console.error('Failed to export all singer history:', err)
+      setBanner('⚠️ Could not export singer history')
+      setTimeout(() => setBanner(''), 5000)
+    }
+  }
+
+  async function exportSelectedSingerHistory() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    const singerIds = Array.from(historyExportSelectedSingerIds)
+    if (singerIds.length === 0) {
+      setBanner('⚠️ Select at least one singer to export')
+      setTimeout(() => setBanner(''), 4000)
+      return
+    }
+    try {
+      const data = await api('/api/history/export', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ singerIds }),
+      })
+      const filename = singerIds.length === 1
+        ? safeHistoryFilename((queueState?.queueOrder ?? []).find((singer) => singer.singerId === singerIds[0])?.displayName || 'singer-history')
+        : `karaokedock-selected-singer-history-${new Date().toISOString().slice(0, 10)}.kd`
+      downloadJsonFile(filename, data)
+      setBanner(`✔ Exported ${singerIds.length} singer${singerIds.length === 1 ? '' : 's'}`)
+      setTimeout(() => setBanner(''), 4000)
+      closeHistoryManager()
+    } catch (err) {
+      console.error('Failed to export singer history:', err)
+      setBanner('⚠️ Could not export singer history')
+      setTimeout(() => setBanner(''), 5000)
+    }
+  }
+
+  async function loadHistoryImportFile(file: File | null | undefined) {
+    if (!file) return
+    try {
+      const data = await readJsonFile(file) as SingerHistoryKdFile
+      const singers = Array.isArray(data?.singers) ? data.singers : []
+      setPendingHistoryImportData(data)
+      setHistoryImportSelectedIndexes(new Set(singers.map((_: unknown, index: number) => index)))
+    } catch (err) {
+      console.error('Failed to read singer history file:', err)
+      setBanner('⚠️ Could not read .kd file')
+      setTimeout(() => setBanner(''), 5000)
+      if (hostHistoryImportInputRef.current) hostHistoryImportInputRef.current.value = ''
+    }
+  }
+
+  async function importPendingHostSingerHistory(importAll: boolean) {
+    if (!auth.sessionToken || !auth.isLoggedIn || !pendingHistoryImportData) return
+    const sourceSingers = Array.isArray(pendingHistoryImportData.singers) ? pendingHistoryImportData.singers : []
+    const selectedSingers = sourceSingers.filter((_: unknown, index: number) => historyImportSelectedIndexes.has(index))
+    const data = importAll
+      ? pendingHistoryImportData
+      : { ...pendingHistoryImportData, singers: selectedSingers }
+    if (!importAll && selectedSingers.length === 0) {
+      setBanner('⚠️ Select at least one singer to import')
+      setTimeout(() => setBanner(''), 4000)
+      return
+    }
+    try {
+      const result = await api('/api/history/import', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ data }),
+      })
+      await refreshQueueState()
+      if (selectedSingerId) {
+        const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
+        setSelectedSingerHistory(history || null)
+      }
+      setBanner(`✔ Imported ${Number(result.imported ?? 0)} history song${Number(result.imported ?? 0) === 1 ? '' : 's'}`)
+      setTimeout(() => setBanner(''), 4000)
+      closeHistoryManager()
+    } catch (err) {
+      console.error('Failed to import singer history:', err)
+      setBanner('⚠️ Could not import singer history')
+      setTimeout(() => setBanner(''), 5000)
+    } finally {
+      if (hostHistoryImportInputRef.current) hostHistoryImportInputRef.current.value = ''
+    }
+  }
+
+  function openRenameSingerDialog() {
+    if (!selectedSingerHistory) return
+    setEditingSingerName(selectedSingerHistory.singer.displayName)
+    setRenameSingerDialogOpen(true)
+  }
+
+  function closeRenameSingerDialog() {
+    setRenameSingerDialogOpen(false)
+    setEditingSingerName(selectedSingerHistory?.singer.displayName ?? '')
+  }
+
+  async function renameSingerFromModal() {
+    if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerId) return
+    const nextName = editingSingerName.trim()
+    if (!nextName) {
+      setBanner('⚠️ Singer name is required')
+      setTimeout(() => setBanner(''), 4000)
+      return
+    }
+    setSavingSingerName(true)
+    try {
+      await api(`/api/singers/${selectedSingerId}/rename`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ displayName: nextName }),
+      })
+      await refreshQueueState()
+      const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
+      setSelectedSingerHistory(history || null)
+      setEditingSingerName(history?.singer?.displayName || nextName)
+      setRenameSingerDialogOpen(false)
+      setBanner(`✔ Singer renamed to ${nextName}`)
+      setTimeout(() => setBanner(''), 4000)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to rename singer'
+      setBanner(`⚠️ ${message}`)
+      setTimeout(() => setBanner(''), 5000)
+    } finally {
+      setSavingSingerName(false)
+    }
   }
 
   async function handleModalSongDrop(targetQueueId: number) {
@@ -1179,6 +1402,68 @@ export default function Host() {
     }
   }
 
+  async function deleteSongFromHistory(queueId: number) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!confirm('Remove this track from singer history?')) return
+    setBusy(true)
+    try {
+      await api('/api/queue/delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: queueId }),
+      })
+      await refreshQueueState()
+      if (selectedSingerId) {
+        const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
+        setSelectedSingerHistory(history || null)
+      }
+    } catch (err) {
+      console.error('Failed to delete history song:', err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function mergeSingerIntoTarget() {
+    if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerId) return
+    const sourceName = mergeSingerQuery.trim()
+    if (!sourceName) { setMergeSingerError('Enter a singer name to merge'); return }
+    // Find singer id by name
+    const allSingers = queueState?.queueOrder ?? []
+    const matchedSinger = allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase())
+    if (!matchedSinger) { setMergeSingerError(`Singer "${sourceName}" not found`); return }
+    if (matchedSinger.singerId === selectedSingerId) { setMergeSingerError('Cannot merge a singer with themselves'); return }
+    setMergingSinger(true)
+    setMergeSingerError('')
+    try {
+      await api(`/api/singers/${selectedSingerId}/merge`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ sourceId: Number(matchedSinger.singerId) }),
+      })
+      setMergeSingerDialogOpen(false)
+      setMergeSingerQuery('')
+      await refreshQueueState()
+      const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
+      setSelectedSingerHistory(history || null)
+      setBanner(`✔ Merged "${sourceName}" into this singer`)
+      setTimeout(() => setBanner(''), 4000)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Merge failed'
+      setMergeSingerError(msg)
+    } finally {
+      setMergingSinger(false)
+    }
+  }
+
+  async function searchSongsForSinger(q: string) {
+    // No longer used — singer add-song uses the manual request modal
+  }
+
+  async function addSongForSinger(_trackId: number) {
+    // No longer used
+  }
+
   async function moveSinger(singerId: string, direction: 'up' | 'down') {
     if (!auth.sessionToken || !auth.isLoggedIn || !queueState?.activeRotation) return
     const rotationId = queueState.activeRotation.id
@@ -1188,8 +1473,8 @@ export default function Host() {
     const targetIdx = direction === 'up' ? idx - 1 : idx + 1
     if (targetIdx < 0 || targetIdx >= singers.length) return
     // Swap positions
-    const currentPos = singers[idx].position ?? idx + 1
-    const targetPos = singers[targetIdx].position ?? targetIdx + 1
+    const currentPos = singers[idx].rotationPosition ?? idx + 1
+    const targetPos = singers[targetIdx].rotationPosition ?? targetIdx + 1
     try {
       await api(`/api/rotations/${rotationId}/singers/${singerId}/position`, {
         method: 'PATCH',
@@ -1233,7 +1518,13 @@ export default function Host() {
       return
     }
     const rotationId = queueState.activeRotation.id
-    const singers = queueState.queueOrder
+    const singers = [...queueState.queueOrder].sort((a, b) => {
+      const aIsSinging = a.queuedSongs.some(q => q.status === 'playing')
+      const bIsSinging = b.queuedSongs.some(q => q.status === 'playing')
+      if (aIsSinging && !bIsSinging) return -1
+      if (!aIsSinging && bIsSinging) return 1
+      return 0
+    })
     const fromIdx = singers.findIndex(s => s.singerId === singerDraggedId)
     const toIdx = singers.findIndex(s => s.singerId === targetSingerId)
     if (fromIdx < 0 || toIdx < 0) {
@@ -1244,16 +1535,12 @@ export default function Host() {
     const reordered = [...singers]
     const [moved] = reordered.splice(fromIdx, 1)
     reordered.splice(toIdx, 0, moved)
-    // Assign sequential positions starting from the minimum existing position
-    const minPos = Math.min(...singers.map(s => s.position ?? 999))
     try {
-      for (let i = 0; i < reordered.length; i++) {
-        await api(`/api/rotations/${rotationId}/singers/${reordered[i].singerId}/position`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify({ position: minPos + i }),
-        })
-      }
+      await api(`/api/rotations/${rotationId}/singers/reorder`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ orderedSingerIds: reordered.map(s => s.singerId) }),
+      })
       await refreshQueueState()
     } catch (err) {
       console.error('Failed to reorder singers:', err)
@@ -1287,7 +1574,7 @@ export default function Host() {
   // Fetch initial overlay settings
   useEffect(() => {
     api('/api/overlay/settings')
-      .then((settings: { visible: boolean; height: number; qrSize: number; customMessage: string; showRoller: boolean; showQrCode: boolean; hideSingerQueue: boolean }) => {
+      .then((settings: { visible: boolean; height: number; qrSize: number; customMessage: string; showRoller: boolean; showQrCode: boolean; hideSingerQueue: boolean; keepRotationScrollerSingers: boolean; showRequestsUrl: boolean }) => {
         setOverlayVisible(settings.visible)
         setOverlayHeight(settings.height)
         setQrSize(settings.qrSize)
@@ -1295,11 +1582,23 @@ export default function Host() {
         setShowRoller(settings.showRoller ?? true)
         setShowQrCode(settings.showQrCode ?? true)
         setHideSingerQueue(settings.hideSingerQueue ?? false)
+        setKeepRotationScrollerSingers(settings.keepRotationScrollerSingers ?? false)
+        setShowRequestsUrl(settings.showRequestsUrl ?? true)
       })
       .catch(() => {})
   }, [])
 
-  async function updateOverlaySettings(visible: boolean, height: number, qrSizeVal: number, message?: string, rollerVal?: boolean, qrCodeVal?: boolean, hideSingerQueueVal?: boolean) {
+  async function updateOverlaySettings(
+    visible: boolean,
+    height: number,
+    qrSizeVal: number,
+    message?: string,
+    rollerVal?: boolean,
+    qrCodeVal?: boolean,
+    hideSingerQueueVal?: boolean,
+    keepRotationScrollerSingersVal?: boolean,
+    showRequestsUrlVal?: boolean,
+  ) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     try {
       await api('/api/overlay/settings', {
@@ -1312,7 +1611,9 @@ export default function Host() {
           customMessage: message ?? customMessage,
           showRoller: rollerVal ?? showRoller,
           showQrCode: qrCodeVal ?? showQrCode,
-          hideSingerQueue: hideSingerQueueVal ?? hideSingerQueue
+          hideSingerQueue: hideSingerQueueVal ?? hideSingerQueue,
+          keepRotationScrollerSingers: keepRotationScrollerSingersVal ?? keepRotationScrollerSingers,
+          showRequestsUrl: showRequestsUrlVal ?? showRequestsUrl,
         })
       })
     } catch (err) {
@@ -1370,11 +1671,11 @@ export default function Host() {
     function connectWs() {
       try {
         wsRef.current = new WebSocket(getWsUrl(auth.sessionToken || undefined))
-        
+
         wsRef.current.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data)
-            if (msg.type === 'queue.updated' || 
+            if (msg.type === 'queue.updated' ||
                 msg.type === 'player.updated' ||
                 msg.type === 'player.play' ||
                 msg.type === 'player.next' ||
@@ -1395,7 +1696,7 @@ export default function Host() {
               // while preventing small fluctuations from causing updates
               if (typeof msg.duration === 'number' &&
                   !isNaN(msg.duration) && isFinite(msg.duration) && msg.duration > 0) {
-                
+
                 if (!durationSetForSongRef.current) {
                   // First duration update for this song
                   durationSetForSongRef.current = true
@@ -1406,16 +1707,16 @@ export default function Host() {
                     if (prevDuration === null || prevDuration === 0) {
                       return msg.duration
                     }
-                    
+
                     // Calculate percentage difference
                     const percentDiff = Math.abs(msg.duration - prevDuration) / prevDuration
-                    
+
                     // Update if difference is > 10% (allows correcting wrong initial durations)
                     if (percentDiff > 0.1) {
                       console.log(`Duration updated from ${prevDuration}s to ${msg.duration}s (${(percentDiff * 100).toFixed(1)}% change)`)
                       return msg.duration
                     }
-                    
+
                     return prevDuration
                   })
                 }
@@ -1430,7 +1731,7 @@ export default function Host() {
             }
           } catch {}
         }
-        
+
         wsRef.current.onclose = () => {
           console.log('WebSocket closed, reconnecting...')
           wsRef.current = null
@@ -1441,11 +1742,11 @@ export default function Host() {
           }
           setTimeout(connectWs, 1000)
         }
-        
+
         wsRef.current.onerror = (err) => {
           console.error('WebSocket error:', err)
         }
-        
+
         wsRef.current.onopen = () => {
           console.log('WebSocket connected')
           // Start heartbeat - send a message every 45 seconds to keep connection alive
@@ -1461,13 +1762,13 @@ export default function Host() {
         setTimeout(connectWs, 1500)
       }
     }
-    
+
     connectWs()
-    return () => { 
+    return () => {
       if (wsHeartbeatRef.current) {
         clearInterval(wsHeartbeatRef.current)
       }
-      wsRef.current?.close() 
+      wsRef.current?.close()
     }
   }, [auth.sessionToken])
 
@@ -1477,18 +1778,18 @@ export default function Host() {
 
   const playNextSong = useCallback(async () => {
     if (! auth.sessionToken || !auth.isLoggedIn) return
-    
+
     const nextQueued = queue.find(r => r.status === 'queued')
     if (! nextQueued) return
-    
+
     console.log('Autoplay: Playing next song:', nextQueued. title)
-    
+
     setBusy(true)
     try {
-      await api('/api/player/play', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ id: nextQueued.id }) 
+      await api('/api/player/play', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: nextQueued.id })
       })
     } catch (err) {
       console.error('Autoplay failed:', err)
@@ -1508,7 +1809,7 @@ export default function Host() {
     setActualDuration(null)
     durationSetForSongRef.current = false  // Reset the ref so duration can be set for new song
     lastWebSocketUpdateRef.current = 0
-    
+
     if (currentPlaying) {
       console.log('Now playing:', currentPlaying.title)
     }
@@ -1539,7 +1840,7 @@ export default function Host() {
       setSearchResults([])
       return
     }
-    
+
     try {
       if (replaceSearchMode === 'local') {
         const results = await api(`/api/search?q=${encodeURIComponent(query)}`)
@@ -1557,10 +1858,10 @@ export default function Host() {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current)
     }
-    
+
     const searchDelay = replaceSearchMode === 'local' ? LOCAL_SEARCH_DELAY_MS : KARAOKE_NERDS_SEARCH_DELAY_MS
     searchTimeoutRef.current = setTimeout(() => searchSongs(searchQuery), searchDelay)
-    
+
     return () => {
       if (searchTimeoutRef.current) {
         clearTimeout(searchTimeoutRef.current)
@@ -1592,32 +1893,32 @@ export default function Host() {
 
   async function replaceSong(queueId: number, newTrackId: number) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
-    
+
     const queueItem = queue.find(r => r.id === queueId)
     if (!queueItem) return
-    
+
     setBusy(true)
     try {
-      await api('/api/queue/delete', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ id: queueId }) 
+      await api('/api/queue/delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: queueId })
       })
-      
-      await api('/api/queue', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ 
+
+      await api('/api/queue', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
           trackId: newTrackId,
           requestedBy: queueItem.requested_by
-        }) 
+        })
       })
-      
+
       setReplacingId(null)
       setSearchQuery('')
       setSearchResults([])
       setReplaceSearchMode('local')
-    } finally { 
+    } finally {
       setBusy(false)
       await refreshQueue()
     }
@@ -1625,34 +1926,34 @@ export default function Host() {
 
   async function replaceSongWithKaraokeNerds(queueId: number, track: { title: string; artist: string; url: string }) {
     if (! auth.sessionToken || !auth.isLoggedIn) return
-    
+
     const queueItem = queue.find(r => r.id === queueId)
     if (!queueItem) return
-    
+
     setBusy(true)
     try {
-      await api('/api/queue/delete', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ id: queueId }) 
+      await api('/api/queue/delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: queueId })
       })
-      
-      await api('/api/karaoke-nerds/add', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ 
+
+      await api('/api/karaoke-nerds/add', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
           title: track.title,
           artist: track.artist,
           url: track.url,
           requestedBy: queueItem.requested_by
-        }) 
+        })
       })
-      
+
       setReplacingId(null)
       setSearchQuery('')
       setSearchResults([])
       setReplaceSearchMode('local')
-    } finally { 
+    } finally {
       setBusy(false)
       await refreshQueue()
     }
@@ -1671,7 +1972,7 @@ export default function Host() {
       setManualRequestResults([])
       return
     }
-    
+
     try {
       if (manualRequestMode === 'local') {
         const results = await api(`/api/search?q=${encodeURIComponent(query)}`)
@@ -1691,14 +1992,14 @@ export default function Host() {
       setManualRequestResults([])
       return
     }
-    
+
     if (manualRequestSearchTimeoutRef.current) {
       clearTimeout(manualRequestSearchTimeoutRef.current)
     }
-    
+
     const searchDelay = manualRequestMode === 'local' ? LOCAL_SEARCH_DELAY_MS : KARAOKE_NERDS_SEARCH_DELAY_MS
     manualRequestSearchTimeoutRef.current = setTimeout(() => searchManualRequest(manualRequestQuery), searchDelay)
-    
+
     return () => {
       if (manualRequestSearchTimeoutRef.current) {
         clearTimeout(manualRequestSearchTimeoutRef.current)
@@ -1718,6 +2019,7 @@ export default function Host() {
     setManualRequestMode('local')
     setShowManualSingerSuggestions(false)
     setManualSingerHighlightIndex(0)
+    setManualRequestForSingerId(null)
   }
 
   function selectManualRequestSinger(name: string) {
@@ -1729,7 +2031,7 @@ export default function Host() {
   // Add manual request to queue - Local track
   async function addManualRequestLocal(trackId: number) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
-    
+
     setBusy(true)
     try {
       await api('/api/queue', {
@@ -1740,7 +2042,7 @@ export default function Host() {
           requestedBy: manualRequestName || null
         })
       })
-      
+
       resetManualRequestModal()
     } finally {
       setBusy(false)
@@ -1751,7 +2053,7 @@ export default function Host() {
   // Add manual request to queue - External (Karaoke Nerds) track
   async function addManualRequestExternal(track: { title: string; artist: string; url: string }) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
-    
+
     setBusy(true)
     try {
       await api('/api/karaoke-nerds/add', {
@@ -1764,7 +2066,7 @@ export default function Host() {
           requestedBy: manualRequestName || null
         })
       })
-      
+
       resetManualRequestModal()
     } finally {
       setBusy(false)
@@ -1786,29 +2088,29 @@ export default function Host() {
   // Replace song with custom URL
   async function replaceSongWithUrl(queueId: number, url: string, title: string, artist: string) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
-    
+
     const queueItem = queue.find(r => r.id === queueId)
     if (!queueItem) return
-    
+
     setBusy(true)
     try {
-      await api('/api/queue/delete', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ id: queueId }) 
+      await api('/api/queue/delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: queueId })
       })
-      
-      await api('/api/karaoke-nerds/add', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ 
+
+      await api('/api/karaoke-nerds/add', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
           title: title || 'Video',
           artist: artist || 'Unknown',
           url,
           requestedBy: queueItem.requested_by
-        }) 
+        })
       })
-      
+
       setReplacingId(null)
       setSearchQuery('')
       setSearchResults([])
@@ -1816,7 +2118,7 @@ export default function Host() {
       setReplaceTitle('')
       setReplaceArtist('')
       setReplaceSearchMode('local')
-    } finally { 
+    } finally {
       setBusy(false)
       await refreshQueue()
     }
@@ -1826,7 +2128,7 @@ export default function Host() {
   async function addManualRequestUrl() {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     if (!manualRequestUrl.trim()) return
-    
+
     setBusy(true)
     try {
       await api('/api/karaoke-nerds/add', {
@@ -1839,7 +2141,7 @@ export default function Host() {
           requestedBy: manualRequestName || null
         })
       })
-      
+
       resetManualRequestModal()
     } finally {
       setBusy(false)
@@ -1854,11 +2156,11 @@ export default function Host() {
       alert('Downloads are disabled')
       return
     }
-    
+
     const trackKey = `${url}`
     setDownloadingTrack(trackKey)
     setBusy(true)
-    
+
     try {
       const response = await api('/api/admin/ytdlp/download', {
         method: 'POST',
@@ -1871,7 +2173,7 @@ export default function Host() {
           discId: discId || null
         })
       })
-      
+
       if (response.ok) {
         setBanner(`✔ Downloaded: ${artist} - ${title}`)
         setTimeout(() => setBanner(''), 5000)
@@ -1912,23 +2214,23 @@ function closeDetails(e: React.SyntheticEvent) {
   const handleDrop = async (e: React.DragEvent, targetPosition: number) => {
     e.preventDefault()
     setDragOverPosition(null)
-    
+
     if (!draggedItem || !auth.sessionToken || !auth.isLoggedIn || draggedItem.position === targetPosition) {
       setDraggedItem(null)
       return
     }
-    
+
     setBusy(true)
     try {
-      await api('/api/queue/reorder', { 
-        method: 'POST', 
-        headers, 
-        body: JSON.stringify({ 
-          id: draggedItem. id, 
-          newPosition: targetPosition 
-        }) 
+      await api('/api/queue/reorder', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          id: draggedItem. id,
+          newPosition: targetPosition
+        })
       })
-    } finally { 
+    } finally {
       setBusy(false)
       setDraggedItem(null)
       await refreshQueue()
@@ -1940,9 +2242,9 @@ function closeDetails(e: React.SyntheticEvent) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     explicitStopRef.current = false
     setBusy(true)
-    try { 
+    try {
       await api('/api/player/play', { method:'POST', headers })
-    } finally { 
+    } finally {
       setBusy(false)
       await refreshQueue()
     }
@@ -1960,9 +2262,9 @@ function closeDetails(e: React.SyntheticEvent) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     explicitStopRef. current = false
     setBusy(true)
-    try { 
+    try {
       await api('/api/player/next', { method:'POST', headers })
-    } finally { 
+    } finally {
       setBusy(false)
       await refreshQueue()
     }
@@ -1971,24 +2273,24 @@ function closeDetails(e: React.SyntheticEvent) {
   async function stop() {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     setBusy(true)
-    
+
     try {
       explicitStopRef.current = true
       autoPlayScheduledRef.current = false
-      
+
       if (autoPlayTimerRef.current) {
         clearTimeout(autoPlayTimerRef.current)
         autoPlayTimerRef.current = null
       }
-      
+
       if (songTimerRef.current) {
         clearInterval(songTimerRef.current)
         songTimerRef.current = null
       }
-      
+
       setCurrentTime(0)
       lastWebSocketUpdateRef.current = 0
-      
+
       await api('/api/player/stop', { method: 'POST', headers })
     } finally {
       setBusy(false)
@@ -2061,16 +2363,16 @@ function closeDetails(e: React.SyntheticEvent) {
     }
   }
 
-  const estimatedDuration = actualDuration 
+  const estimatedDuration = actualDuration
     ? actualDuration
-    : (currentPlaying?.duration_ms 
+    : (currentPlaying?.duration_ms
       ? currentPlaying.duration_ms / 1000
       : 210)
 
   return (
     <div className="host-page">
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
 
         @keyframes fadeInUp {
           from { opacity: 0; transform: translateY(20px); }
@@ -2102,6 +2404,21 @@ function closeDetails(e: React.SyntheticEvent) {
           padding: 16px;
           padding-bottom: env(safe-area-inset-bottom, 16px);
           animation: fadeInUp 0.5s ease;
+        }
+
+        .material-symbols-rounded {
+          font-family: 'Material Symbols Rounded';
+          font-weight: normal;
+          font-style: normal;
+          line-height: 1;
+          letter-spacing: normal;
+          text-transform: none;
+          display: inline-block;
+          white-space: nowrap;
+          word-wrap: normal;
+          direction: ltr;
+          -webkit-font-feature-settings: 'liga';
+          -webkit-font-smoothing: antialiased;
         }
 
         .container {
@@ -2186,7 +2503,7 @@ function closeDetails(e: React.SyntheticEvent) {
           background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
           animation: shimmer 2s ease infinite;
         }
-          
+
         @keyframes shimmer {
           0% { transform: translateX(-100%); }
           100% { transform: translateX(100%); }
@@ -2850,7 +3167,7 @@ function closeDetails(e: React.SyntheticEvent) {
           .host-top-panels {
             grid-template-columns: 1fr;
           }
-           
+
           .controls-grid {
             display: flex !important;
             flex-direction: row !important;
@@ -2921,17 +3238,17 @@ function closeDetails(e: React.SyntheticEvent) {
           .controls-grid {
             gap:  4px !important;
           }
-          
+
           .controls-grid .control-btn {
             min-width: 40px ! important;
             width: 40px !important;
             height:  40px !important;
           }
-          
+
           .controls-grid .control-btn span {
             font-size: 18px !important;
           }
-          
+
           .modal { width: 95%; padding: 20px; }
         }
 
@@ -2942,7 +3259,7 @@ function closeDetails(e: React.SyntheticEvent) {
             width: 38px !important;
             height: 38px !important;
           }
-          
+
           .controls-grid .control-btn span {
             font-size:  16px !important;
           }
@@ -3210,14 +3527,29 @@ function closeDetails(e: React.SyntheticEvent) {
                   <span className="stat-pill">
                     {queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length} queued
                   </span>
-                  <button 
-                    className="control-btn primary" 
+                  <button
+                    className="control-btn primary"
                     onClick={() => setShowManualRequest(true)}
                     disabled={busy}
                     title="Manually add a song to the queue"
                     style={{ padding: '8px 12px', fontSize: '16px', lineHeight: 1 }}
                   >
                     ➕
+                  </button>
+                  <button
+                    className="control-btn"
+                    onClick={openHistoryManager}
+                    disabled={busy}
+                    title="Manage singer history import/export"
+                    aria-label="Manage singer history import/export"
+                    style={{ padding: '8px 12px', lineHeight: 1 }}
+                  >
+                    <span
+                      className="material-symbols-rounded"
+                      style={{ fontSize: 22, display: 'block' }}
+                    >
+                      manage_history
+                    </span>
                   </button>
                 </div>
               </div>
@@ -3361,15 +3693,269 @@ function closeDetails(e: React.SyntheticEvent) {
               )}
             </div>
 
+            {/* Singer History Manager Modal */}
+            {historyManagerOpen && (
+              <>
+                <div className="modal-backdrop" onClick={closeHistoryManager} />
+                <div className="modal" role="dialog" aria-modal="true" aria-labelledby="history-manager-title" style={{ maxWidth: 560 }}>
+                  <div className="modal-header">
+                    <h3 id="history-manager-title" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span className="material-symbols-rounded" aria-hidden="true">manage_history</span>
+                      Singer History
+                    </h3>
+                    <button
+                      className="control-btn"
+                      style={{ width: 40, height: 40, padding: 0 }}
+                      onClick={closeHistoryManager}
+                      aria-label="Close singer history manager"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {historyManagerMode === 'menu' && (
+                    <div style={{ display: 'grid', gap: 12 }}>
+                      <button
+                        className="control-btn primary"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setHistoryManagerMode('export')}
+                        style={{ justifyContent: 'center', padding: '14px 18px' }}
+                      >
+                        Export Singer History
+                      </button>
+                      <button
+                        className="control-btn"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setHistoryManagerMode('import')}
+                        style={{ justifyContent: 'center', padding: '14px 18px' }}
+                      >
+                        Import Singer History
+                      </button>
+                    </div>
+                  )}
+
+                  {historyManagerMode === 'export' && (
+                    <div style={{ display: 'grid', gap: 16 }}>
+                      <div style={{ color: 'var(--color-text-secondary)', fontSize: 14 }}>
+                        Choose active singers to export, or export all singer history.
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          className="control-btn primary"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void exportAllSingerHistory()}
+                        >
+                          Export All Singers
+                        </button>
+                        <button
+                          className="control-btn"
+                          type="button"
+                          disabled={busy || historyExportSelectedSingerIds.size === 0}
+                          onClick={() => void exportSelectedSingerHistory()}
+                        >
+                          Export Selected
+                        </button>
+                        <button
+                          className="control-btn"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setHistoryExportSelectedSingerIds(new Set((queueState?.queueOrder ?? []).map((singer) => singer.singerId)))}
+                        >
+                          Select All Active
+                        </button>
+                      </div>
+
+                      {(queueState?.queueOrder.length ?? 0) === 0 ? (
+                        <div style={{ color: 'var(--color-text-secondary)', padding: 16, textAlign: 'center' }}>
+                          No active singers to choose from. Use Export All Singers to export stored history.
+                        </div>
+                      ) : (
+                        <div style={{ display: 'grid', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+                          {(queueState?.queueOrder ?? []).map((singer) => (
+                            <label
+                              key={singer.singerId}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 10,
+                                padding: 12,
+                                borderRadius: 10,
+                                border: '1px solid var(--color-border)',
+                                background: 'var(--color-bg-secondary)',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={historyExportSelectedSingerIds.has(singer.singerId)}
+                                onChange={(event) => {
+                                  setHistoryExportSelectedSingerIds((prev) => {
+                                    const next = new Set(prev)
+                                    if (event.currentTarget.checked) next.add(singer.singerId)
+                                    else next.delete(singer.singerId)
+                                    return next
+                                  })
+                                }}
+                              />
+                              <span style={{ flex: 1, fontWeight: 600 }}>{singer.displayName}</span>
+                              <span style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
+                                {singer.totalSongsSung} sang
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {historyManagerMode === 'import' && (
+                    <div style={{ display: 'grid', gap: 16 }}>
+                      <input
+                        ref={hostHistoryImportInputRef}
+                        type="file"
+                        accept=".kd,application/json"
+                        style={{ display: 'none' }}
+                        onChange={(event) => void loadHistoryImportFile(event.currentTarget.files?.[0])}
+                      />
+                      <div style={{ color: 'var(--color-text-secondary)', fontSize: 14 }}>
+                        Upload a KaraokeDock history file, then choose whether to import every singer or selected singers.
+                      </div>
+                      <button
+                        className="control-btn primary"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => hostHistoryImportInputRef.current?.click()}
+                        style={{ justifyContent: 'center', padding: '12px 16px' }}
+                      >
+                        Upload .kd File
+                      </button>
+
+                      {pendingHistoryImportData && (
+                        <>
+                          <div style={{ display: 'grid', gap: 8 }}>
+                            <strong>Import all singers from this file?</strong>
+                            <div style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>
+                              Found {(pendingHistoryImportData.singers ?? []).length} singer{(pendingHistoryImportData.singers ?? []).length === 1 ? '' : 's'}.
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              <button
+                                className="control-btn primary"
+                                type="button"
+                                disabled={busy || (pendingHistoryImportData.singers ?? []).length === 0}
+                                onClick={() => void importPendingHostSingerHistory(true)}
+                              >
+                                Yes, Import All
+                              </button>
+                              <button
+                                className="control-btn"
+                                type="button"
+                                disabled={busy || historyImportSelectedIndexes.size === 0}
+                                onClick={() => void importPendingHostSingerHistory(false)}
+                              >
+                                Import Selected
+                              </button>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'grid', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+                            {(pendingHistoryImportData.singers ?? []).map((singer, index) => (
+                              <label
+                                key={`${getKdSingerDisplayName(singer, index)}-${index}`}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 10,
+                                  padding: 12,
+                                  borderRadius: 10,
+                                  border: '1px solid var(--color-border)',
+                                  background: 'var(--color-bg-secondary)',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={historyImportSelectedIndexes.has(index)}
+                                  onChange={(event) => {
+                                    setHistoryImportSelectedIndexes((prev) => {
+                                      const next = new Set(prev)
+                                      if (event.currentTarget.checked) next.add(index)
+                                      else next.delete(index)
+                                      return next
+                                    })
+                                  }}
+                                />
+                                <span style={{ flex: 1, fontWeight: 600 }}>{getKdSingerDisplayName(singer, index)}</span>
+                                <span style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
+                                  {singer.songs?.length ?? 0} songs
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
             {/* Singer Detail Modal */}
             {singerModalOpen && (
               <>
                 <div className="modal-backdrop" onClick={closeSingerModal} />
                 <div className="modal" style={{ maxWidth: 600 }}>
                   <div className="modal-header">
-                    <h3 style={{ margin: 0 }}>
-                      🎤 {selectedSingerHistory?.singer.displayName ?? (queueState?.queueOrder.find(s => s.singerId === selectedSingerId)?.displayName ?? 'Singer')} — Queue &amp; History
-                    </h3>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                      <h3 style={{ margin: 0 }}>
+                        🎤 {selectedSingerHistory?.singer.displayName ?? (queueState?.queueOrder.find(s => s.singerId === selectedSingerId)?.displayName ?? 'Singer')} — Queue &amp; History
+                      </h3>
+                      {selectedSingerHistory && (
+                        <button
+                          className="control-btn"
+                          type="button"
+                          title="Edit singer name"
+                          aria-label="Edit singer name"
+                          style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
+                          onClick={openRenameSingerDialog}
+                        >
+                          ✏️
+                        </button>
+                      )}
+                      {selectedSingerHistory && (
+                        <button
+                          className="control-btn"
+                          type="button"
+                          title="Merge another singer into this one"
+                          aria-label="Merge singer"
+                          style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
+                          onClick={() => { setMergeSingerDialogOpen(true); setMergeSingerError(''); setMergeSingerQuery('') }}
+                        >
+                          🔀
+                        </button>
+                      )}
+                      {selectedSingerHistory && (
+                        <button
+                          className="control-btn"
+                          type="button"
+                          title="Add a song to this singer's queue"
+                          aria-label="Add song to queue"
+                          style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
+                          onClick={() => {
+                            setManualRequestForSingerId(selectedSingerId)
+                            setManualRequestName(selectedSingerHistory.singer.displayName)
+                            setManualRequestMode('local')
+                            setManualRequestQuery('')
+                            setManualRequestResults([])
+                            setShowManualRequest(true)
+                          }}
+                        >
+                          ➕
+                        </button>
+                      )}
+                    </div>
                     <button
                       className="control-btn"
                       style={{ width: 40, height: 40, padding: 0 }}
@@ -3574,6 +4160,17 @@ function closeDetails(e: React.SyntheticEvent) {
                                       {song.status === 'skipped' ? '⏭' : '✕'}
                                     </span>
                                   </td>
+                                  <td style={{ padding: '8px 6px', textAlign: 'center', width: 36, borderBottom: '1px solid var(--color-border)' }}>
+                                    <button
+                                      className="control-btn danger"
+                                      style={{ fontSize: 13, padding: '4px 8px', lineHeight: 1 }}
+                                      disabled={busy}
+                                      onClick={() => deleteSongFromHistory(song.queueId)}
+                                      title="Remove this track from singer history"
+                                    >
+                                      ✕
+                                    </button>
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -3595,6 +4192,100 @@ function closeDetails(e: React.SyntheticEvent) {
                     </div>
                   )}
                 </div>
+                {renameSingerDialogOpen && selectedSingerHistory && (
+                  <>
+                    <div className="modal-backdrop" onClick={closeRenameSingerDialog} />
+                    <div className="modal" style={{ maxWidth: 460, zIndex: 1001 }}>
+                      <div className="modal-header">
+                        <h3 style={{ margin: 0 }}>✏️ Edit Singer Name</h3>
+                        <button
+                          className="control-btn"
+                          style={{ width: 40, height: 40, padding: 0 }}
+                          onClick={closeRenameSingerDialog}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                        <div>
+                          <label className="form-label" style={{ marginBottom: 6 }}>Singer Name</label>
+                          <input
+                            className="form-input"
+                            value={editingSingerName}
+                            onChange={e => setEditingSingerName(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                void renameSingerFromModal()
+                              }
+                            }}
+                            placeholder="Enter singer name"
+                            autoFocus
+                            disabled={savingSingerName}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                          <button
+                            className="control-btn"
+                            type="button"
+                            onClick={closeRenameSingerDialog}
+                            disabled={savingSingerName}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            className="control-btn primary"
+                            type="button"
+                            onClick={() => void renameSingerFromModal()}
+                            disabled={savingSingerName || editingSingerName.trim() === selectedSingerHistory.singer.displayName}
+                          >
+                            {savingSingerName ? 'Saving…' : 'Update Name'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+                {mergeSingerDialogOpen && selectedSingerHistory && (
+                  <>
+                    <div className="modal-backdrop" onClick={() => setMergeSingerDialogOpen(false)} />
+                    <div className="modal" style={{ maxWidth: 460, zIndex: 1001 }}>
+                      <div className="modal-header">
+                        <h3 style={{ margin: 0 }}>🔀 Merge Singer</h3>
+                        <button className="control-btn" style={{ width: 40, height: 40, padding: 0 }} onClick={() => setMergeSingerDialogOpen(false)}>✕</button>
+                      </div>
+                      <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>
+                        Merge another singer's history and queue into <strong>{selectedSingerHistory.singer.displayName}</strong>. The other singer will be removed.
+                      </p>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                        <div>
+                          <label className="form-label" style={{ marginBottom: 6 }}>Singer to merge (source)</label>
+                          <input
+                            className="form-input"
+                            list="merge-singer-list"
+                            value={mergeSingerQuery}
+                            onChange={e => { setMergeSingerQuery(e.target.value); setMergeSingerError('') }}
+                            placeholder="Type singer name…"
+                            autoFocus
+                            disabled={mergingSinger}
+                          />
+                          <datalist id="merge-singer-list">
+                            {(queueState?.queueOrder ?? []).filter(s => s.singerId !== selectedSingerId).map(s => (
+                              <option key={s.singerId} value={s.displayName} />
+                            ))}
+                          </datalist>
+                        </div>
+                        {mergeSingerError && <div style={{ color: '#ef4444', fontSize: 13 }}>{mergeSingerError}</div>}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                          <button className="control-btn" type="button" onClick={() => setMergeSingerDialogOpen(false)} disabled={mergingSinger}>Cancel</button>
+                          <button className="control-btn primary" type="button" onClick={() => void mergeSingerIntoTarget()} disabled={mergingSinger || !mergeSingerQuery.trim()}>
+                            {mergingSinger ? 'Merging…' : 'Merge'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -3785,12 +4476,12 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal">
                   <div className="modal-header">
                     <h3 style={{ margin: 0 }}>🎛️ Player Settings</h3>
-                    <button 
-                      style={{ 
-                        background: 'transparent', 
-                        border: 'none', 
-                        color: 'var(--color-text-secondary)', 
-                        fontSize: 24, 
+                    <button
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--color-text-secondary)',
+                        fontSize: 24,
                         cursor: 'pointer',
                         padding: '4px',
                         display: 'flex',
@@ -3808,14 +4499,14 @@ function closeDetails(e: React.SyntheticEvent) {
                       ✕
                     </button>
                   </div>
-                  
+
                   <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
                   {/* Auto-play Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Auto-play Settings</div>
-                    <div style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '12px 0',
                       marginBottom: autoPlay ? '16px' : '0'
@@ -3823,15 +4514,15 @@ function closeDetails(e: React.SyntheticEvent) {
                       <span style={{ fontSize: '15px', fontWeight: '500' }}>Auto-play</span>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                         {/* Toggle Switch with Inline Styles */}
-                        <label style={{ 
-                          position: 'relative', 
-                          display: 'inline-block', 
-                          width: '48px', 
-                          height: '24px' 
+                        <label style={{
+                          position: 'relative',
+                          display: 'inline-block',
+                          width: '48px',
+                          height: '24px'
                         }}>
-                          <input 
-                            type="checkbox" 
-                            checked={autoPlay} 
+                          <input
+                            type="checkbox"
+                            checked={autoPlay}
                             onChange={e => {
                               const newEnabled = e.target.checked
                               setAutoPlay(newEnabled)
@@ -3863,8 +4554,8 @@ function closeDetails(e: React.SyntheticEvent) {
                             }}></span>
                           </span>
                         </label>
-                        <span style={{ 
-                          color: autoPlay ? 'var(--color-success)' : 'var(--color-text-secondary)', 
+                        <span style={{
+                          color: autoPlay ? 'var(--color-success)' : 'var(--color-text-secondary)',
                           fontSize: '14px',
                           fontWeight: '500',
                           minWidth: '60px'
@@ -3873,11 +4564,11 @@ function closeDetails(e: React.SyntheticEvent) {
                         </span>
                       </div>
                     </div>
-                    
+
                     {autoPlay && (
-                      <div style={{ 
-                        padding: '16px', 
-                        background: 'var(--color-bg-secondary)', 
+                      <div style={{
+                        padding: '16px',
+                        background: 'var(--color-bg-secondary)',
                         borderRadius: '12px',
                         border: '1px solid var(--color-border)'
                       }}>
@@ -3886,10 +4577,10 @@ function closeDetails(e: React.SyntheticEvent) {
                         </label>
                         <div className="slider-control">
                           <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>0s</span>
-                          <input 
-                            type="range" 
+                          <input
+                            type="range"
                             className="slider"
-                            value={autoPlayDelay} 
+                            value={autoPlayDelay}
                             onChange={e => {
                               const newDelay = parseInt(e. target.value)
                               setAutoPlayDelay(newDelay)
@@ -3901,8 +4592,8 @@ function closeDetails(e: React.SyntheticEvent) {
                             style={{ margin: '0 12px', flex: 1 }}
                           />
                           <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>60s</span>
-                          <span style={{ 
-                            minWidth: '50px', 
+                          <span style={{
+                            minWidth: '50px',
                             textAlign: 'center',
                             padding: '4px 8px',
                             background: 'var(--color-bg-primary)',
@@ -4046,9 +4737,9 @@ function closeDetails(e: React.SyntheticEvent) {
                   {/* Overlay Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Overlay Settings</div>
-                    <div style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '12px 0',
                       marginBottom: overlayVisible ? '16px' : '0'
@@ -4056,15 +4747,15 @@ function closeDetails(e: React.SyntheticEvent) {
                       <span style={{ fontSize: '15px', fontWeight: '500' }}>Show Overlay</span>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                         {/* Toggle Switch with Inline Styles */}
-                        <label style={{ 
-                          position: 'relative', 
-                          display: 'inline-block', 
-                          width: '48px', 
-                          height: '24px' 
+                        <label style={{
+                          position: 'relative',
+                          display: 'inline-block',
+                          width: '48px',
+                          height: '24px'
                         }}>
-                          <input 
-                            type="checkbox" 
-                            checked={overlayVisible} 
+                          <input
+                            type="checkbox"
+                            checked={overlayVisible}
                             onChange={e => {
                               const newVisible = e.target.checked
                               setOverlayVisible(newVisible)
@@ -4096,8 +4787,8 @@ function closeDetails(e: React.SyntheticEvent) {
                             }}></span>
                           </span>
                         </label>
-                        <span style={{ 
-                          color: overlayVisible ? 'var(--color-success)' : 'var(--color-text-secondary)', 
+                        <span style={{
+                          color: overlayVisible ? 'var(--color-success)' : 'var(--color-text-secondary)',
                           fontSize: '14px',
                           fontWeight: '500',
                           minWidth: '60px'
@@ -4106,11 +4797,11 @@ function closeDetails(e: React.SyntheticEvent) {
                         </span>
                       </div>
                     </div>
-                    
+
                     {overlayVisible && (
-                      <div style={{ 
-                        padding: '16px', 
-                        background: 'var(--color-bg-secondary)', 
+                      <div style={{
+                        padding: '16px',
+                        background: 'var(--color-bg-secondary)',
                         borderRadius: '12px',
                         border: '1px solid var(--color-border)'
                       }}>
@@ -4120,15 +4811,15 @@ function closeDetails(e: React.SyntheticEvent) {
                           </label>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>40px</span>
-                            <input 
-                              type="range" 
-                              value={overlayHeight} 
+                            <input
+                              type="range"
+                              value={overlayHeight}
                               onChange={e => setOverlayHeight(parseInt(e. target.value))}
                               onMouseUp={() => updateOverlaySettings(overlayVisible, overlayHeight, qrSize)}
                               onTouchEnd={() => updateOverlaySettings(overlayVisible, overlayHeight, qrSize)}
                               min="40"
                               max="150"
-                              style={{ 
+                              style={{
                                 flex: 1,
                                 height: '6px',
                                 background: 'var(--color-bg-primary)',
@@ -4138,8 +4829,8 @@ function closeDetails(e: React.SyntheticEvent) {
                               }}
                             />
                             <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>150px</span>
-                            <span style={{ 
-                              minWidth: '50px', 
+                            <span style={{
+                              minWidth: '50px',
                               textAlign: 'center',
                               padding: '4px 8px',
                               background: 'var(--color-bg-primary)',
@@ -4151,22 +4842,22 @@ function closeDetails(e: React.SyntheticEvent) {
                             </span>
                           </div>
                         </div>
-                        
+
                         <div>
                           <label className="form-label" style={{ marginBottom: '12px' }}>
                             QR Code Size: <strong>{qrSize}px</strong>
                           </label>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>40px</span>
-                            <input 
-                              type="range" 
-                              value={qrSize} 
+                            <input
+                              type="range"
+                              value={qrSize}
                               onChange={e => setQrSize(parseInt(e.target.value))}
                               onMouseUp={() => updateOverlaySettings(overlayVisible, overlayHeight, qrSize)}
                               onTouchEnd={() => updateOverlaySettings(overlayVisible, overlayHeight, qrSize)}
                               min="40"
                               max="150"
-                              style={{ 
+                              style={{
                                 flex: 1,
                                 height: '6px',
                                 background: 'var(--color-bg-primary)',
@@ -4176,8 +4867,8 @@ function closeDetails(e: React.SyntheticEvent) {
                               }}
                             />
                             <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>150px</span>
-                            <span style={{ 
-                              minWidth: '50px', 
+                            <span style={{
+                              minWidth: '50px',
                               textAlign: 'center',
                               padding: '4px 8px',
                               background: 'var(--color-bg-primary)',
@@ -4262,6 +4953,41 @@ function closeDetails(e: React.SyntheticEvent) {
                               </span>
                             </div>
                           </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <span style={{ fontSize: '14px', fontWeight: '500' }}>Show Request URL</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                              <label style={{ position: 'relative', display: 'inline-block', width: '48px', height: '24px' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={showRequestsUrl}
+                                  onChange={e => {
+                                    const val = e.target.checked
+                                    setShowRequestsUrl(val)
+                                    updateOverlaySettings(overlayVisible, overlayHeight, qrSize, undefined, showRoller, showQrCode, hideSingerQueue, keepRotationScrollerSingers, val)
+                                  }}
+                                  style={{ opacity: 0, width: 0, height: 0 }}
+                                />
+                                <span style={{
+                                  position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
+                                  backgroundColor: showRequestsUrl ? '#10b981' : '#374151',
+                                  transition: '.4s', borderRadius: '34px'
+                                }}>
+                                  <span style={{
+                                    position: 'absolute', height: '16px', width: '16px',
+                                    left: showRequestsUrl ? '28px' : '4px', bottom: '4px',
+                                    backgroundColor: 'white', transition: '.4s', borderRadius: '50%'
+                                  }}></span>
+                                </span>
+                              </label>
+                              <span style={{
+                                color: showRequestsUrl ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                                fontSize: '14px', fontWeight: '500', minWidth: '60px'
+                              }}>
+                                {showRequestsUrl ? 'Visible' : 'Hidden'}
+                              </span>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -4271,7 +4997,7 @@ function closeDetails(e: React.SyntheticEvent) {
                   {overlayVisible && (
                     <div className="settings-section">
                       <div className="settings-title">Custom Message</div>
-                      <input 
+                      <input
                         type="text"
                         className="form-input"
                         placeholder="Enter custom message for overlay..."
@@ -4286,9 +5012,9 @@ function closeDetails(e: React.SyntheticEvent) {
                         style={{ marginBottom: customMessage ? '12px' : '0' }}
                       />
                       {customMessage && (
-                        <button 
+                        <button
                           className="control-btn"
-                          style={{ 
+                          style={{
                             background: 'transparent',
                             border: '1px solid var(--color-border)',
                             padding: '8px 16px',
@@ -4308,9 +5034,9 @@ function closeDetails(e: React.SyntheticEvent) {
                   {/* Queue Display Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Queue Display</div>
-                    <div style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '12px 0'
                     }}>
@@ -4321,11 +5047,11 @@ function closeDetails(e: React.SyntheticEvent) {
                         </div>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0, marginLeft: '16px' }}>
-                        <label style={{ 
-                          position: 'relative', 
-                          display: 'inline-block', 
-                          width: '48px', 
-                          height: '24px' 
+                        <label style={{
+                          position: 'relative',
+                          display: 'inline-block',
+                          width: '48px',
+                          height: '24px'
                         }}>
                           <input
                             type="checkbox"
@@ -4354,6 +5080,58 @@ function closeDetails(e: React.SyntheticEvent) {
                           fontSize: '14px', fontWeight: '500', minWidth: '60px'
                         }}>
                           {hideSingerQueue ? 'Hidden' : 'Visible'}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '12px 0',
+                      borderTop: '1px solid var(--color-border)'
+                    }}>
+                      <div>
+                        <span style={{ fontSize: '15px', fontWeight: '500' }}>Keep Rotation Singers Visible</span>
+                        <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginTop: '2px' }}>
+                          When singer-only queue mode is enabled, keep rotation singers in the scroller even without queued songs
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0, marginLeft: '16px' }}>
+                        <label style={{
+                          position: 'relative',
+                          display: 'inline-block',
+                          width: '48px',
+                          height: '24px',
+                          opacity: hideSingerQueue ? 1 : 0.5
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={keepRotationScrollerSingers}
+                            disabled={!hideSingerQueue}
+                            onChange={e => {
+                              const val = e.target.checked
+                              setKeepRotationScrollerSingers(val)
+                              updateOverlaySettings(overlayVisible, overlayHeight, qrSize, undefined, showRoller, showQrCode, hideSingerQueue, val)
+                            }}
+                            style={{ opacity: 0, width: 0, height: 0 }}
+                          />
+                          <span style={{
+                            position: 'absolute', cursor: hideSingerQueue ? 'pointer' : 'not-allowed', top: 0, left: 0, right: 0, bottom: 0,
+                            backgroundColor: keepRotationScrollerSingers ? '#10b981' : '#374151',
+                            transition: '.4s', borderRadius: '34px'
+                          }}>
+                            <span style={{
+                              position: 'absolute', height: '16px', width: '16px',
+                              left: keepRotationScrollerSingers ? '28px' : '4px', bottom: '4px',
+                              backgroundColor: 'white', transition: '.4s', borderRadius: '50%'
+                            }}></span>
+                          </span>
+                        </label>
+                        <span style={{
+                          color: keepRotationScrollerSingers ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                          fontSize: '14px', fontWeight: '500', minWidth: '60px'
+                        }}>
+                          {keepRotationScrollerSingers ? 'Shown' : 'Hidden'}
                         </span>
                       </div>
                     </div>
@@ -4436,9 +5214,9 @@ function closeDetails(e: React.SyntheticEvent) {
                     </div>
                   </div>
                   </div>{/* end scrollable body */}
-                  
-                  <button 
-                    className="control-btn primary" 
+
+                  <button
+                    className="control-btn primary"
                     style={{ width: '100%', marginTop: '8px', flexShrink: 0 }}
                     onClick={() => setShowPlayerWindowControl(false)}
                   >
@@ -4799,12 +5577,12 @@ function closeDetails(e: React.SyntheticEvent) {
             {/* Replace Song Modal - CLEANED UP */}
             {replacingId !== null && (
               <>
-                <div className="modal-backdrop" onClick={() => { 
-                  setReplacingId(null); 
-                  setSearchQuery(''); 
-                  setSearchResults([]); 
-                  setReplaceUrl(''); 
-                  setReplaceTitle(''); 
+                <div className="modal-backdrop" onClick={() => {
+                  setReplacingId(null);
+                  setSearchQuery('');
+                  setSearchResults([]);
+                  setReplaceUrl('');
+                  setReplaceTitle('');
                   setReplaceArtist('');
                   setReplaceDiscId('');
                   setReplaceSearchMode('local');
@@ -4812,12 +5590,12 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal">
                   <div className="modal-header">
                     <h3 style={{ margin: 0 }}>🔄 Replace Song</h3>
-                    <button 
-                      style={{ 
-                        background: 'transparent', 
-                        border: 'none', 
-                        color: 'var(--color-text-secondary)', 
-                        fontSize: 24, 
+                    <button
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--color-text-secondary)',
+                        fontSize: 24,
                         cursor: 'pointer',
                         padding: '4px',
                         display: 'flex',
@@ -4830,12 +5608,12 @@ function closeDetails(e: React.SyntheticEvent) {
                       }}
                       onMouseEnter={e => e.currentTarget.style.background = 'var(--color-bg-hover)'}
                       onMouseLeave={e => e.currentTarget. style.background = 'transparent'}
-                      onClick={() => { 
-                        setReplacingId(null); 
-                        setSearchQuery(''); 
-                        setSearchResults([]); 
-                        setReplaceUrl(''); 
-                        setReplaceTitle(''); 
+                      onClick={() => {
+                        setReplacingId(null);
+                        setSearchQuery('');
+                        setSearchResults([]);
+                        setReplaceUrl('');
+                        setReplaceTitle('');
                         setReplaceArtist('');
                         setReplaceDiscId('');
                         setReplaceSearchMode('local');
@@ -4844,11 +5622,11 @@ function closeDetails(e: React.SyntheticEvent) {
                       ✕
                     </button>
                   </div>
-                  
+
                   {/* Search Mode Toggle - Updated to not clear search */}
                   <div className="search-mode-toggle">
                     {localLibraryEnabled && (
-                      <button 
+                      <button
                         className={`mode-button ${replaceSearchMode === 'local' ? 'active' : ''}`}
                         onClick={() => setReplaceSearchMode('local')}
                       >
@@ -4863,7 +5641,7 @@ function closeDetails(e: React.SyntheticEvent) {
                     )}
 
                     {externalLibraryEnabled && (
-                      <button 
+                      <button
                         className={`mode-button ${replaceSearchMode === 'karaoke-nerds' ? 'active karaoke-nerds' : ''}`}
                         onClick={() => setReplaceSearchMode('karaoke-nerds')}
                       >
@@ -4877,7 +5655,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       </button>
                     )}
 
-                    <button 
+                    <button
                       className={`mode-button ${replaceSearchMode === 'url' ? 'active' : ''}`}
                       onClick={() => setReplaceSearchMode('url')}
                     >
@@ -4949,8 +5727,8 @@ function closeDetails(e: React.SyntheticEvent) {
                         />
                       </div>
 
-                      <button 
-                        className="control-btn primary" 
+                      <button
+                        className="control-btn primary"
                         style={{ width: '100%', marginBottom: '16px' }}
                         onClick={() => replaceSongWithUrl(replacingId, replaceUrl, replaceTitle, replaceArtist)}
                         disabled={busy || !replaceUrl.trim() || !replaceTitle.trim()}
@@ -4965,8 +5743,8 @@ function closeDetails(e: React.SyntheticEvent) {
                       </button>
 
                       {allowDownloads && (
-                        <button 
-                          className="control-btn success" 
+                        <button
+                          className="control-btn success"
                           style={{ width: '100%', marginBottom: '16px' }}
                           onClick={() => downloadVideo(replaceUrl, replaceTitle, replaceArtist, undefined, replaceDiscId)} // brand=undefined, discId from user input
                           disabled={busy || !replaceUrl.trim() || !replaceTitle.trim() || downloadingTrack === replaceUrl}
@@ -4994,16 +5772,16 @@ function closeDetails(e: React.SyntheticEvent) {
                           boxSizing: 'border-box'
                         }}
                       />
-                      
+
                       <div className="search-results" style={{
                         minHeight: '200px',
                         maxHeight: '400px',
                         marginBottom: '16px'
                       }}>
                         {searchResults.length === 0 ?  (
-                          <div style={{ 
-                            padding: '40px 20px', 
-                            textAlign: 'center', 
+                          <div style={{
+                            padding: '40px 20px',
+                            textAlign: 'center',
                             color: 'var(--color-text-secondary)',
                             display: 'flex',
                             flexDirection: 'column',
@@ -5047,8 +5825,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                 <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                   {track.artist || 'Unknown'}
                                   {track.disc_id && (
-                                    <span style={{ 
-                                      marginLeft: 8, 
+                                    <span style={{
+                                      marginLeft: 8,
                                       fontSize: 11,
                                       padding: '1px 6px',
                                       background: 'var(--color-bg-primary)',
@@ -5060,9 +5838,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                   )}
                                 </div>
                               </div>
-                              <button 
-                                className="control-btn primary" 
-                                style={{ 
+                              <button
+                                className="control-btn primary"
+                                style={{
                                   padding: '6px 14px',
                                   fontSize: '13px',
                                   minWidth: '70px'
@@ -5091,7 +5869,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                   {track.artist || 'Unknown'}
                                   {track.brand && (
-                                    <span style={{ 
+                                    <span style={{
                                       marginLeft: 8,
                                       fontSize: 11,
                                       padding: '1px 6px',
@@ -5106,9 +5884,9 @@ function closeDetails(e: React.SyntheticEvent) {
                               </div>
                               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                                 {allowDownloads && (
-                                  <button 
-                                    className="control-btn" 
-                                    style={{ 
+                                  <button
+                                    className="control-btn"
+                                    style={{
                                       padding: '6px 14px',
                                       fontSize: '13px',
                                       minWidth: '70px',
@@ -5125,9 +5903,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                     {downloadingTrack === track.url ? '⏳' : '📥'} Download
                                   </button>
                                 )}
-                                <button 
-                                  className="control-btn" 
-                                  style={{ 
+                                <button
+                                  className="control-btn"
+                                  style={{
                                     padding: '6px 14px',
                                     fontSize: '13px',
                                     minWidth: '70px',
@@ -5149,20 +5927,20 @@ function closeDetails(e: React.SyntheticEvent) {
                   </div>
                     </>
                   )}
-                  
-                  <button 
-                    className="control-btn" 
-                    style={{ 
+
+                  <button
+                    className="control-btn"
+                    style={{
                       width: '100%',
                       background: 'transparent',
                       border: '2px solid var(--color-border)'
                     }}
-                    onClick={() => { 
-                      setReplacingId(null); 
-                      setSearchQuery(''); 
-                      setSearchResults([]); 
-                      setReplaceUrl(''); 
-                      setReplaceTitle(''); 
+                    onClick={() => {
+                      setReplacingId(null);
+                      setSearchQuery('');
+                      setSearchResults([]);
+                      setReplaceUrl('');
+                      setReplaceTitle('');
                       setReplaceArtist('');
                       setReplaceDiscId('');
                       setReplaceSearchMode('local');
@@ -5181,12 +5959,12 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal">
                   <div className="modal-header">
                     <h3 style={{ margin: 0 }}>➕ Add to Queue</h3>
-                    <button 
-                      style={{ 
-                        background: 'transparent', 
-                        border: 'none', 
-                        color: 'var(--color-text-secondary)', 
-                        fontSize: 24, 
+                    <button
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--color-text-secondary)',
+                        fontSize: 24,
                         cursor: 'pointer',
                         padding: '4px',
                         display: 'flex',
@@ -5204,8 +5982,14 @@ function closeDetails(e: React.SyntheticEvent) {
                       ✕
                     </button>
                   </div>
-                  
-                  {/* Singer Name Field */}
+
+                  {/* Singer Name Field — hidden when opened from singer modal */}
+                  {manualRequestForSingerId ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(99,102,241,0.1)', borderRadius: 8, border: '1px solid rgba(99,102,241,0.2)' }}>
+                      <span style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>Adding for:</span>
+                      <strong style={{ fontSize: 13 }}>🎤 {manualRequestName}</strong>
+                    </div>
+                  ) : (
                   <div className="form-group" style={{ position: 'relative' }}>
                     <label className="form-label">Singer Name (Optional)</label>
                     <input
@@ -5277,11 +6061,12 @@ function closeDetails(e: React.SyntheticEvent) {
                       </div>
                     )}
                   </div>
+                  )}
 
                   {/* Mode Toggle */}
                   <div className="search-mode-toggle">
                     {localLibraryEnabled && (
-                      <button 
+                      <button
                         className={`mode-button ${manualRequestMode === 'local' ? 'active' : ''}`}
                         onClick={() => setManualRequestMode('local')}
                       >
@@ -5296,7 +6081,7 @@ function closeDetails(e: React.SyntheticEvent) {
                     )}
 
                     {externalLibraryEnabled && (
-                      <button 
+                      <button
                         className={`mode-button ${manualRequestMode === 'external' ? 'active karaoke-nerds' : ''}`}
                         onClick={() => setManualRequestMode('external')}
                       >
@@ -5310,7 +6095,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       </button>
                     )}
 
-                    <button 
+                    <button
                       className={`mode-button ${manualRequestMode === 'url' ? 'active' : ''}`}
                       onClick={() => setManualRequestMode('url')}
                     >
@@ -5382,8 +6167,8 @@ function closeDetails(e: React.SyntheticEvent) {
                         />
                       </div>
 
-                      <button 
-                        className="control-btn primary" 
+                      <button
+                        className="control-btn primary"
                         style={{ width: '100%', marginBottom: '16px' }}
                         onClick={addManualRequestUrl}
                         disabled={busy || !manualRequestUrl.trim() || !manualRequestTitle.trim()}
@@ -5398,8 +6183,8 @@ function closeDetails(e: React.SyntheticEvent) {
                       </button>
 
                       {allowDownloads && (
-                        <button 
-                          className="control-btn success" 
+                        <button
+                          className="control-btn success"
                           style={{ width: '100%', marginBottom: '16px' }}
                           onClick={() => downloadVideo(manualRequestUrl, manualRequestTitle, manualRequestArtist, undefined, manualRequestDiscId)} // brand=undefined, discId from user input
                           disabled={busy || !manualRequestUrl.trim() || !manualRequestTitle.trim() || downloadingTrack === manualRequestUrl}
@@ -5427,16 +6212,16 @@ function closeDetails(e: React.SyntheticEvent) {
                           boxSizing: 'border-box'
                         }}
                       />
-                      
+
                       <div className="search-results" style={{
                         minHeight: '200px',
                         maxHeight: '400px',
                         marginBottom: '16px'
                       }}>
                         {manualRequestResults.length === 0 ? (
-                          <div style={{ 
-                            padding: '40px 20px', 
-                            textAlign: 'center', 
+                          <div style={{
+                            padding: '40px 20px',
+                            textAlign: 'center',
                             color: 'var(--color-text-secondary)',
                             display: 'flex',
                             flexDirection: 'column',
@@ -5480,8 +6265,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                     <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                       {track.artist || 'Unknown'}
                                       {track.disc_id && (
-                                        <span style={{ 
-                                          marginLeft: 8, 
+                                        <span style={{
+                                          marginLeft: 8,
                                           fontSize: 11,
                                           padding: '1px 6px',
                                           background: 'var(--color-bg-primary)',
@@ -5493,9 +6278,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                       )}
                                     </div>
                                   </div>
-                                  <button 
-                                    className="control-btn primary" 
-                                    style={{ 
+                                  <button
+                                    className="control-btn primary"
+                                    style={{
                                       padding: '6px 10px',
                                       fontSize: '13px',
                                       minWidth: '40px'
@@ -5527,7 +6312,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                     <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                       {track.artist || 'Unknown'}
                                       {track.brand && (
-                                        <span style={{ 
+                                        <span style={{
                                           marginLeft: 8,
                                           fontSize: 11,
                                           padding: '1px 6px',
@@ -5542,9 +6327,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                   </div>
                                   <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                                     {allowDownloads && (
-                                      <button 
-                                        className="control-btn" 
-                                        style={{ 
+                                      <button
+                                        className="control-btn"
+                                        style={{
                                           padding: '6px 10px',
                                           fontSize: '13px',
                                           minWidth: '40px',
@@ -5562,9 +6347,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                         {downloadingTrack === track.url ? '⏳' : '📥'}
                                       </button>
                                     )}
-                                    <button 
-                                      className="control-btn" 
-                                      style={{ 
+                                    <button
+                                      className="control-btn"
+                                      style={{
                                         padding: '6px 10px',
                                         fontSize: '13px',
                                         minWidth: '40px',
@@ -5589,10 +6374,10 @@ function closeDetails(e: React.SyntheticEvent) {
                       </div>
                     </>
                   )}
-                  
-                  <button 
-                    className="control-btn" 
-                    style={{ 
+
+                  <button
+                    className="control-btn"
+                    style={{
                       width: '100%',
                       background: 'transparent',
                       border: '2px solid var(--color-border)'
@@ -5615,14 +6400,14 @@ function closeDetails(e: React.SyntheticEvent) {
 function InlineEdit({ value, onSave, disabled }: { value: string; onSave: (v: string) => void; disabled?: boolean }) {
   const [editing, setEditing] = useState(false)
   const [val, setVal] = useState(value)
-  
+
   useEffect(() => setVal(value), [value])
 
   if (! editing) {
     return (
-      <span 
-        onClick={() => !disabled && setEditing(true)} 
-        style={{ 
+      <span
+        onClick={() => !disabled && setEditing(true)}
+        style={{
           cursor: disabled ? 'default' : 'pointer',
           borderRadius: 4,
           textDecoration: 'underline',
@@ -5635,29 +6420,29 @@ function InlineEdit({ value, onSave, disabled }: { value: string; onSave: (v: st
       </span>
     )
   }
-  
+
   return (
     <input
       autoFocus
       value={val}
       onChange={e => setVal(e.target.value)}
-      onBlur={() => { 
-        setEditing(false); 
-        if (val !== value) onSave(val) 
+      onBlur={() => {
+        setEditing(false);
+        if (val !== value) onSave(val)
       }}
-      onKeyDown={(e) => { 
-        if (e.key === 'Enter') { 
-          (e.target as HTMLInputElement). blur() 
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          (e.target as HTMLInputElement). blur()
         } else if (e.key === 'Escape') {
           setVal(value)
           setEditing(false)
         }
       }}
-      style={{ 
-        padding: '2px 6px', 
-        background: 'var(--color-bg-primary)', 
-        border: '1px solid var(--color-accent)', 
-        borderRadius: 4, 
+      style={{
+        padding: '2px 6px',
+        background: 'var(--color-bg-primary)',
+        border: '1px solid var(--color-accent)',
+        borderRadius: 4,
         color: 'var(--color-text-primary)',
         fontSize: 'inherit',
         fontFamily: 'inherit',

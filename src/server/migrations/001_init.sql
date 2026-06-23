@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS libraries (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
   path TEXT NOT NULL UNIQUE,
+  parse_mode TEXT NOT NULL DEFAULT 'discid-artist-title',
   is_enabled BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

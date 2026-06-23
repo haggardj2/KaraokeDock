@@ -14,6 +14,7 @@ import {
   addSingerToRotation,
   removeSingerFromRotation,
   moveSinger,
+  reorderSingers,
   insertSingerNext,
   setRotationSingerStatus,
   createSinger,
@@ -29,7 +30,7 @@ import {
   getRotationState,
 } from '../rotation/rotationService.js';
 import { validateSessionInfo } from '../db.js';
-import { resortQueueByRotation, broadcastQueueUpdate } from './api.js';
+import { applyManualSingerQueueOrder, resortQueueByRotation, broadcastQueueUpdate } from './api.js';
 
 export const rotationRouter = express.Router();
 
@@ -275,6 +276,35 @@ rotationRouter.patch('/rotations/:id/singers/:singerId/position', adminGuard, ah
   }
   await moveSinger(rotationId, singerId, position);
   await resortQueueByRotation();
+  broadcastQueueUpdate('queue.updated');
+  res.json({ ok: true });
+}));
+
+/** PATCH /api/rotations/:id/singers/reorder — atomically reorder active singers */
+rotationRouter.patch('/rotations/:id/singers/reorder', adminGuard, ah(async (req, res) => {
+  const rotationId = parseBigInt(req.params.id, res);
+  if (rotationId === null) return;
+
+  const orderedSingerIds = Array.isArray(req.body?.orderedSingerIds)
+    ? req.body.orderedSingerIds
+    : [];
+  const parsedSingerIds: bigint[] = [];
+  for (const rawId of orderedSingerIds) {
+    try {
+      const id = BigInt(String(rawId));
+      if (id > 0n) parsedSingerIds.push(id);
+    } catch {
+      res.status(400).json({ error: 'orderedSingerIds must contain numeric singer IDs' });
+      return;
+    }
+  }
+  if (parsedSingerIds.length === 0) {
+    res.status(400).json({ error: 'orderedSingerIds is required' });
+    return;
+  }
+
+  await reorderSingers(rotationId, parsedSingerIds);
+  await applyManualSingerQueueOrder(parsedSingerIds.map((id) => id.toString()));
   broadcastQueueUpdate('queue.updated');
   res.json({ ok: true });
 }));

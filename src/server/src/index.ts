@@ -130,7 +130,7 @@ app.use(cors(corsOptions));
 // Global rate limiter: 1000 requests per 15 minutes per IP
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // Limit each IP to 1000 requests per windowMs (~66 req/min)
+  max: 5000, // Shared Wi-Fi guests can easily exceed the old global cap during active shows
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers

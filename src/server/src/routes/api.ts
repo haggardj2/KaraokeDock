@@ -31,7 +31,11 @@ import {
   extractAudioMetadata
 } from '../scanner';
 import { resolveExistingMediaPath } from './media';
-import { parseFromFilename } from '../parsing';
+import {
+  DEFAULT_LIBRARY_PARSE_MODE,
+  isLibraryParseMode,
+  type LibraryParseMode,
+} from '../parsing';
 import QRCode from 'qrcode';
 import { searchKaraokeNerds } from '../karaoke-nerds';
 import crypto from 'crypto';
@@ -45,7 +49,7 @@ import {
   syncDownloadScanTaskState,
   syncBreakMusicScanTaskState,
 } from '../backgroundTasks';
-import { findOrCreateSinger, ensureSingerInActiveRotation } from '../queueIdentity.js';
+import { findOrCreateSinger, ensureSingerInActiveRotation, normalizeSingerName, normalizeSingerUuid } from '../queueIdentity.js';
 import { parseZipMediaRef } from '../zipMediaRef.js';
 import {
   getQueueState,
@@ -54,6 +58,10 @@ import {
   reorderSingerQueue,
 } from '../queueState.js';
 import { recalculateSingerStats } from '../singerStats.js';
+import {
+  sortQueuedRotationItems,
+  type QueueSortBasePolicy,
+} from '../rotation/queueSort';
 import {
   getLibraryScanStatus,
   LibraryScanAlreadyInProgressError,
@@ -80,6 +88,7 @@ interface PublicSettings {
   'libraries.external_enabled': boolean;
   'requests.acceptance': 'local' | 'external' | 'disabled';
   'requests.local_browse_enabled': boolean;
+  'requests.url': string;
 }
 
 const DEFAULT_BREAK_PLAYLISTS_FOLDER = '/media/playlists';
@@ -158,6 +167,289 @@ const validateKeyAdjustment = (keyAdjustment: number | null): boolean => {
   if (keyAdjustment === null || keyAdjustment === undefined) return true; // null/undefined is valid (defaults to 0)
   return keyAdjustment >= -6 && keyAdjustment <= 6;
 };
+
+type SingerHistoryKdTrackRef =
+  | { type: 'local'; trackId: number }
+  | { type: 'external'; url: string; source?: string | null };
+
+type SingerHistoryKdSong = {
+  title: string | null;
+  artist: string | null;
+  status: string;
+  keyAdjustment: number;
+  requestedAt: string | null;
+  completedAt: string | null;
+  track: SingerHistoryKdTrackRef;
+};
+
+type SingerHistoryKdSinger = {
+  singer?: {
+    id?: string;
+    uuid?: string;
+    displayName: string;
+    normalizedName?: string;
+    totalSongsSung?: number;
+    lastSangAt?: string | null;
+  };
+  songs: SingerHistoryKdSong[];
+};
+
+type SingerHistoryKdFile = {
+  format: 'karaokedock.singer-history';
+  version: 1;
+  exportedAt: string;
+  singers: SingerHistoryKdSinger[];
+};
+
+function toSafeFilename(value: string): string {
+  return value.trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'singer-history';
+}
+
+function isSingerHistoryKdFile(value: any): value is SingerHistoryKdFile {
+  return value?.format === 'karaokedock.singer-history' && value?.version === 1 && Array.isArray(value?.singers);
+}
+
+async function resolveSingerForRequester(name: string, singerUuid?: string | null): Promise<{ id: string; publicUuid: string; displayName: string; normalizedName: string } | null> {
+  const publicUuid = normalizeSingerUuid(singerUuid);
+  if (publicUuid) {
+    const singerRes = await query<{ id: string; public_uuid: string; display_name: string; normalized_name: string }>(
+      `SELECT id, public_uuid, display_name, normalized_name FROM singers WHERE public_uuid = $1 LIMIT 1`,
+      [publicUuid],
+    );
+    if (singerRes.rows.length > 0) {
+      return {
+        id: String(singerRes.rows[0].id),
+        publicUuid: singerRes.rows[0].public_uuid,
+        displayName: singerRes.rows[0].display_name,
+        normalizedName: singerRes.rows[0].normalized_name,
+      };
+    }
+  }
+
+  const norm = normalizeSingerName(name);
+  if (!norm) return null;
+  const singerRes = await query<{ id: string; public_uuid: string; display_name: string; normalized_name: string }>(
+    `SELECT id, public_uuid, display_name, normalized_name FROM singers WHERE normalized_name = $1 LIMIT 1`,
+    [norm],
+  );
+  if (singerRes.rows.length > 0) {
+    return {
+      id: String(singerRes.rows[0].id),
+      publicUuid: singerRes.rows[0].public_uuid,
+      displayName: singerRes.rows[0].display_name,
+      normalizedName: singerRes.rows[0].normalized_name,
+    };
+  }
+  return null;
+}
+
+async function updateActiveQueueRequesterName(singerId: bigint, displayName: string): Promise<void> {
+  await query(
+    `UPDATE queue
+        SET requested_by = $1
+      WHERE singer_id = $2
+        AND status IN ('queued', 'playing')`,
+    [displayName, singerId],
+  );
+}
+
+async function buildSingerHistoryKdFile(options: {
+  singerIds?: string[];
+  requesterName?: string;
+  singerUuid?: string | null;
+  includeSingerInfo: boolean;
+}): Promise<SingerHistoryKdFile> {
+  const params: any[] = [];
+  let whereClause = `q.status IN ('queued', 'playing', 'done', 'skipped', 'removed', 'cancelled')`;
+
+  if (options.singerIds && options.singerIds.length > 0) {
+    params.push(options.singerIds);
+    whereClause += ` AND q.singer_id = ANY($${params.length}::bigint[])`;
+  } else if (options.requesterName) {
+    const norm = normalizeSingerName(options.requesterName);
+    const singer = await resolveSingerForRequester(options.requesterName, options.singerUuid);
+    if (singer) {
+      params.push(singer.id, norm);
+      whereClause += ` AND (q.singer_id = $${params.length - 1} OR LOWER(TRIM(q.requested_by)) = $${params.length})`;
+    } else {
+      params.push(norm);
+      whereClause += ` AND LOWER(TRIM(q.requested_by)) = $${params.length}`;
+    }
+  }
+
+  const rows = await query<{
+    queue_id: string;
+    track_id: string;
+    requested_by: string | null;
+    singer_id: string | null;
+    status: string;
+    key_adjustment: number | null;
+    created_at: Date | null;
+    finished_at: Date | null;
+    title: string | null;
+    artist: string | null;
+    external_url: string | null;
+    source: string | null;
+    display_name: string | null;
+    public_uuid: string | null;
+    normalized_name: string | null;
+    total_songs_sung: string | number | null;
+    last_sang_at: Date | null;
+  }>(
+    `SELECT q.id AS queue_id,
+            q.track_id,
+            q.requested_by,
+            q.singer_id,
+            q.status,
+            q.key_adjustment,
+            q.created_at,
+            q.finished_at,
+            t.title,
+            t.external_url,
+            t.source,
+            a.name AS artist,
+            s.display_name,
+            s.public_uuid,
+            s.normalized_name,
+            s.total_songs_sung,
+            s.last_sang_at
+       FROM queue q
+       JOIN tracks t ON t.id = q.track_id
+       LEFT JOIN artists a ON a.id = t.artist_id
+       LEFT JOIN singers s ON s.id = q.singer_id
+      WHERE ${whereClause}
+      ORDER BY COALESCE(s.display_name, q.requested_by),
+               CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+               q.position NULLS LAST,
+               q.finished_at NULLS LAST,
+               q.created_at`,
+    params,
+  );
+
+  const singers = new Map<string, SingerHistoryKdSinger>();
+  for (const row of rows.rows) {
+    const displayName = row.display_name || row.requested_by || options.requesterName || 'Unknown Singer';
+    const normalizedName = row.normalized_name || normalizeSingerName(displayName);
+    const singerKey = row.singer_id ? `id:${row.singer_id}` : `name:${normalizedName}`;
+    if (!singers.has(singerKey)) {
+      singers.set(singerKey, {
+        singer: options.includeSingerInfo
+          ? {
+              id: row.singer_id ? String(row.singer_id) : undefined,
+              uuid: row.public_uuid ?? undefined,
+              displayName,
+              normalizedName,
+              totalSongsSung: row.total_songs_sung != null ? Number(row.total_songs_sung) : undefined,
+              lastSangAt: row.last_sang_at ? new Date(row.last_sang_at).toISOString() : null,
+            }
+          : undefined,
+        songs: [],
+      });
+    }
+    const trackRef: SingerHistoryKdTrackRef =
+      row.external_url
+        ? { type: 'external', url: row.external_url, source: row.source }
+        : { type: 'local', trackId: Number(row.track_id) };
+    singers.get(singerKey)!.songs.push({
+      title: row.title,
+      artist: row.artist,
+      status: row.status,
+      keyAdjustment: Number(row.key_adjustment ?? 0),
+      requestedAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+      completedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
+      track: trackRef,
+    });
+  }
+
+  return {
+    format: 'karaokedock.singer-history',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    singers: Array.from(singers.values()),
+  };
+}
+
+async function resolveKdTrack(song: SingerHistoryKdSong): Promise<number | null> {
+  if (song.track?.type === 'local') {
+    const trackId = Number(song.track.trackId);
+    if (!Number.isFinite(trackId)) return null;
+    const found = await query<{ id: number }>(`SELECT id FROM tracks WHERE id = $1 LIMIT 1`, [trackId]);
+    return found.rows.length > 0 ? trackId : null;
+  }
+
+  if (song.track?.type === 'external' && song.track.url) {
+    const existing = await query<{ id: number }>(
+      `SELECT id FROM tracks WHERE external_url = $1 LIMIT 1`,
+      [song.track.url],
+    );
+    if (existing.rows.length > 0) return Number(existing.rows[0].id);
+    const { upsertArtist, upsertExternalTrack } = await import('../db');
+    const artistId = song.artist ? await upsertArtist(song.artist) : null;
+    const track = await upsertExternalTrack({
+      artist_id: artistId,
+      title: song.title || song.track.url,
+      external_url: song.track.url,
+      source: song.track.source || 'karaoke-nerds',
+      duration_ms: null,
+    });
+    return Number(track.id);
+  }
+
+  return null;
+}
+
+async function importSingerHistoryKdFile(file: SingerHistoryKdFile, options: { requesterName?: string; singerUuid?: string | null }): Promise<{
+  imported: number;
+  skipped: number;
+}> {
+  let imported = 0;
+  let skipped = 0;
+
+  for (const singerEntry of file.singers) {
+    const displayName = options.requesterName || singerEntry.singer?.displayName?.trim();
+    if (!displayName) {
+      skipped += singerEntry.songs?.length ?? 0;
+      continue;
+    }
+    const singerUuid = options.singerUuid || singerEntry.singer?.uuid || null;
+    const singer = await findOrCreateSinger(displayName, singerUuid);
+    await ensureSingerInActiveRotation(singer.id);
+    for (const song of singerEntry.songs || []) {
+      const trackId = await resolveKdTrack(song);
+      if (!trackId) {
+        skipped++;
+        continue;
+      }
+      const status = ['queued', 'done', 'skipped', 'removed', 'cancelled'].includes(song.status)
+        ? song.status
+        : song.status === 'playing'
+          ? 'queued'
+          : 'done';
+      const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
+      const position = (posr.rows[0] as any).p;
+      await query(
+        `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment, created_at, finished_at)
+         VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW()), $8::timestamptz)`,
+        [
+          trackId,
+          displayName,
+          singer.id,
+          status,
+          position,
+          Number(song.keyAdjustment ?? 0),
+          song.requestedAt,
+          song.completedAt,
+        ],
+      );
+      imported++;
+    }
+    await recalculateSingerStats(String(singer.id)).catch((err) =>
+      console.error('Failed to recalculate singer stats after history import for singer', singer.id, err),
+    );
+  }
+
+  return { imported, skipped };
+}
 
 const MAX_OIDC_USERNAME_LENGTH = 120;
 const MAX_OIDC_USERNAME_ATTEMPTS = 100;
@@ -1189,6 +1481,22 @@ async function getOidcFrontendUrl(req: express.Request): Promise<string> {
   return `${proto}://${host}`;
 }
 
+function getPublicWebAppUrl(req: express.Request): string {
+  const webAppUrl = process.env.WEB_APP_URL?.trim();
+  if (webAppUrl) return webAppUrl.replace(/\/$/, '');
+
+  const origins = process.env.ORIGIN?.split(',').map((o: string) => o.trim()).filter(Boolean);
+  if (origins?.length) return origins[0].replace(/\/$/, '');
+
+  const host = req.headers.host || 'localhost:5173';
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  return `${proto}://${host}`.replace(/\/$/, '');
+}
+
+function getPublicRequestsUrl(req: express.Request): string {
+  return `${getPublicWebAppUrl(req)}/requests`;
+}
+
 function sseSend(res: express.Response, event: string, data: any) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -1222,10 +1530,17 @@ apiRouter.get('/scan/events', ah(async (req, res) => {
 apiRouter.get(
   '/libraries',
   ah(async (_req, res) => {
-    const r = await query<{ id: number; name: string; path: string }>(
-      `SELECT id, name, path FROM libraries ORDER BY id`
+    const r = await query<{ id: number; name: string; path: string; parse_mode: LibraryParseMode | null }>(
+      `SELECT id, name, path, parse_mode FROM libraries ORDER BY id`
     );
-    res.json(r.rows);
+    res.json(
+      r.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        path: row.path,
+        parseMode: row.parse_mode ?? DEFAULT_LIBRARY_PARSE_MODE,
+      }))
+    );
   })
 );
 
@@ -1235,8 +1550,14 @@ apiRouter.post(
   ah(async (req, res) => {
     const name = String(req.body?.name ?? '').trim();
     const libPath = String(req.body?.path ?? '').trim();
+    const parseMode = req.body?.parseMode ?? DEFAULT_LIBRARY_PARSE_MODE;
     if (!name || !libPath) return res.status(400).send('name and path required');
-    await query(`INSERT INTO libraries (name, path) VALUES ($1, $2)`, [name, libPath]);
+    if (!isLibraryParseMode(parseMode)) return res.status(400).send('invalid parse mode');
+    await query(`INSERT INTO libraries (name, path, parse_mode) VALUES ($1, $2, $3)`, [
+      name,
+      libPath,
+      parseMode,
+    ]);
     res.json({ ok: true });
   })
 );
@@ -1400,11 +1721,12 @@ apiRouter.get(
       // Priority order:
       // 1. Exact title match (highest)
       // 2. Title starts with query
-      // 3. Exact artist match
-      // 4. Artist starts with query
-      // 5. Full-text search match in title
-      // 6. Partial match in title or artist
-      // 7. Disc ID match
+      // 3. Title contains query
+      // 4. Full-text search match in title
+      // 5. Exact artist match
+      // 6. Artist starts with query
+      // 7. Artist contains query
+      // 8. Disc ID match
       const searchResults = await query(
         `
         WITH ranked_results AS (
@@ -1419,14 +1741,14 @@ apiRouter.get(
                    WHEN LOWER(t.title) = LOWER($1) THEN 1
                    -- Title starts with query
                    WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 2
-                   -- Exact artist match
-                   WHEN LOWER(a.name) = LOWER($1) THEN 3
-                   -- Artist starts with query
-                   WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 4
-                   -- Full-text search in title
-                   WHEN to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1) THEN 5
                    -- Contains query in title
-                   WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 6
+                   WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 3
+                   -- Full-text search in title
+                   WHEN to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1) THEN 4
+                   -- Exact artist match
+                   WHEN LOWER(a.name) = LOWER($1) THEN 5
+                   -- Artist starts with query
+                   WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 6
                    -- Contains query in artist
                    WHEN LOWER(a.name) LIKE '%' || LOWER($1) || '%' THEN 7
                    -- Disc ID match
@@ -1472,6 +1794,53 @@ apiRouter.get(
         queryParams
       );
       return res.json(like.rows);
+    }
+  })
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/search/suggestions — fuzzy "did you mean?" suggestions
+// Returns up to 5 tracks that closely match the query using word-level search,
+// intended for use when the main search returns few/no results.
+// ---------------------------------------------------------------------------
+apiRouter.get(
+  '/search/suggestions',
+  searchLimiter,
+  ah(async (req, res) => {
+    if (!(await isLocalLibraryEnabled())) return res.json([]);
+    const q = String(req.query.q ?? '').trim();
+    if (q.length < 2) return res.json([]);
+
+    // Split query into words and search for each independently, rank by match count
+    const words = q.toLowerCase().split(/\s+/).filter(w => w.length >= 2).slice(0, 5);
+    if (words.length === 0) return res.json([]);
+
+    // Build per-word LIKE conditions and a score expression
+    const params: any[] = [];
+    const wordConds: string[] = [];
+    const scoreTerms: string[] = [];
+    for (const word of words) {
+      params.push(`%${word}%`);
+      const p = `$${params.length}`;
+      wordConds.push(`(LOWER(t.title) LIKE ${p} OR LOWER(COALESCE(a.name,'')) LIKE ${p})`);
+      scoreTerms.push(`(CASE WHEN LOWER(t.title) LIKE ${p} OR LOWER(COALESCE(a.name,'')) LIKE ${p} THEN 1 ELSE 0 END)`);
+    }
+
+    try {
+      const result = await query(
+        `SELECT t.id, t.title, t.disc_id, t.kind, a.name AS artist,
+                (${scoreTerms.join(' + ')}) AS score
+           FROM tracks t
+           LEFT JOIN artists a ON a.id = t.artist_id
+          WHERE (t.source IS NULL OR t.source = 'local')
+            AND (${wordConds.join(' OR ')})
+          ORDER BY score DESC, LOWER(COALESCE(a.name,'')), LOWER(COALESCE(t.title,''))
+          LIMIT 5`,
+        params,
+      );
+      res.json(result.rows);
+    } catch {
+      res.json([]);
     }
   })
 );
@@ -1700,6 +2069,7 @@ apiRouter.post(
     }
     
     const { title, artist, url, requestedBy, keyAdjustment } = req.body;
+    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
     
     if (!title || !url) {
       return res.status(400).send('title and url required');
@@ -1746,7 +2116,7 @@ apiRouter.post(
     let kn_singerId: bigint | null = null;
     if (requestedBy && requestedBy.trim()) {
       try {
-        const singer = await findOrCreateSinger(requestedBy);
+        const singer = await findOrCreateSinger(requestedBy, singerUuid);
         kn_singerId = singer.id;
         await ensureSingerInActiveRotation(kn_singerId);
       } catch (err) {
@@ -1940,12 +2310,13 @@ export async function resortQueueByRotation(): Promise<void> {
   try {
     // Get the active rotation type
     const rotRes = await query<any>(
-      `SELECT id, type, config FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`
+      `SELECT id, type, config, current_round FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`
     );
     if (rotRes.rows.length === 0) return;
 
     const rotRow = rotRes.rows[0];
     const rotationType: string = (rotRow.config?.type) || rotRow.type || 'strict_round_robin';
+    const currentRound = Number(rotRow.current_round) > 0 ? Number(rotRow.current_round) : 1;
 
     // For manual mode, never touch the order
     if (rotationType === 'manual') return;
@@ -1966,20 +2337,15 @@ export async function resortQueueByRotation(): Promise<void> {
     );
     if (queueRes.rows.length <= 1) return;
 
-    // Count songs already played (done or currently playing) per singer — determines their "round".
-    // Use singer_id where available, fall back to requested_by.
-    const doneRes = await query<{ singer_key: string; count: string }>(
-      `SELECT
-         COALESCE(singer_id::text, LOWER(COALESCE(requested_by, ''))) AS singer_key,
-         COUNT(*) AS count
-       FROM queue
-       WHERE status IN ('done', 'playing')
-       GROUP BY singer_key`
+    const playingRes = await query<{ singer_id: string | null; requested_by: string | null }>(
+      `SELECT singer_id, requested_by FROM queue WHERE status = 'playing' ORDER BY started_at DESC NULLS LAST, id DESC LIMIT 1`
     );
-    const doneCounts = new Map<string, number>();
-    for (const row of doneRes.rows) {
-      doneCounts.set(row.singer_key, Number(row.count));
-    }
+    const currentlyPlayingSingerKey =
+      playingRes.rows.length > 0
+        ? (playingRes.rows[0].singer_id
+            ? String(playingRes.rows[0].singer_id)
+            : `name:${normalizeSingerName(playingRes.rows[0].requested_by ?? '')}`)
+        : null;
 
     // Get singer positions from the rotation (used as tiebreaker within a round).
     // Join via singer_id for precision.
@@ -1988,10 +2354,12 @@ export async function resortQueueByRotation(): Promise<void> {
       display_name: string;
       position: number;
       last_sang_at: Date | null;
+      current_round_joined: number;
+      last_round_sang: number | null;
     }>(
-      `SELECT s.id AS singer_id, s.display_name, rs.position, rs.last_sang_at
-         FROM rotation_singers rs
-         JOIN singers s ON s.id = rs.singer_id
+      `SELECT s.id AS singer_id, s.display_name, rs.position, rs.last_sang_at, rs.current_round_joined, rs.last_round_sang
+        FROM rotation_singers rs
+        JOIN singers s ON s.id = rs.singer_id
         WHERE rs.rotation_id = $1 AND rs.status = 'active'
         ORDER BY rs.position`,
       [rotRow.id]
@@ -1999,12 +2367,17 @@ export async function resortQueueByRotation(): Promise<void> {
 
     // Build lookup: singer_id string → { position, lastSangAt }
     // Also keep a fallback lookup by lowercase display_name for old queue rows without singer_id
-    const singerInfoById = new Map<string, { position: number; lastSangAt: Date | null }>();
-    const singerInfoByName = new Map<string, { position: number; lastSangAt: Date | null }>();
+    const singerInfoById = new Map<string, { position: number; lastSangAt: Date | null; currentRoundJoined: number; lastRoundSang: number | null }>();
+    const singerInfoByName = new Map<string, { position: number; lastSangAt: Date | null; currentRoundJoined: number; lastRoundSang: number | null }>();
     for (const row of singerRes.rows) {
-      const info = { position: row.position, lastSangAt: row.last_sang_at };
+      const info = {
+        position: row.position,
+        lastSangAt: row.last_sang_at,
+        currentRoundJoined: Number(row.current_round_joined) > 0 ? Number(row.current_round_joined) : 1,
+        lastRoundSang: row.last_round_sang === null ? null : Number(row.last_round_sang),
+      };
       singerInfoById.set(String(row.singer_id), info);
-      singerInfoByName.set(row.display_name.toLowerCase(), info);
+      singerInfoByName.set(normalizeSingerName(row.display_name), info);
     }
 
     // For singers in the queue but not yet in rotation_singers, assign them
@@ -2017,10 +2390,10 @@ export async function resortQueueByRotation(): Promise<void> {
 
     // Helper: derive a stable singer key and info for a queue row
     const getSingerKey = (row: { id: number; requested_by: string | null; singer_id: string | null }) => {
-      return row.singer_id ? row.singer_id : `name:${(row.requested_by ?? '').toLowerCase()}`;
+      return row.singer_id ? row.singer_id : `name:${normalizeSingerName(row.requested_by ?? '')}`;
     };
 
-    const resolvedInfo = new Map<string, { position: number; lastSangAt: Date | null }>();
+    const resolvedInfo = new Map<string, { position: number; lastSangAt: Date | null; currentRoundJoined: number; lastRoundSang: number | null }>();
     for (const item of queueRes.rows) {
       const key = getSingerKey(item);
       if (resolvedInfo.has(key)) continue;
@@ -2028,11 +2401,16 @@ export async function resortQueueByRotation(): Promise<void> {
       if (item.singer_id && singerInfoById.has(item.singer_id)) {
         resolvedInfo.set(key, singerInfoById.get(item.singer_id)!);
       } else {
-        const name = (item.requested_by ?? '').toLowerCase();
+        const name = normalizeSingerName(item.requested_by ?? '');
         if (name && singerInfoByName.has(name)) {
           resolvedInfo.set(key, singerInfoByName.get(name)!);
         } else {
-          resolvedInfo.set(key, { position: nextPos++, lastSangAt: null });
+          resolvedInfo.set(key, {
+            position: nextPos++,
+            lastSangAt: null,
+            currentRoundJoined: currentRound,
+            lastRoundSang: null,
+          });
         }
       }
     }
@@ -2048,66 +2426,71 @@ export async function resortQueueByRotation(): Promise<void> {
     }
 
     // Assign a (round, tiebreaker) to every queued item
-    type SortItem = {
+    const sortableInputs: Array<{
+      id: number;
       item: { id: number; requested_by: string | null; singer_id: string | null; position: number };
-      round: number;
       origPos: number;
       rotPos: number;
       lastSangAt: Date | null;
-    };
-    const sortable: SortItem[] = [];
+      currentRoundJoined: number;
+      lastRoundSang: number | null;
+      isCurrentlyPlaying: boolean;
+      songIndex: number;
+    }> = [];
 
     for (const [key, items] of bySinger) {
       // Build the doneCounts key using the same logic as the SQL query:
       // singer_id::text when available, else LOWER(requested_by).
       const doneKey = items[0].singer_id
         ? items[0].singer_id
-        : (items[0].requested_by ?? '').toLowerCase();
-      const doneCount = doneCounts.get(doneKey) ?? 0;
-      const info = resolvedInfo.get(key) ?? { position: Number.MAX_SAFE_INTEGER, lastSangAt: null };
+        : `name:${normalizeSingerName(items[0].requested_by ?? '')}`;
+      const info = resolvedInfo.get(key) ?? {
+        position: Number.MAX_SAFE_INTEGER,
+        lastSangAt: null,
+        currentRoundJoined: currentRound,
+        lastRoundSang: null,
+      };
       items.forEach((item, songIndex) => {
-        sortable.push({
+        sortableInputs.push({
+          id: item.id,
           item,
-          // Each of a singer's queued songs belongs to a different round so that
-          // round-robin and signup_order policies correctly interleave singers.
-          // Round = songs already done + 1 (first pending) + songIndex (second, third…).
-          round: doneCount + 1 + songIndex,
           origPos: item.position,
           rotPos: info.position,
           lastSangAt: info.lastSangAt,
+          currentRoundJoined: info.currentRoundJoined,
+          lastRoundSang: info.lastRoundSang,
+          isCurrentlyPlaying: currentlyPlayingSingerKey === doneKey,
+          songIndex,
         });
       });
     }
 
     // Determine the effective base policy for sort tiebreaking
-    const basePolicy: string =
+    const basePolicy: QueueSortBasePolicy =
       rotationType === 'hybrid'
-        ? ((rotRow.config?.basePolicy as string | undefined) ?? 'strict_round_robin')
-        : rotationType;
+        ? (rotRow.config?.basePolicy === 'least_recently_sung' || rotRow.config?.basePolicy === 'signup_order'
+            ? rotRow.config.basePolicy
+            : 'strict_round_robin')
+        : (rotationType === 'least_recently_sung' || rotationType === 'signup_order'
+            ? rotationType
+            : 'strict_round_robin');
 
-    if (basePolicy === 'least_recently_sung') {
-      sortable.sort((a, b) => {
-        if (a.round !== b.round) return a.round - b.round;
-        // Never sung → first
-        if (a.lastSangAt === null && b.lastSangAt !== null) return -1;
-        if (a.lastSangAt !== null && b.lastSangAt === null) return 1;
-        if (a.lastSangAt !== null && b.lastSangAt !== null) {
-          const diff = a.lastSangAt.getTime() - b.lastSangAt.getTime();
-          if (diff !== 0) return diff;
-        }
-        return a.origPos - b.origPos;
-      });
-    } else {
-      // strict_round_robin, signup_order, hybrid (non-LRS base)
-      // Within the same round, sort by rotation position so that the configured
-      // singer order is respected (not the order they happened to submit songs).
-      sortable.sort((a, b) => {
-        if (a.round !== b.round) return a.round - b.round;
-        return a.rotPos - b.rotPos;
-      });
-    }
+    const sortedOrder = sortQueuedRotationItems(
+      sortableInputs.map((item) => ({
+        id: item.id,
+        origPos: item.origPos,
+        rotPos: item.rotPos,
+        lastSangAt: item.lastSangAt,
+        currentRoundJoined: item.currentRoundJoined,
+        lastRoundSang: item.lastRoundSang,
+        isCurrentlyPlaying: item.isCurrentlyPlaying,
+        songIndex: item.songIndex,
+      })),
+      { currentRound, basePolicy }
+    );
 
-    const sorted = sortable.map((s) => s.item);
+    const itemById = new Map(sortableInputs.map((item) => [item.id, item.item]));
+    const sorted = sortedOrder.map((s) => itemById.get(s.id)!).filter(Boolean);
 
     // Skip if already in the correct order
     const currentIds = queueRes.rows.map((r) => r.id);
@@ -2139,6 +2522,86 @@ export async function resortQueueByRotation(): Promise<void> {
   }
 }
 
+export async function applyManualSingerQueueOrder(orderedSingerIds: string[]): Promise<void> {
+  const normalizedOrder = orderedSingerIds
+    .map((id) => String(id).trim())
+    .filter((id) => /^\d+$/.test(id));
+  if (normalizedOrder.length === 0) return;
+
+  const queueRes = await query<{
+    id: number;
+    singer_id: string | null;
+    position: number;
+  }>(
+    `SELECT id, singer_id, position
+       FROM queue
+      WHERE status = 'queued'
+      ORDER BY position`
+  );
+  if (queueRes.rows.length <= 1) return;
+
+  const bySinger = new Map<string, Array<{ id: number; position: number }>>();
+  const unordered: Array<{ id: number; position: number }> = [];
+  for (const row of queueRes.rows) {
+    if (row.singer_id) {
+      const key = String(row.singer_id);
+      if (!bySinger.has(key)) bySinger.set(key, []);
+      bySinger.get(key)!.push({ id: row.id, position: row.position });
+    } else {
+      unordered.push({ id: row.id, position: row.position });
+    }
+  }
+
+  const remainingSingerIds = new Set(bySinger.keys());
+  const singerOrder = normalizedOrder.filter((id) => {
+    const hasSinger = bySinger.has(id);
+    if (hasSinger) remainingSingerIds.delete(id);
+    return hasSinger;
+  });
+  singerOrder.push(...Array.from(remainingSingerIds).sort((a, b) => {
+    const aFirst = bySinger.get(a)?.[0]?.position ?? Number.MAX_SAFE_INTEGER;
+    const bFirst = bySinger.get(b)?.[0]?.position ?? Number.MAX_SAFE_INTEGER;
+    return aFirst - bFirst;
+  }));
+
+  const sorted: Array<{ id: number; position: number }> = [];
+  let added = true;
+  let songIndex = 0;
+  while (added) {
+    added = false;
+    for (const singerId of singerOrder) {
+      const item = bySinger.get(singerId)?.[songIndex];
+      if (item) {
+        sorted.push(item);
+        added = true;
+      }
+    }
+    songIndex++;
+  }
+  sorted.push(...unordered);
+
+  const currentIds = queueRes.rows.map((row) => row.id);
+  const sortedIds = sorted.map((row) => row.id);
+  if (currentIds.length === sortedIds.length && currentIds.every((id, index) => id === sortedIds[index])) return;
+
+  const positions = queueRes.rows.map((row) => row.position).sort((a, b) => a - b);
+  const TEMP_OFFSET = 1_000_000;
+
+  await query('BEGIN');
+  try {
+    for (let i = 0; i < sorted.length; i++) {
+      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, sorted[i].id]);
+    }
+    for (let i = 0; i < sorted.length; i++) {
+      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [positions[i], sorted[i].id]);
+    }
+    await query('COMMIT');
+  } catch (e) {
+    await query('ROLLBACK');
+    throw e;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/queue/state — nested singer-based queue state for Host page
 // ---------------------------------------------------------------------------
@@ -2163,6 +2626,174 @@ apiRouter.get(
     const history = await getSingerHistory(BigInt(id));
     if (!history) return res.status(404).json({ error: 'Singer not found' });
     res.json(history);
+  })
+);
+
+apiRouter.post(
+  '/singers/self/name',
+  queueLimiter,
+  ah(async (req, res) => {
+    const displayName = String(req.body?.name ?? '').trim();
+    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
+    if (!displayName) return res.status(400).json({ error: 'name is required' });
+    if (!singerUuid) return res.status(400).json({ error: 'singerUuid is required' });
+
+    const singer = await findOrCreateSinger(displayName, singerUuid);
+    await ensureSingerInActiveRotation(singer.id);
+    await updateActiveQueueRequesterName(singer.id, displayName);
+    postQueueUpdate('queue.updated');
+    res.json({
+      ok: true,
+      singer: {
+        id: singer.id.toString(),
+        uuid: singer.public_uuid,
+        displayName: singer.display_name,
+        normalizedName: singer.normalized_name,
+      },
+    });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Singer history .kd export/import
+// ---------------------------------------------------------------------------
+apiRouter.get(
+  '/history/self/export',
+  ah(async (req, res) => {
+    const name = String(req.query.name ?? '').trim();
+    const singerUuid = normalizeSingerUuid(req.query.singerUuid);
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const data = await buildSingerHistoryKdFile({
+      requesterName: name,
+      singerUuid,
+      includeSingerInfo: true,
+    });
+    res.json(data);
+  })
+);
+
+apiRouter.post(
+  '/history/self/import',
+  queueLimiter,
+  ah(async (req, res) => {
+    const name = String(req.body?.name ?? '').trim();
+    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
+    const data = req.body?.data;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!isSingerHistoryKdFile(data)) return res.status(400).json({ error: 'Invalid .kd singer history file' });
+    const result = await importSingerHistoryKdFile(data, { requesterName: name, singerUuid });
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true, ...result });
+  })
+);
+
+apiRouter.get(
+  '/history/singers/:id/export',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = String(req.params.id ?? '').trim();
+    if (!/^\d+$/.test(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    const data = await buildSingerHistoryKdFile({
+      singerIds: [singerId],
+      includeSingerInfo: true,
+    });
+    res.json(data);
+  })
+);
+
+apiRouter.get(
+  '/history/export-all',
+  adminGuard,
+  ah(async (_req, res) => {
+    const data = await buildSingerHistoryKdFile({ includeSingerInfo: true });
+    res.json(data);
+  })
+);
+
+apiRouter.post(
+  '/history/export',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerIds = Array.isArray(req.body?.singerIds)
+      ? req.body.singerIds.map((id: unknown) => String(id).trim()).filter((id: string) => /^\d+$/.test(id))
+      : [];
+    if (singerIds.length === 0) return res.status(400).json({ error: 'singerIds array is required' });
+    const data = await buildSingerHistoryKdFile({ singerIds, includeSingerInfo: true });
+    res.json(data);
+  })
+);
+
+apiRouter.post(
+  '/history/import',
+  adminGuard,
+  ah(async (req, res) => {
+    const data = req.body?.data;
+    if (!isSingerHistoryKdFile(data)) return res.status(400).json({ error: 'Invalid .kd singer history file' });
+    const result = await importSingerHistoryKdFile(data, {});
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true, ...result });
+  })
+);
+
+apiRouter.patch(
+  '/singers/:id/rename',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    const displayName = String(req.body?.displayName ?? '').trim();
+    if (!Number.isFinite(singerId)) return res.status(400).send('Invalid singer id');
+    if (!displayName) return res.status(400).send('displayName is required');
+
+    const normalizedName = normalizeSingerName(displayName);
+    if (!normalizedName) return res.status(400).send('displayName is required');
+
+    const existingSinger = await query<{ id: string }>(
+      `SELECT id FROM singers WHERE normalized_name = $1 AND id != $2 LIMIT 1`,
+      [normalizedName, singerId],
+    );
+    if (existingSinger.rows.length > 0) {
+      return res.status(400).send('Singer name is already in use');
+    }
+
+    await query('BEGIN');
+    try {
+      const updateSinger = await query<{ id: string; display_name: string; normalized_name: string }>(
+        `UPDATE singers
+            SET display_name = $1,
+                normalized_name = $2
+          WHERE id = $3
+        RETURNING id, display_name, normalized_name`,
+        [displayName, normalizedName, singerId],
+      );
+      if (updateSinger.rows.length === 0) {
+        await query('ROLLBACK');
+        return res.status(404).send('Singer not found');
+      }
+
+      await query(
+        `UPDATE queue
+            SET requested_by = $1
+          WHERE singer_id = $2
+            AND status IN ('queued', 'playing')`,
+        [displayName, singerId],
+      );
+
+      await query('COMMIT');
+      postQueueUpdate('queue.updated');
+      res.json({
+        ok: true,
+        singer: {
+          id: updateSinger.rows[0].id,
+          displayName: updateSinger.rows[0].display_name,
+          normalizedName: updateSinger.rows[0].normalized_name,
+        },
+      });
+    } catch (error) {
+      await query('ROLLBACK');
+      throw error;
+    }
   })
 );
 
@@ -2209,7 +2840,7 @@ apiRouter.patch(
     const result = await updateQueueItemStatus(id, status as any);
     if (!result.ok) return res.status(404).json({ error: result.error });
     await resortQueueByRotation();
-    broadcastQueueUpdate('queue.updated');
+    postQueueUpdate('queue.updated');
     res.json({ ok: true });
   })
 );
@@ -2228,12 +2859,321 @@ apiRouter.patch(
     const result = await reorderSingerQueue(BigInt(singerId), queueIds);
     if (!result.ok) return res.status(400).json({ error: result.error });
     await resortQueueByRotation();
-    broadcastQueueUpdate('queue.updated');
+    postQueueUpdate('queue.updated');
     res.json({ ok: true });
   })
 );
 
-// Update the /queue endpoint to include duration_ms:
+// ---------------------------------------------------------------------------
+// POST /api/singers/:id/merge — merge source singer into target singer (admin)
+// ---------------------------------------------------------------------------
+apiRouter.post(
+  '/singers/:id/merge',
+  adminGuard,
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    const sourceId = Number(req.body?.sourceId);
+    if (!Number.isFinite(targetId) || !Number.isFinite(sourceId)) {
+      return res.status(400).json({ error: 'Invalid singer ids' });
+    }
+    if (targetId === sourceId) {
+      return res.status(400).json({ error: 'Cannot merge singer with itself' });
+    }
+    await query('BEGIN');
+    try {
+      const singerCheck = await query<{ id: string }>(
+        `SELECT id FROM singers WHERE id = ANY($1::bigint[])`,
+        [[targetId, sourceId]],
+      );
+      if (singerCheck.rows.length < 2) {
+        await query('ROLLBACK');
+        return res.status(404).json({ error: 'One or both singers not found' });
+      }
+      // Get target display name for updating queue rows
+      const targetRes = await query<{ display_name: string }>(
+        `SELECT display_name FROM singers WHERE id = $1`,
+        [targetId],
+      );
+      const targetDisplayName = targetRes.rows[0]?.display_name ?? '';
+      // Move all queue entries from source to target
+      await query(
+        `UPDATE queue SET singer_id = $1, requested_by = $2 WHERE singer_id = $3`,
+        [targetId, targetDisplayName, sourceId],
+      );
+      // Remove source from rotations where target already exists, then reassign the rest
+      await query(
+        `DELETE FROM rotation_singers
+          WHERE singer_id = $1
+            AND rotation_id IN (
+              SELECT rotation_id FROM rotation_singers WHERE singer_id = $2
+            )`,
+        [sourceId, targetId],
+      );
+      await query(
+        `UPDATE rotation_singers SET singer_id = $1 WHERE singer_id = $2`,
+        [targetId, sourceId],
+      );
+      // Recalculate stats for target
+      await recalculateSingerStats(String(targetId));
+      // Delete source singer
+      await query(`DELETE FROM singers WHERE id = $1`, [sourceId]);
+      await query('COMMIT');
+      await resortQueueByRotation();
+      postQueueUpdate('queue.updated');
+      res.json({ ok: true });
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+  })
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/queue/by-requester — public: requester views their own queued songs
+// ---------------------------------------------------------------------------
+apiRouter.get(
+  '/queue/by-requester',
+  ah(async (req, res) => {
+    const name = String(req.query.name ?? '').trim();
+    const singerUuid = normalizeSingerUuid(req.query.singerUuid);
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const norm = normalizeSingerName(name);
+    // Prefer singer_id-based lookup
+    const singer = await resolveSingerForRequester(name, singerUuid);
+    let rows: any[];
+    if (singer) {
+      const singerId = singer.id;
+      const qRes = await query(
+        `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
+                t.title, t.kind, a.name AS artist
+           FROM queue q
+           JOIN tracks t ON t.id = q.track_id
+           LEFT JOIN artists a ON a.id = t.artist_id
+          WHERE q.status != 'removed'
+            AND (q.singer_id = $1 OR LOWER(TRIM(q.requested_by)) = $2)
+          ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.position`,
+        [singerId, norm],
+      );
+      rows = qRes.rows;
+    } else {
+      const qRes = await query(
+        `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
+                t.title, t.kind, a.name AS artist
+           FROM queue q
+           JOIN tracks t ON t.id = q.track_id
+           LEFT JOIN artists a ON a.id = t.artist_id
+          WHERE LOWER(TRIM(q.requested_by)) = $1 AND q.status != 'removed'
+          ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.position`,
+        [norm],
+      );
+      rows = qRes.rows;
+    }
+    res.json(rows);
+  })
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/queue/:id/self-requeue — requester adds a completed song back
+// ---------------------------------------------------------------------------
+apiRouter.post(
+  '/queue/:id/self-requeue',
+  queueLimiter,
+  ah(async (req, res) => {
+    const queueId = Number(req.params.id);
+    const requesterName = String(req.body?.name ?? '').trim();
+    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
+    if (!Number.isFinite(queueId)) return res.status(400).json({ error: 'Invalid queue id' });
+    if (!requesterName) return res.status(400).json({ error: 'name is required' });
+
+    const norm = normalizeSingerName(requesterName);
+    const item = await query<{
+      id: string;
+      track_id: string;
+      requested_by: string | null;
+      singer_id: string | null;
+      status: string;
+      key_adjustment: number | null;
+    }>(
+      `SELECT id, track_id, requested_by, singer_id, status, key_adjustment
+         FROM queue
+        WHERE id = $1
+          AND status IN ('done', 'skipped')
+        LIMIT 1`,
+      [queueId],
+    );
+    if (item.rows.length === 0) {
+      return res.status(404).json({ error: 'Completed queue item not found' });
+    }
+
+    const row = item.rows[0];
+    const singer = await resolveSingerForRequester(requesterName, singerUuid);
+    const requesterOwnsItem =
+      normalizeSingerName(row.requested_by ?? '') === norm ||
+      (singer && row.singer_id !== null && String(row.singer_id) === String(singer.id));
+    if (!requesterOwnsItem) {
+      return res.status(403).json({ error: 'You can only re-add your own songs' });
+    }
+
+    let singerId: bigint | null = row.singer_id !== null ? BigInt(row.singer_id) : null;
+    try {
+      const singer = await findOrCreateSinger(requesterName, singerUuid);
+      singerId = singer.id;
+      await ensureSingerInActiveRotation(singerId);
+    } catch (err) {
+      console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
+    }
+
+    const trackId = Number(row.track_id);
+    if (singerId) {
+      const dupCheck = await query<{ id: number }>(
+        `SELECT id FROM queue WHERE singer_id = $1 AND track_id = $2 AND status IN ('queued', 'playing') LIMIT 1`,
+        [singerId, trackId],
+      );
+      if (dupCheck.rows.length > 0) {
+        return res.status(409).json({ error: 'You already have this song in the queue' });
+      }
+    }
+
+    const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
+    const position = (posr.rows[0] as any).p;
+    const keyAdjustment = row.key_adjustment ?? 0;
+
+    const inserted = await query(
+      `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
+       VALUES ($1,$2,$3,'queued',$4,$5)
+       RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
+      [trackId, requesterName, singerId, position, keyAdjustment],
+    );
+
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json(inserted.rows[0]);
+  })
+);
+
+// ---------------------------------------------------------------------------
+// DELETE /api/queue/:id/self-remove — requester removes their own queued or completed song
+// ---------------------------------------------------------------------------
+apiRouter.delete(
+  '/queue/:id/self-remove',
+  ah(async (req, res) => {
+    const queueId = Number(req.params.id);
+    const requesterName = String(req.query.name ?? '').trim();
+    const singerUuid = normalizeSingerUuid(req.query.singerUuid);
+    if (!Number.isFinite(queueId)) return res.status(400).json({ error: 'Invalid queue id' });
+    if (!requesterName) return res.status(400).json({ error: 'name query param is required' });
+
+    const item = await query<{ id: number; requested_by: string | null; singer_id: string | null; status: string }>(
+      `SELECT id, requested_by, singer_id, status
+         FROM queue
+        WHERE id = $1
+          AND status IN ('queued', 'done', 'skipped')`,
+      [queueId],
+    );
+    if (item.rows.length === 0) {
+      return res.status(404).json({ error: 'Queue item not found or not removable' });
+    }
+    const normalizedRequester = normalizeSingerName(requesterName);
+    const normalizedOwner = normalizeSingerName(item.rows[0].requested_by ?? '');
+    const singer = await resolveSingerForRequester(requesterName, singerUuid);
+    const requesterOwnsItem =
+      normalizedRequester === normalizedOwner ||
+      (singer &&
+        item.rows[0].singer_id !== null &&
+        String(item.rows[0].singer_id) === String(singer.id));
+    if (!requesterOwnsItem) {
+      return res.status(403).json({ error: 'You can only remove your own songs' });
+    }
+    await query(`UPDATE queue SET status = 'removed' WHERE id = $1`, [queueId]);
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// PATCH /api/queue/self-reorder — public: requester reorders their own queued songs
+// Body: { name: string, queueIds: number[] }
+// ---------------------------------------------------------------------------
+apiRouter.patch(
+  '/queue/self-reorder',
+  ah(async (req, res) => {
+    const { name, queueIds, singerUuid: rawSingerUuid } = req.body as { name?: string; queueIds?: number[]; singerUuid?: string };
+    const requesterName = String(name ?? '').trim();
+    if (!requesterName) return res.status(400).json({ error: 'name is required' });
+    if (!Array.isArray(queueIds) || queueIds.length === 0) return res.status(400).json({ error: 'queueIds array is required' });
+    const orderedQueueIds = queueIds.map((id) => Number(id));
+    if (orderedQueueIds.some((id) => !Number.isFinite(id))) return res.status(400).json({ error: 'queueIds must be numeric' });
+
+    const norm = normalizeSingerName(requesterName);
+
+    // Resolve singer_id for this requester
+    const singer = await resolveSingerForRequester(requesterName, rawSingerUuid);
+
+    let ownedIds: Set<number>;
+    if (singer) {
+      const singerId = singer.id;
+      const owned = await query<{ id: string }>(
+        `SELECT id FROM queue
+          WHERE status = 'queued'
+            AND id = ANY($2::bigint[])
+            AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $3)`,
+        [singerId, orderedQueueIds, norm],
+      );
+      ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
+    } else {
+      const owned = await query<{ id: string }>(
+        `SELECT id FROM queue WHERE LOWER(TRIM(requested_by)) = $1 AND status = 'queued' AND id = ANY($2::bigint[])`,
+        [norm, orderedQueueIds],
+      );
+      ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
+    }
+
+    for (const id of orderedQueueIds) {
+      if (!ownedIds.has(id)) {
+        return res.status(403).json({ error: `Queue item ${id} is not yours or not queued` });
+      }
+    }
+
+    // Preserve relative positions: slot the new order into the existing position values
+    let curRes: { rows: { id: string; position: number }[] };
+    if (singer) {
+      const singerId = singer.id;
+      curRes = await query<{ id: string; position: number }>(
+        `SELECT id, position FROM queue
+          WHERE status = 'queued'
+            AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $2)
+          ORDER BY position`,
+        [singerId, norm],
+      );
+    } else {
+      curRes = await query<{ id: string; position: number }>(
+        `SELECT id, position FROM queue WHERE LOWER(TRIM(requested_by)) = $1 AND status = 'queued' ORDER BY position`,
+        [norm],
+      );
+    }
+    const sorted = curRes.rows.map((r) => r.position).sort((a, b) => a - b);
+    const TEMP_OFFSET = 2_000_000;
+    await query('BEGIN');
+    try {
+      for (let i = 0; i < orderedQueueIds.length && i < sorted.length; i++) {
+        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, orderedQueueIds[i]]);
+      }
+      for (let i = 0; i < orderedQueueIds.length && i < sorted.length; i++) {
+        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [sorted[i], orderedQueueIds[i]]);
+      }
+      await query('COMMIT');
+    } catch (e) {
+      await query('ROLLBACK');
+      throw e;
+    }
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  })
+);
+
+
 
 apiRouter.get(
   '/queue',
@@ -2273,6 +3213,7 @@ apiRouter.post(
   ah(async (req, res) => {
     const trackId = toInt(req.body?.trackId);
     const requestedBy = (req.body?.requestedBy ?? null) as string | null;
+    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
     const keyAdjustment = toInt(req.body?.keyAdjustment) ?? 0;
     if (trackId == null) return res.status(400).send('trackId required');
     if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
@@ -2310,11 +3251,22 @@ apiRouter.post(
     let singerId: bigint | null = null;
     if (requestedBy && requestedBy.trim()) {
       try {
-        const singer = await findOrCreateSinger(requestedBy);
+        const singer = await findOrCreateSinger(requestedBy, singerUuid);
         singerId = singer.id;
         await ensureSingerInActiveRotation(singerId);
       } catch (err) {
         console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
+      }
+    }
+
+    // Check for duplicate request: same singer, same track, already queued/playing
+    if (singerId && trackId) {
+      const dupCheck = await query<{ id: number }>(
+        `SELECT id FROM queue WHERE singer_id = $1 AND track_id = $2 AND status IN ('queued', 'playing') LIMIT 1`,
+        [singerId, trackId],
+      );
+      if (dupCheck.rows.length > 0) {
+        return res.status(409).json({ error: 'You have already requested this song' });
       }
     }
 
@@ -3127,6 +4079,8 @@ apiRouter.get(
     const showRoller = await getSetting('overlay.showRoller');
     const showQrCode = await getSetting('overlay.showQrCode');
     const hideSingerQueue = await getSetting('overlay.hideSingerQueue');
+    const keepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
+    const showRequestsUrl = await getSetting('overlay.showRequestsUrl');
     res.json({
       visible: visible === null ? true : visible === 'true',
       height: height === null ? 90 : parseInt(height, 10),
@@ -3134,7 +4088,10 @@ apiRouter.get(
       customMessage: customMessage || '',
       showRoller: showRoller === null ? true : showRoller === 'true',
       showQrCode: showQrCode === null ? true : showQrCode === 'true',
-      hideSingerQueue: hideSingerQueue === null ? false : hideSingerQueue === 'true'
+      hideSingerQueue: hideSingerQueue === null ? false : hideSingerQueue === 'true',
+      keepRotationScrollerSingers:
+        keepRotationScrollerSingers === null ? false : keepRotationScrollerSingers === 'true',
+      showRequestsUrl: showRequestsUrl === null ? true : showRequestsUrl === 'true',
     });
   })
 );
@@ -3144,7 +4101,17 @@ apiRouter.post(
   '/overlay/settings',
   adminGuard,
   ah(async (req, res) => {
-    const { visible, height, qrSize, customMessage, showRoller, showQrCode, hideSingerQueue } = req.body;
+    const {
+      visible,
+      height,
+      qrSize,
+      customMessage,
+      showRoller,
+      showQrCode,
+      hideSingerQueue,
+      keepRotationScrollerSingers,
+      showRequestsUrl,
+    } = req.body;
     
     if (typeof visible === 'boolean') {
       await setSetting('overlay.visible', String(visible));
@@ -3169,6 +4136,12 @@ apiRouter.post(
     if (typeof hideSingerQueue === 'boolean') {
       await setSetting('overlay.hideSingerQueue', String(hideSingerQueue));
     }
+    if (typeof keepRotationScrollerSingers === 'boolean') {
+      await setSetting('overlay.keepRotationScrollerSingers', String(keepRotationScrollerSingers));
+    }
+    if (typeof showRequestsUrl === 'boolean') {
+      await setSetting('overlay.showRequestsUrl', String(showRequestsUrl));
+    }
     
     // Broadcast settings update to all clients
     const currentVisible = await getSetting('overlay.visible');
@@ -3178,6 +4151,8 @@ apiRouter.post(
     const currentShowRoller = await getSetting('overlay.showRoller');
     const currentShowQrCode = await getSetting('overlay.showQrCode');
     const currentHideSingerQueue = await getSetting('overlay.hideSingerQueue');
+    const currentKeepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
+    const currentShowRequestsUrl = await getSetting('overlay.showRequestsUrl');
     
     postQueueUpdate('overlay.settings', {
       visible: currentVisible === null ? true : currentVisible === 'true',
@@ -3186,10 +4161,63 @@ apiRouter.post(
       customMessage: currentCustomMessage || '',
       showRoller: currentShowRoller === null ? true : currentShowRoller === 'true',
       showQrCode: currentShowQrCode === null ? true : currentShowQrCode === 'true',
-      hideSingerQueue: currentHideSingerQueue === null ? false : currentHideSingerQueue === 'true'
+      hideSingerQueue: currentHideSingerQueue === null ? false : currentHideSingerQueue === 'true',
+      keepRotationScrollerSingers:
+        currentKeepRotationScrollerSingers === null ? false : currentKeepRotationScrollerSingers === 'true',
+      showRequestsUrl: currentShowRequestsUrl === null ? true : currentShowRequestsUrl === 'true',
     });
     
     res.json({ ok: true });
+  })
+);
+
+apiRouter.get(
+  '/overlay/rotation-singers',
+  ah(async (_req, res) => {
+    const activeRotation = await query<{ id: string }>(
+      `SELECT id FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`
+    );
+
+    if (activeRotation.rows.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const result = await query<{
+      display_name: string;
+      position: number;
+      has_queue: boolean;
+    }>(
+      `SELECT
+         s.display_name,
+         rs.position,
+         EXISTS (
+           SELECT 1
+             FROM queue q
+            WHERE q.status IN ('queued', 'playing')
+              AND (
+                q.singer_id = rs.singer_id
+                OR (
+                  q.singer_id IS NULL
+                  AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(q.requested_by, '')), '\s+', ' ', 'g')) = s.normalized_name
+                )
+              )
+         ) AS has_queue
+         FROM rotation_singers rs
+         JOIN singers s ON s.id = rs.singer_id
+        WHERE rs.rotation_id = $1
+          AND rs.status = 'active'
+        ORDER BY rs.position`,
+      [activeRotation.rows[0].id]
+    );
+
+    res.json(
+      result.rows.map((row) => ({
+        displayName: row.display_name,
+        position: row.position,
+        hasQueuedSong: row.has_queue,
+      }))
+    );
   })
 );
 
@@ -3396,7 +4424,8 @@ apiRouter.get(
       'libraries.local_enabled': settings['libraries.local_enabled'] ?? true,
       'libraries.external_enabled': settings['libraries.external_enabled'] ?? true,
       'requests.acceptance': settings['requests.acceptance'] ?? 'local',
-      'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true
+      'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true,
+      'requests.url': getPublicRequestsUrl(req),
     };
     
     res.json(completeSettings);

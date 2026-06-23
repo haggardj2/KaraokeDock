@@ -19,6 +19,8 @@
 -- ============================================================================
 -- Store application configuration as key-value pairs with JSONB values
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value JSONB NOT NULL
@@ -77,9 +79,13 @@ CREATE TABLE IF NOT EXISTS libraries (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
   path TEXT NOT NULL UNIQUE,
+  parse_mode TEXT NOT NULL DEFAULT 'discid-artist-title',
   is_enabled BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE libraries
+  ADD COLUMN IF NOT EXISTS parse_mode TEXT NOT NULL DEFAULT 'discid-artist-title';
 
 -- ============================================================================
 -- Artists Table
@@ -293,6 +299,7 @@ EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 CREATE TABLE IF NOT EXISTS singers (
   id            BIGSERIAL PRIMARY KEY,
+  public_uuid   TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   display_name  TEXT NOT NULL,
   status        singer_status NOT NULL DEFAULT 'active',
   joined_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -409,21 +416,29 @@ CREATE INDEX IF NOT EXISTS idx_manual_overrides_rotation ON manual_overrides(rot
 
 ALTER TABLE singers
   ADD COLUMN IF NOT EXISTS normalized_name TEXT;
+ALTER TABLE singers
+  ADD COLUMN IF NOT EXISTS public_uuid TEXT;
 
 -- Backfill normalized_name for existing singers:
 -- trim whitespace, collapse multiple spaces, lowercase.
 UPDATE singers
    SET normalized_name = lower(regexp_replace(trim(display_name), '\s+', ' ', 'g'))
  WHERE normalized_name IS NULL;
+UPDATE singers
+   SET public_uuid = gen_random_uuid()::text
+ WHERE public_uuid IS NULL OR public_uuid = '';
 
 -- Going forward normalized_name is required
 ALTER TABLE singers
   ALTER COLUMN normalized_name SET NOT NULL;
+ALTER TABLE singers
+  ALTER COLUMN public_uuid SET NOT NULL;
 
 -- Unique index so we can efficiently deduplicate by canonical name.
 -- Use a partial unique index to avoid conflicts on older rows that might
 -- temporarily have duplicate normalizations before the backfill runs.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_singers_normalized_name ON singers(normalized_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_singers_public_uuid ON singers(public_uuid);
 
 -- -----------------------------------------------------------------------
 -- 2. Add singer_id to queue

@@ -86,6 +86,28 @@ const ROW_TO_QUEUE_SONG = (r: any): QueueSong => ({
   durationMs: r.duration_ms != null ? Number(r.duration_ms) : null,
 });
 
+export function compareQueueSingersForDisplay(a: QueueSinger, b: QueueSinger): number {
+  const aIsPlaying = a.queuedSongs.some((song) => song.status === 'playing');
+  const bIsPlaying = b.queuedSongs.some((song) => song.status === 'playing');
+  if (aIsPlaying !== bIsPlaying) return aIsPlaying ? -1 : 1;
+
+  const aNextPos = a.nextSong?.position ?? null;
+  const bNextPos = b.nextSong?.position ?? null;
+  if (aNextPos != null && bNextPos != null && aNextPos !== bNextPos) {
+    return aNextPos - bNextPos;
+  }
+  if (aNextPos != null && bNextPos == null) return -1;
+  if (aNextPos == null && bNextPos != null) return 1;
+
+  if (a.rotationPosition != null && b.rotationPosition != null && a.rotationPosition !== b.rotationPosition) {
+    return a.rotationPosition - b.rotationPosition;
+  }
+  if (a.rotationPosition != null && b.rotationPosition == null) return -1;
+  if (a.rotationPosition == null && b.rotationPosition != null) return 1;
+
+  return a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base' });
+}
+
 // ---------------------------------------------------------------------------
 // getQueueState — the main API for the Host page
 // ---------------------------------------------------------------------------
@@ -205,13 +227,7 @@ export async function getQueueState(): Promise<QueueState> {
     });
   }
 
-  // Sort queueOrder: singers in rotation first (by rotation_position), then unregistered
-  queueOrder.sort((a, b) => {
-    if (a.rotationPosition == null && b.rotationPosition == null) return 0;
-    if (a.rotationPosition == null) return 1;
-    if (b.rotationPosition == null) return -1;
-    return a.rotationPosition - b.rotationPosition;
-  });
+  queueOrder.sort(compareQueueSingersForDisplay);
 
   return { activeRotation, nowPlaying, queueOrder, completedHistory, flatQueue };
 }

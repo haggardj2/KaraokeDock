@@ -16,6 +16,7 @@ import {
   type DirectoryFingerprint,
   type DirectoryTreeEntry,
 } from './directoryFingerprints.js';
+import { DEFAULT_LIBRARY_PARSE_MODE, type LibraryParseMode } from './parsing.js';
 
 type TaskReason = 'startup' | 'settings' | 'scheduled';
 
@@ -181,6 +182,7 @@ const DOWNLOAD_MP4_RE = /\.mp4$/i;
 interface MediaLibraryTreeSnapshot {
   libraryId: number;
   rootPath: string;
+  parseMode: LibraryParseMode;
   entries: DirectoryTreeEntry[];
 }
 
@@ -203,11 +205,14 @@ async function persistMediaLibraryTreeSnapshots(snapshots: MediaLibraryTreeSnaps
 }
 
 async function snapshotMediaLibraryTrees(): Promise<MediaLibraryTreeSnapshot[]> {
-  const libraries = await query<{ id: number; path: string }>(`SELECT id, path FROM libraries ORDER BY id`);
+  const libraries = await query<{ id: number; path: string; parse_mode: LibraryParseMode | null }>(
+    `SELECT id, path, parse_mode FROM libraries ORDER BY id`
+  );
   return Promise.all(
     libraries.rows.map(async (library) => ({
       libraryId: library.id,
       rootPath: library.path,
+      parseMode: library.parse_mode ?? DEFAULT_LIBRARY_PARSE_MODE,
       entries: await snapshotDirectoryTree(library.path, {
         recursive: true,
         includeFile: (filePath) => MEDIA_LIBRARY_FILE_RE.test(filePath),
@@ -296,6 +301,7 @@ function getMediaLibraryScanRequests(
       scanRequests.push({
         libraryId: snapshot.libraryId,
         libraryPath: snapshot.rootPath,
+        parseMode: snapshot.parseMode,
         scanRoot: snapshot.rootPath,
         cleanupRoot: snapshot.rootPath,
       });
@@ -312,6 +318,7 @@ function getMediaLibraryScanRequests(
       scanRequests.push({
         libraryId: snapshot.libraryId,
         libraryPath: snapshot.rootPath,
+        parseMode: snapshot.parseMode,
         scanRoot,
         cleanupRoot: scanRoot,
       });

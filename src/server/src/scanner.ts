@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { upsertArtist, upsertTrack } from './db';
-import { parseFromFilename } from './parsing';
+import { DEFAULT_LIBRARY_PARSE_MODE, type LibraryParseMode, parseFromFilename } from './parsing';
 import { createRequire } from 'module';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
@@ -17,6 +17,7 @@ type ProgressCb = (evt: { type: 'file' | 'summary'; data: any }) => void;
 type ScanPathOptions = {
   scanRoot?: string;
   cleanupRoot?: string;
+  parseMode?: LibraryParseMode;
 };
 
 const VIDEO_RE = /\.mp4$/i;
@@ -555,6 +556,7 @@ export async function scanPath(
   const libraryRoot = path.resolve(libPath);
   const scanRoot = path.resolve(options.scanRoot ?? libPath);
   const cleanupRoot = path.resolve(options.cleanupRoot ?? scanRoot);
+  const parseMode = options.parseMode ?? DEFAULT_LIBRARY_PARSE_MODE;
 
   if (!isPathWithinRoot(scanRoot, libraryRoot) || !isPathWithinRoot(cleanupRoot, libraryRoot)) {
     throw new Error('scan root must stay within the library path');
@@ -570,7 +572,7 @@ export async function scanPath(
     const dir = path.dirname(abs);
 
     if (VIDEO_RE.test(basename)) {
-      const { artist, title, discId } = parseFromFilename(basename);
+      const { artist, title, discId } = parseFromFilename(basename, parseMode);
       const artistId = artist ? await upsertArtist(artist) : null;
       
       // Skip duration extraction during scan for speed (lazy loading)
@@ -607,7 +609,7 @@ export async function scanPath(
       const contents = await getZipContents(abs);
       
       if (contents.cdg && contents.mp3) {
-        const { artist, title, discId } = parseFromFilename(basename);
+        const { artist, title, discId } = parseFromFilename(basename, parseMode);
         const artistId = artist ? await upsertArtist(artist) : null;
         
         // Skip duration extraction during scan for speed (lazy loading)
@@ -646,7 +648,7 @@ export async function scanPath(
       const mp3 = path.join(dir, `${stem}.mp3`);
       try {
         await fs.stat(mp3);
-        const { artist, title, discId } = parseFromFilename(basename);
+        const { artist, title, discId } = parseFromFilename(basename, parseMode);
         const artistId = artist ? await upsertArtist(artist) : null;
         
         // Skip duration extraction during scan for speed (lazy loading)

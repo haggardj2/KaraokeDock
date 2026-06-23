@@ -2,6 +2,29 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import { useCallback, useEffect, useMemo, useRef, useState, } from "react";
 import { API_BASE, api, getWsUrl } from "../api";
 import { parseZipMediaRef } from "../zipMediaRef";
+function getDefaultRequestsUrl() {
+    if (typeof window === "undefined" || !window.location?.origin) {
+        return "/requests";
+    }
+    return new URL("/requests", window.location.origin).toString();
+}
+function formatRequestsUrlForDisplay(value) {
+    try {
+        const parsed = new URL(value, typeof window !== "undefined" && window.location?.origin
+            ? window.location.origin
+            : "http://localhost");
+        const trimmedPath = parsed.pathname
+            .replace(/\/requests\/?$/i, "")
+            .replace(/\/$/, "");
+        return `${parsed.host}${trimmedPath}`;
+    }
+    catch {
+        return value
+            .replace(/^https?:\/\//i, "")
+            .replace(/\/requests\/?$/i, "")
+            .replace(/\/$/, "");
+    }
+}
 // Helper function to extract YouTube video ID from URL
 function getYouTubeVideoId(url) {
     if (!url)
@@ -40,6 +63,20 @@ function getYouTubeVideoId(url) {
 function isValidDuration(duration) {
     return duration != null && !isNaN(duration) && isFinite(duration) && duration > 0;
 }
+/**
+ * Format a singer's display name.
+ * If short=true and the name has a first + last component, return "First L."
+ */
+function formatSingerName(name, short = false) {
+    if (!name)
+        return "Anonymous";
+    if (!short)
+        return name;
+    const parts = name.trim().split(/\s+/);
+    if (parts.length < 2)
+        return name;
+    return `${parts[0]} ${parts[parts.length - 1][0]}.`;
+}
 const AUTOPLAY_UNMUTE_DELAY_MS = 100; // Delay before unmuting video after autoplay starts
 const DEFAULT_OVERLAY_SETTINGS = {
     visible: true,
@@ -49,6 +86,8 @@ const DEFAULT_OVERLAY_SETTINGS = {
     showRoller: true,
     showQrCode: true,
     hideSingerQueue: false,
+    keepRotationScrollerSingers: false,
+    showRequestsUrl: true,
 };
 function parseBoolean(value, fallback) {
     if (typeof value === "boolean")
@@ -80,6 +119,8 @@ function normalizeOverlaySettings(value) {
         showRoller: parseBoolean(settings.showRoller, DEFAULT_OVERLAY_SETTINGS.showRoller),
         showQrCode: parseBoolean(settings.showQrCode, DEFAULT_OVERLAY_SETTINGS.showQrCode),
         hideSingerQueue: parseBoolean(settings.hideSingerQueue, DEFAULT_OVERLAY_SETTINGS.hideSingerQueue),
+        keepRotationScrollerSingers: parseBoolean(settings.keepRotationScrollerSingers, DEFAULT_OVERLAY_SETTINGS.keepRotationScrollerSingers),
+        showRequestsUrl: parseBoolean(settings.showRequestsUrl, DEFAULT_OVERLAY_SETTINGS.showRequestsUrl),
     };
 }
 export default function Player() {
@@ -92,6 +133,8 @@ export default function Player() {
     const [isYouTube, setIsYouTube] = useState(false);
     const [youtubeVideoId, setYoutubeVideoId] = useState(null);
     const [overlaySettings, setOverlaySettings] = useState(DEFAULT_OVERLAY_SETTINGS);
+    const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
+    const [rotationScrollerSingers, setRotationScrollerSingers] = useState([]);
     const [autoPlay, setAutoPlay] = useState(false);
     const [autoPlayDelay, setAutoPlayDelay] = useState(5);
     const [countdown, setCountdown] = useState(null);
@@ -119,6 +162,8 @@ export default function Player() {
     const breakTrackIdRef = useRef(null);
     const breakTrackSrcRef = useRef("");
     const hideSingerQueueEnabled = overlaySettings.hideSingerQueue;
+    const keepRotationScrollerSingersEnabled = hideSingerQueueEnabled && overlaySettings.keepRotationScrollerSingers;
+    const splashRequestsUrl = useMemo(() => formatRequestsUrlForDisplay(requestsUrl), [requestsUrl]);
     // Force dark theme
     useEffect(() => {
         const prevBg = document.body.style.background;
@@ -206,8 +251,14 @@ export default function Player() {
     };
     // Fetch queue + determine current
     async function refresh() {
-        const q = await api("/api/queue");
+        const [q, rotationSingers] = await Promise.all([
+            api("/api/queue"),
+            api("/api/overlay/rotation-singers")
+                .then((rows) => rows)
+                .catch(() => []),
+        ]);
         setQueue(q);
+        setRotationScrollerSingers(rotationSingers);
         const cur = q.find((x) => x.status === "playing") || null;
         setNow((prev) => {
             // No change: nothing was playing, nothing is playing now
@@ -264,6 +315,17 @@ export default function Player() {
             // Use defaults on error
         });
     }, []);
+    useEffect(() => {
+        api("/api/settings/public")
+            .then((settings) => {
+            if (typeof settings["requests.url"] === "string" && settings["requests.url"].trim()) {
+                setRequestsUrl(settings["requests.url"]);
+            }
+        })
+            .catch(() => {
+            // Keep the client-derived fallback URL on error
+        });
+    }, []);
     // Fetch initial autoplay settings
     useEffect(() => {
         api("/api/autoplay/settings")
@@ -308,7 +370,14 @@ export default function Player() {
                         }
                         // Handle overlay settings updates
                         if (msg.type === "overlay.settings") {
-                            setOverlaySettings(normalizeOverlaySettings(msg));
+                            const settings = normalizeOverlaySettings(msg);
+                            setOverlaySettings(settings);
+                            if (!settings.keepRotationScrollerSingers) {
+                                setRotationScrollerSingers([]);
+                            }
+                            else {
+                                refresh();
+                            }
                         }
                         // Handle autoplay settings updates
                         if (msg.type === "autoplay.settings") {
@@ -382,10 +451,10 @@ export default function Player() {
             // Clean up YouTube player when song ends
             if (youtubePlayerRef.current) {
                 try {
-                    youtubePlayerRef.current.destroy();
+                    youtubePlayerRef.current.stopVideo();
                 }
                 catch (err) {
-                    console.warn('Failed to destroy YouTube player:', err);
+                    console.warn('Failed to stop YouTube player:', err);
                 }
                 youtubePlayerRef.current = null;
             }
@@ -712,6 +781,9 @@ export default function Player() {
                             // YT.PlayerState.ENDED = 0
                             if (event.data === 0) {
                                 console.log("YouTube video ended, sending final timing update");
+                                // Guard against stale closure — verify the current song is still this one
+                                if (!now)
+                                    return;
                                 try {
                                     const duration = event.target.getDuration();
                                     if (isValidDuration(duration)) {
@@ -750,10 +822,10 @@ export default function Player() {
             }
             if (youtubePlayerRef.current) {
                 try {
-                    youtubePlayerRef.current.destroy();
+                    youtubePlayerRef.current.stopVideo();
                 }
                 catch (err) {
-                    console.warn('Failed to destroy YouTube player in cleanup:', err);
+                    console.warn('Failed to stop YouTube player in cleanup:', err);
                 }
                 youtubePlayerRef.current = null;
             }
@@ -894,9 +966,15 @@ export default function Player() {
     }, [now, autoPlay, queuedCount, autoPlayDelay, manualStop]);
     // Build ticker text with current singer and queue
     const tickerText = useMemo(() => {
+        const rotationText = rotationScrollerSingers
+            .slice(0, 8)
+            .map((singer, idx) => singer.hasQueuedSong
+            ? `${idx + 1}. ${singer.displayName}`
+            : `${idx + 1}. ${singer.displayName} (waiting)`)
+            .join(" • ");
         // If nothing is playing
         if (!now) {
-            if (upNext.length === 0) {
+            if (upNext.length === 0 && !rotationText) {
                 // Show custom message at end if set, otherwise waiting message
                 if (overlaySettings.customMessage) {
                     return `🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     `;
@@ -904,13 +982,15 @@ export default function Player() {
                 return "🎵 Waiting for singers... Add your song from the request page! 🎵     🎵 Waiting for singers... Add your song from the request page! 🎵     ";
             }
             // Show upcoming queue when nothing is playing
-            const queueText = upNext
-                .slice(0, 5)
-                .map((item, idx) => {
-                const singer = item.requested_by || "Anonymous";
-                return `${idx + 1}. ${singer}`;
-            })
-                .join(" • ");
+            const queueText = keepRotationScrollerSingersEnabled && rotationText
+                ? rotationText
+                : upNext
+                    .slice(0, 5)
+                    .map((item, idx) => {
+                    const singer = formatSingerName(item.requested_by, true);
+                    return `${idx + 1}. ${singer}`;
+                })
+                    .join(" • ");
             // Add countdown info if autoplay is enabled and not manually stopped
             const countdownInfo = autoPlay && countdown !== null && !manualStop
                 ? `⏱️ Starting in ${countdown}s... `
@@ -924,19 +1004,21 @@ export default function Player() {
         // Current singer is playing - always show who is singing
         const current = hideSingerQueueEnabled
             ? now.requested_by
-                ? `🎤 NOW SINGING: ${now.requested_by}`
+                ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)}`
                 : `🎤 NOW PLAYING`
             : now.requested_by
-                ? `🎤 NOW SINGING: ${now.requested_by} — ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
+                ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)} — ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
                 : `🎤 NOW PLAYING: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`;
         // Build queue list
-        const queueText = upNext
-            .slice(0, 5)
-            .map((item, idx) => {
-            const singer = item.requested_by || "Anonymous";
-            return `${idx + 1}. ${singer}`;
-        })
-            .join(" • ");
+        const queueText = keepRotationScrollerSingersEnabled && rotationText
+            ? rotationText
+            : upNext
+                .slice(0, 5)
+                .map((item, idx) => {
+                const singer = formatSingerName(item.requested_by, true);
+                return `${idx + 1}. ${singer}`;
+            })
+                .join(" • ");
         // Combine with proper spacing, adding custom message at the end if set
         let fullText = queueText ? `${current} ⭐ UP NEXT: ${queueText}` : current;
         // Add custom message at the end if set
@@ -945,7 +1027,17 @@ export default function Player() {
         }
         // Repeat for smooth scrolling with divider
         return `${fullText}     🎵     ${fullText}     🎵     `;
-    }, [now, upNext, overlaySettings.customMessage, hideSingerQueueEnabled, autoPlay, countdown, manualStop]);
+    }, [
+        now,
+        upNext,
+        overlaySettings.customMessage,
+        hideSingerQueueEnabled,
+        keepRotationScrollerSingersEnabled,
+        rotationScrollerSingers,
+        autoPlay,
+        countdown,
+        manualStop,
+    ]);
     // Render the overlay (shown always, unless visibility is false)
     const renderOverlay = () => {
         if (!overlaySettings.visible) {
@@ -1092,7 +1184,7 @@ export default function Player() {
                                                 fontWeight: 700,
                                                 color: "#ffffff",
                                                 marginBottom: "8px",
-                                            }, children: upNext[0].requested_by || "Anonymous" }), !hideSingerQueueEnabled && (_jsxs("div", { style: {
+                                            }, children: formatSingerName(upNext[0].requested_by) || "Anonymous" }), !hideSingerQueueEnabled && (_jsxs("div", { style: {
                                                 fontSize: "clamp(14px, 2vw, 20px)",
                                                 color: "rgba(161, 161, 170, 1)",
                                             }, children: [upNext[0].title || "Unknown", " \u2022 ", upNext[0].artist || "Unknown"] }))] })] })) : (_jsxs("div", { style: { textAlign: "center", animation: "fadeInUp 0.6s ease" }, children: [_jsx("h1", { style: {
@@ -1108,7 +1200,21 @@ export default function Player() {
                                         fontSize: "clamp(16px, 2. 5vw, 20px)",
                                         color: "rgba(161, 161, 170, 1)",
                                         margin: 0,
-                                    }, children: "Add your song from the request page!" })] })), renderOverlay()] })] }));
+                                    }, children: "Add your song from the request page!" }), overlaySettings.showRequestsUrl && (_jsx("p", { style: {
+                                        fontSize: "clamp(16px, 2.1vw, 24px)",
+                                        color: "rgba(226, 232, 240, 0.95)",
+                                        margin: "16px 0 0 0",
+                                        fontFamily: '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
+                                        fontWeight: 700,
+                                        letterSpacing: "0.04em",
+                                        textTransform: "lowercase",
+                                        wordBreak: "break-word",
+                                        padding: "12px 20px",
+                                        borderRadius: 999,
+                                        background: "rgba(15, 23, 42, 0.72)",
+                                        border: "1px solid rgba(148, 163, 184, 0.28)",
+                                        boxShadow: "0 10px 30px rgba(15, 23, 42, 0.25)",
+                                    }, children: splashRequestsUrl }))] })), renderOverlay()] })] }));
     }
     // Playing screen
     return (_jsxs(_Fragment, { children: [_jsx("style", { children: `
@@ -1193,7 +1299,7 @@ export default function Player() {
                             height: "100%",
                             border: "none",
                             zIndex: 1,
-                        } })) : (_jsx("video", { ref: videoRef, autoPlay: true, playsInline: true, style: {
+                        } }, youtubeVideoId)) : (_jsx("video", { ref: videoRef, autoPlay: true, playsInline: true, style: {
                             position: "absolute",
                             top: 0,
                             left: 0,

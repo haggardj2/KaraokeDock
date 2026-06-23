@@ -16,6 +16,38 @@ const DEFAULT_BREAK_COLUMNS = {
 };
 const BREAK_COLUMNS_STORAGE_KEY = 'host.breakMusicColumns';
 const HOST_CONTROL_BUTTON_COUNT = 6;
+function downloadJsonFile(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+function safeHistoryFilename(name) {
+    return `${name.trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'singer-history'}.kd`;
+}
+function getKdSingerDisplayName(singer, index) {
+    return singer.singer?.displayName?.trim() || `Singer ${index + 1}`;
+}
+function readJsonFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                resolve(JSON.parse(String(reader.result ?? '')));
+            }
+            catch (error) {
+                reject(error);
+            }
+        };
+        reader.onerror = () => reject(reader.error ?? new Error('Could not read file'));
+        reader.readAsText(file);
+    });
+}
 function getInitialBreakColumns() {
     if (typeof window === 'undefined')
         return DEFAULT_BREAK_COLUMNS;
@@ -66,6 +98,8 @@ export default function Host() {
     const [showRoller, setShowRoller] = useState(true);
     const [showQrCode, setShowQrCode] = useState(true);
     const [hideSingerQueue, setHideSingerQueue] = useState(false);
+    const [keepRotationScrollerSingers, setKeepRotationScrollerSingers] = useState(false);
+    const [showRequestsUrl, setShowRequestsUrl] = useState(true);
     const [showPlayerWindowControl, setShowPlayerWindowControl] = useState(false);
     const [showAccountManagement, setShowAccountManagement] = useState(false);
     const [changingPassword, setChangingPassword] = useState(false);
@@ -134,10 +168,25 @@ export default function Host() {
     const [selectedSingerHistory, setSelectedSingerHistory] = useState(null);
     const [singerModalOpen, setSingerModalOpen] = useState(false);
     const [singerModalLoading, setSingerModalLoading] = useState(false);
+    const [renameSingerDialogOpen, setRenameSingerDialogOpen] = useState(false);
+    const [editingSingerName, setEditingSingerName] = useState('');
+    const [savingSingerName, setSavingSingerName] = useState(false);
     const [singerDraggedId, setSingerDraggedId] = useState(null);
     const [singerDragOverId, setSingerDragOverId] = useState(null);
     const [modalSongDraggedId, setModalSongDraggedId] = useState(null);
     const [modalSongDragOverId, setModalSongDragOverId] = useState(null);
+    const [historyManagerOpen, setHistoryManagerOpen] = useState(false);
+    const [historyManagerMode, setHistoryManagerMode] = useState('menu');
+    const [historyExportSelectedSingerIds, setHistoryExportSelectedSingerIds] = useState(new Set());
+    const [pendingHistoryImportData, setPendingHistoryImportData] = useState(null);
+    const [historyImportSelectedIndexes, setHistoryImportSelectedIndexes] = useState(new Set());
+    // Merge singer state
+    const [mergeSingerDialogOpen, setMergeSingerDialogOpen] = useState(false);
+    const [mergeSingerQuery, setMergeSingerQuery] = useState('');
+    const [mergeSingerError, setMergeSingerError] = useState('');
+    const [mergingSinger, setMergingSinger] = useState(false);
+    // Add song to queue from singer modal — delegates to showManualRequest with singer pre-filled
+    const [manualRequestForSingerId, setManualRequestForSingerId] = useState(null);
     const wsRef = useRef(null);
     const autoPlayTimerRef = useRef(null);
     const songTimerRef = useRef(null);
@@ -155,6 +204,7 @@ export default function Host() {
     const breakManagerLayoutRef = useRef(null);
     const breakPlaylistSyncRequestRef = useRef(0);
     const breakVolumeSaveTimeoutRef = useRef(null);
+    const hostHistoryImportInputRef = useRef(null);
     const headers = useMemo(() => ({ 'x-session-token': auth.sessionToken, 'Content-Type': 'application/json' }), [auth.sessionToken]);
     const manualSingerSuggestions = useMemo(() => {
         const normalizedQuery = manualRequestName.trim().toLocaleLowerCase();
@@ -905,6 +955,7 @@ export default function Host() {
         try {
             const history = await api(`/api/singers/${singerId}/history`, { headers });
             setSelectedSingerHistory(history || null);
+            setEditingSingerName(history?.singer?.displayName || '');
         }
         catch (err) {
             console.error('Failed to load singer history:', err);
@@ -915,8 +966,168 @@ export default function Host() {
     }
     function closeSingerModal() {
         setSingerModalOpen(false);
+        setRenameSingerDialogOpen(false);
         setSelectedSingerId(null);
         setSelectedSingerHistory(null);
+        setEditingSingerName('');
+    }
+    function openHistoryManager() {
+        setHistoryManagerOpen(true);
+        setHistoryManagerMode('menu');
+        setHistoryExportSelectedSingerIds(new Set((queueState?.queueOrder ?? []).map((singer) => singer.singerId)));
+        setPendingHistoryImportData(null);
+        setHistoryImportSelectedIndexes(new Set());
+    }
+    function closeHistoryManager() {
+        setHistoryManagerOpen(false);
+        setHistoryManagerMode('menu');
+        setPendingHistoryImportData(null);
+        setHistoryImportSelectedIndexes(new Set());
+        if (hostHistoryImportInputRef.current)
+            hostHistoryImportInputRef.current.value = '';
+    }
+    async function exportAllSingerHistory() {
+        if (!auth.sessionToken || !auth.isLoggedIn)
+            return;
+        try {
+            const data = await api('/api/history/export-all', { headers });
+            downloadJsonFile(`karaokedock-singer-history-${new Date().toISOString().slice(0, 10)}.kd`, data);
+            setBanner('✔ All singer history exported');
+            setTimeout(() => setBanner(''), 4000);
+            closeHistoryManager();
+        }
+        catch (err) {
+            console.error('Failed to export all singer history:', err);
+            setBanner('⚠️ Could not export singer history');
+            setTimeout(() => setBanner(''), 5000);
+        }
+    }
+    async function exportSelectedSingerHistory() {
+        if (!auth.sessionToken || !auth.isLoggedIn)
+            return;
+        const singerIds = Array.from(historyExportSelectedSingerIds);
+        if (singerIds.length === 0) {
+            setBanner('⚠️ Select at least one singer to export');
+            setTimeout(() => setBanner(''), 4000);
+            return;
+        }
+        try {
+            const data = await api('/api/history/export', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ singerIds }),
+            });
+            const filename = singerIds.length === 1
+                ? safeHistoryFilename((queueState?.queueOrder ?? []).find((singer) => singer.singerId === singerIds[0])?.displayName || 'singer-history')
+                : `karaokedock-selected-singer-history-${new Date().toISOString().slice(0, 10)}.kd`;
+            downloadJsonFile(filename, data);
+            setBanner(`✔ Exported ${singerIds.length} singer${singerIds.length === 1 ? '' : 's'}`);
+            setTimeout(() => setBanner(''), 4000);
+            closeHistoryManager();
+        }
+        catch (err) {
+            console.error('Failed to export singer history:', err);
+            setBanner('⚠️ Could not export singer history');
+            setTimeout(() => setBanner(''), 5000);
+        }
+    }
+    async function loadHistoryImportFile(file) {
+        if (!file)
+            return;
+        try {
+            const data = await readJsonFile(file);
+            const singers = Array.isArray(data?.singers) ? data.singers : [];
+            setPendingHistoryImportData(data);
+            setHistoryImportSelectedIndexes(new Set(singers.map((_, index) => index)));
+        }
+        catch (err) {
+            console.error('Failed to read singer history file:', err);
+            setBanner('⚠️ Could not read .kd file');
+            setTimeout(() => setBanner(''), 5000);
+            if (hostHistoryImportInputRef.current)
+                hostHistoryImportInputRef.current.value = '';
+        }
+    }
+    async function importPendingHostSingerHistory(importAll) {
+        if (!auth.sessionToken || !auth.isLoggedIn || !pendingHistoryImportData)
+            return;
+        const sourceSingers = Array.isArray(pendingHistoryImportData.singers) ? pendingHistoryImportData.singers : [];
+        const selectedSingers = sourceSingers.filter((_, index) => historyImportSelectedIndexes.has(index));
+        const data = importAll
+            ? pendingHistoryImportData
+            : { ...pendingHistoryImportData, singers: selectedSingers };
+        if (!importAll && selectedSingers.length === 0) {
+            setBanner('⚠️ Select at least one singer to import');
+            setTimeout(() => setBanner(''), 4000);
+            return;
+        }
+        try {
+            const result = await api('/api/history/import', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ data }),
+            });
+            await refreshQueueState();
+            if (selectedSingerId) {
+                const history = await api(`/api/singers/${selectedSingerId}/history`, { headers });
+                setSelectedSingerHistory(history || null);
+            }
+            setBanner(`✔ Imported ${Number(result.imported ?? 0)} history song${Number(result.imported ?? 0) === 1 ? '' : 's'}`);
+            setTimeout(() => setBanner(''), 4000);
+            closeHistoryManager();
+        }
+        catch (err) {
+            console.error('Failed to import singer history:', err);
+            setBanner('⚠️ Could not import singer history');
+            setTimeout(() => setBanner(''), 5000);
+        }
+        finally {
+            if (hostHistoryImportInputRef.current)
+                hostHistoryImportInputRef.current.value = '';
+        }
+    }
+    function openRenameSingerDialog() {
+        if (!selectedSingerHistory)
+            return;
+        setEditingSingerName(selectedSingerHistory.singer.displayName);
+        setRenameSingerDialogOpen(true);
+    }
+    function closeRenameSingerDialog() {
+        setRenameSingerDialogOpen(false);
+        setEditingSingerName(selectedSingerHistory?.singer.displayName ?? '');
+    }
+    async function renameSingerFromModal() {
+        if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerId)
+            return;
+        const nextName = editingSingerName.trim();
+        if (!nextName) {
+            setBanner('⚠️ Singer name is required');
+            setTimeout(() => setBanner(''), 4000);
+            return;
+        }
+        setSavingSingerName(true);
+        try {
+            await api(`/api/singers/${selectedSingerId}/rename`, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({ displayName: nextName }),
+            });
+            await refreshQueueState();
+            const history = await api(`/api/singers/${selectedSingerId}/history`, { headers });
+            setSelectedSingerHistory(history || null);
+            setEditingSingerName(history?.singer?.displayName || nextName);
+            setRenameSingerDialogOpen(false);
+            setBanner(`✔ Singer renamed to ${nextName}`);
+            setTimeout(() => setBanner(''), 4000);
+        }
+        catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to rename singer';
+            setBanner(`⚠️ ${message}`);
+            setTimeout(() => setBanner(''), 5000);
+        }
+        finally {
+            setSavingSingerName(false);
+        }
     }
     async function handleModalSongDrop(targetQueueId) {
         setModalSongDragOverId(null);
@@ -1031,6 +1242,80 @@ export default function Host() {
             setBusy(false);
         }
     }
+    async function deleteSongFromHistory(queueId) {
+        if (!auth.sessionToken || !auth.isLoggedIn)
+            return;
+        if (!confirm('Remove this track from singer history?'))
+            return;
+        setBusy(true);
+        try {
+            await api('/api/queue/delete', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ id: queueId }),
+            });
+            await refreshQueueState();
+            if (selectedSingerId) {
+                const history = await api(`/api/singers/${selectedSingerId}/history`, { headers });
+                setSelectedSingerHistory(history || null);
+            }
+        }
+        catch (err) {
+            console.error('Failed to delete history song:', err);
+        }
+        finally {
+            setBusy(false);
+        }
+    }
+    async function mergeSingerIntoTarget() {
+        if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerId)
+            return;
+        const sourceName = mergeSingerQuery.trim();
+        if (!sourceName) {
+            setMergeSingerError('Enter a singer name to merge');
+            return;
+        }
+        // Find singer id by name
+        const allSingers = queueState?.queueOrder ?? [];
+        const matchedSinger = allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase());
+        if (!matchedSinger) {
+            setMergeSingerError(`Singer "${sourceName}" not found`);
+            return;
+        }
+        if (matchedSinger.singerId === selectedSingerId) {
+            setMergeSingerError('Cannot merge a singer with themselves');
+            return;
+        }
+        setMergingSinger(true);
+        setMergeSingerError('');
+        try {
+            await api(`/api/singers/${selectedSingerId}/merge`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ sourceId: Number(matchedSinger.singerId) }),
+            });
+            setMergeSingerDialogOpen(false);
+            setMergeSingerQuery('');
+            await refreshQueueState();
+            const history = await api(`/api/singers/${selectedSingerId}/history`, { headers });
+            setSelectedSingerHistory(history || null);
+            setBanner(`✔ Merged "${sourceName}" into this singer`);
+            setTimeout(() => setBanner(''), 4000);
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : 'Merge failed';
+            setMergeSingerError(msg);
+        }
+        finally {
+            setMergingSinger(false);
+        }
+    }
+    async function searchSongsForSinger(q) {
+        // No longer used — singer add-song uses the manual request modal
+    }
+    async function addSongForSinger(_trackId) {
+        // No longer used
+    }
     async function moveSinger(singerId, direction) {
         if (!auth.sessionToken || !auth.isLoggedIn || !queueState?.activeRotation)
             return;
@@ -1043,8 +1328,8 @@ export default function Host() {
         if (targetIdx < 0 || targetIdx >= singers.length)
             return;
         // Swap positions
-        const currentPos = singers[idx].position ?? idx + 1;
-        const targetPos = singers[targetIdx].position ?? targetIdx + 1;
+        const currentPos = singers[idx].rotationPosition ?? idx + 1;
+        const targetPos = singers[targetIdx].rotationPosition ?? targetIdx + 1;
         try {
             await api(`/api/rotations/${rotationId}/singers/${singerId}/position`, {
                 method: 'PATCH',
@@ -1085,7 +1370,15 @@ export default function Host() {
             return;
         }
         const rotationId = queueState.activeRotation.id;
-        const singers = queueState.queueOrder;
+        const singers = [...queueState.queueOrder].sort((a, b) => {
+            const aIsSinging = a.queuedSongs.some(q => q.status === 'playing');
+            const bIsSinging = b.queuedSongs.some(q => q.status === 'playing');
+            if (aIsSinging && !bIsSinging)
+                return -1;
+            if (!aIsSinging && bIsSinging)
+                return 1;
+            return 0;
+        });
         const fromIdx = singers.findIndex(s => s.singerId === singerDraggedId);
         const toIdx = singers.findIndex(s => s.singerId === targetSingerId);
         if (fromIdx < 0 || toIdx < 0) {
@@ -1096,16 +1389,12 @@ export default function Host() {
         const reordered = [...singers];
         const [moved] = reordered.splice(fromIdx, 1);
         reordered.splice(toIdx, 0, moved);
-        // Assign sequential positions starting from the minimum existing position
-        const minPos = Math.min(...singers.map(s => s.position ?? 999));
         try {
-            for (let i = 0; i < reordered.length; i++) {
-                await api(`/api/rotations/${rotationId}/singers/${reordered[i].singerId}/position`, {
-                    method: 'PATCH',
-                    headers,
-                    body: JSON.stringify({ position: minPos + i }),
-                });
-            }
+            await api(`/api/rotations/${rotationId}/singers/reorder`, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({ orderedSingerIds: reordered.map(s => s.singerId) }),
+            });
             await refreshQueueState();
         }
         catch (err) {
@@ -1149,10 +1438,12 @@ export default function Host() {
             setShowRoller(settings.showRoller ?? true);
             setShowQrCode(settings.showQrCode ?? true);
             setHideSingerQueue(settings.hideSingerQueue ?? false);
+            setKeepRotationScrollerSingers(settings.keepRotationScrollerSingers ?? false);
+            setShowRequestsUrl(settings.showRequestsUrl ?? true);
         })
             .catch(() => { });
     }, []);
-    async function updateOverlaySettings(visible, height, qrSizeVal, message, rollerVal, qrCodeVal, hideSingerQueueVal) {
+    async function updateOverlaySettings(visible, height, qrSizeVal, message, rollerVal, qrCodeVal, hideSingerQueueVal, keepRotationScrollerSingersVal, showRequestsUrlVal) {
         if (!auth.sessionToken || !auth.isLoggedIn)
             return;
         try {
@@ -1166,7 +1457,9 @@ export default function Host() {
                     customMessage: message ?? customMessage,
                     showRoller: rollerVal ?? showRoller,
                     showQrCode: qrCodeVal ?? showQrCode,
-                    hideSingerQueue: hideSingerQueueVal ?? hideSingerQueue
+                    hideSingerQueue: hideSingerQueueVal ?? hideSingerQueue,
+                    keepRotationScrollerSingers: keepRotationScrollerSingersVal ?? keepRotationScrollerSingers,
+                    showRequestsUrl: showRequestsUrlVal ?? showRequestsUrl,
                 })
             });
         }
@@ -1554,6 +1847,7 @@ export default function Host() {
         setManualRequestMode('local');
         setShowManualSingerSuggestions(false);
         setManualSingerHighlightIndex(0);
+        setManualRequestForSingerId(null);
     }
     function selectManualRequestSinger(name) {
         setManualRequestName(name);
@@ -1912,7 +2206,7 @@ export default function Host() {
             ? currentPlaying.duration_ms / 1000
             : 210);
     return (_jsxs("div", { className: "host-page", children: [_jsx("style", { children: `
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
 
         @keyframes fadeInUp {
           from { opacity: 0; transform: translateY(20px); }
@@ -1944,6 +2238,21 @@ export default function Host() {
           padding: 16px;
           padding-bottom: env(safe-area-inset-bottom, 16px);
           animation: fadeInUp 0.5s ease;
+        }
+
+        .material-symbols-rounded {
+          font-family: 'Material Symbols Rounded';
+          font-weight: normal;
+          font-style: normal;
+          line-height: 1;
+          letter-spacing: normal;
+          text-transform: none;
+          display: inline-block;
+          white-space: nowrap;
+          word-wrap: normal;
+          direction: ltr;
+          -webkit-font-feature-settings: 'liga';
+          -webkit-font-smoothing: antialiased;
         }
 
         .container {
@@ -2028,7 +2337,7 @@ export default function Host() {
           background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
           animation: shimmer 2s ease infinite;
         }
-          
+
         @keyframes shimmer {
           0% { transform: translateX(-100%); }
           100% { transform: translateX(100%); }
@@ -2692,7 +3001,7 @@ export default function Host() {
           .host-top-panels {
             grid-template-columns: 1fr;
           }
-           
+
           .controls-grid {
             display: flex !important;
             flex-direction: row !important;
@@ -2763,17 +3072,17 @@ export default function Host() {
           .controls-grid {
             gap:  4px !important;
           }
-          
+
           .controls-grid .control-btn {
             min-width: 40px ! important;
             width: 40px !important;
             height:  40px !important;
           }
-          
+
           .controls-grid .control-btn span {
             font-size: 18px !important;
           }
-          
+
           .modal { width: 95%; padding: 20px; }
         }
 
@@ -2784,7 +3093,7 @@ export default function Host() {
             width: 38px !important;
             height: 38px !important;
           }
-          
+
           .controls-grid .control-btn span {
             font-size:  16px !important;
           }
@@ -2814,7 +3123,7 @@ export default function Host() {
                                     color: 'var(--color-text-secondary)'
                                 }, children: "Use the credentials configured in Admin settings" })] })) : (_jsxs(_Fragment, { children: [_jsx("div", { className: "header", children: _jsx("h1", { className: "header-title", children: "Host Panel" }) }), _jsxs("div", { className: "host-top-panels", children: [_jsxs("div", { className: `card host-controls-card${currentPlaying ? ' now-playing' : ''}`, children: [currentPlaying && (_jsxs("div", { style: { marginBottom: 12 }, children: [_jsxs("div", { style: { fontWeight: 700, fontSize: 16, color: '#10b981', marginBottom: 2 }, children: ["\uD83C\uDFA4 ", currentPlaying.title || 'Unknown Title'] }), _jsxs("div", { style: { color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }, children: [currentPlaying.artist || 'Unknown Artist', currentPlaying.requested_by && _jsxs("span", { style: { marginLeft: 8 }, children: ["\u00B7 ", _jsx("strong", { style: { color: 'var(--color-text-primary)' }, children: currentPlaying.requested_by })] })] }), _jsx("div", { className: "progress-bar", style: { marginTop: 6 }, children: _jsx("div", { className: "progress-fill", style: { width: `${estimatedDuration > 0 ? Math.min(100, (currentTime / estimatedDuration) * 100) : 0}%` } }) }), _jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 12, color: 'var(--color-text-secondary)' }, children: [_jsx("span", { children: formatTime(currentTime) }), _jsx("span", { children: formatTime(estimatedDuration) })] }), autoPlay && (_jsxs("div", { style: { fontSize: 12, opacity: 0.7, marginTop: 6, textAlign: 'center',
                                                             padding: '4px 8px', background: 'rgba(16,185,129,0.1)',
-                                                            borderRadius: 6, border: '1px solid rgba(16,185,129,0.2)' }, children: ["\uD83D\uDD04 Auto-play enabled \u00B7 ", autoPlayDelay, "s delay"] }))] })), _jsxs("div", { style: { display: 'flex', gap: 8, flexWrap: 'wrap' }, children: [_jsx("button", { className: "control-btn success", onClick: playTop, disabled: busy, title: "Play", "aria-label": "Play", children: "\u25B6" }), _jsx("button", { className: "control-btn primary", onClick: next, disabled: busy, title: "Next", "aria-label": "Next", children: "\u23ED" }), _jsx("button", { className: "control-btn danger", onClick: stop, disabled: busy, title: "Stop", "aria-label": "Stop", children: "\u23F9" }), _jsx("button", { className: "control-btn", onClick: refreshQueue, disabled: busy, title: "Refresh", "aria-label": "Refresh", children: "\uD83D\uDD04" }), _jsx("button", { className: "control-btn danger", onClick: clearAll, disabled: busy, title: "Clear all", "aria-label": "Clear all", children: "\uD83D\uDDD1" }), _jsx("button", { className: "control-btn", onClick: () => setShowPlayerWindowControl(true), title: "Settings", "aria-label": "Settings", children: "\uD83C\uDF9B\uFE0F" })] })] }), _jsxs("div", { className: "card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 }, children: [_jsx("h2", { style: { margin: 0 }, children: "\uD83C\uDFBC Break Music" }), _jsxs("div", { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }, children: [_jsx("button", { className: "control-btn", title: "Manage break music library and playlist", style: { padding: '8px 10px', minWidth: 40 }, onClick: openBreakMusicManager, disabled: busy, children: "\uD83D\uDEE0\uFE0F" }), _jsx("button", { className: "control-btn", title: "Play previous break playlist track", style: { padding: '8px 10px', minWidth: 40 }, onClick: () => controlBreakMusic('previous'), disabled: busy || breakPlaylistTrackIds.length === 0, children: "\u23EE\uFE0F" }), _jsx("button", { className: "control-btn", title: breakMusicPaused ? 'Resume break music' : 'Pause break music', style: { padding: '8px 10px', minWidth: 40 }, onClick: () => controlBreakMusic(breakMusicPaused ? 'resume' : 'pause'), disabled: busy || !breakMusicTrack, children: breakMusicPaused ? '▶️' : '⏸️' }), _jsx("button", { className: "control-btn", title: "Skip to next break playlist track", style: { padding: '8px 10px', minWidth: 40 }, onClick: () => controlBreakMusic('skip'), disabled: busy || breakPlaylistTrackIds.length === 0, children: "\u23ED\uFE0F" })] })] }), breakMusicTrack ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { marginBottom: 8, fontSize: 15 }, children: [_jsx("strong", { children: breakMusicTrack.title }), " by ", _jsx("strong", { children: breakMusicTrack.artist || 'Unknown Artist' })] }), _jsxs("div", { style: { marginBottom: 10, color: 'var(--color-text-secondary)', fontSize: 14 }, children: ["Time remaining: ", breakMusicRemainingSec == null ? '—' : formatTime(breakMusicRemainingSec)] })] })) : (_jsx("div", { style: { marginBottom: 10, color: 'var(--color-text-secondary)', fontSize: 14 }, children: "No break track selected" })), activeBreakPlaylistName && (_jsxs("div", { role: "status", "aria-live": "polite", style: { color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }, children: ["Loaded playlist: ", _jsx("strong", { style: { color: 'var(--color-text-primary)' }, children: activeBreakPlaylistName })] })), breakPlaylistTrackIds.length > 0 && (_jsxs("div", { role: "status", "aria-live": "polite", style: { color: 'var(--color-text-secondary)', fontSize: 13 }, children: ["Playlist tracks: ", breakPlaylistTrackIds.length] }))] })] }), _jsxs("div", { className: "card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12 }, children: [_jsx("h2", { style: { margin: 0 }, children: "\uD83C\uDFA4 Queue Order" }), _jsxs("div", { style: { display: 'flex', gap: 12, alignItems: 'center' }, children: [_jsxs("span", { className: "stat-pill", children: [queueState?.queueOrder.length ?? 0, " singers"] }), _jsxs("span", { className: "stat-pill", children: [queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length, " queued"] }), _jsx("button", { className: "control-btn primary", onClick: () => setShowManualRequest(true), disabled: busy, title: "Manually add a song to the queue", style: { padding: '8px 12px', fontSize: '16px', lineHeight: 1 }, children: "\u2795" })] })] }), (!queueState || queueState.queueOrder.length === 0) ? (_jsxs("div", { style: { textAlign: 'center', padding: '40px 20px', color: 'var(--color-text-secondary)' }, children: [_jsx("div", { style: { fontSize: 48, marginBottom: 16, opacity: 0.5 }, children: "\uD83C\uDFB5" }), _jsx("div", { children: "No singers in queue" }), _jsx("div", { style: { fontSize: 14, marginTop: 8 }, children: "Songs added from the Requests page will appear here automatically" })] })) : (_jsx("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 }, children: (() => {
+                                                            borderRadius: 6, border: '1px solid rgba(16,185,129,0.2)' }, children: ["\uD83D\uDD04 Auto-play enabled \u00B7 ", autoPlayDelay, "s delay"] }))] })), _jsxs("div", { style: { display: 'flex', gap: 8, flexWrap: 'wrap' }, children: [_jsx("button", { className: "control-btn success", onClick: playTop, disabled: busy, title: "Play", "aria-label": "Play", children: "\u25B6" }), _jsx("button", { className: "control-btn primary", onClick: next, disabled: busy, title: "Next", "aria-label": "Next", children: "\u23ED" }), _jsx("button", { className: "control-btn danger", onClick: stop, disabled: busy, title: "Stop", "aria-label": "Stop", children: "\u23F9" }), _jsx("button", { className: "control-btn", onClick: refreshQueue, disabled: busy, title: "Refresh", "aria-label": "Refresh", children: "\uD83D\uDD04" }), _jsx("button", { className: "control-btn danger", onClick: clearAll, disabled: busy, title: "Clear all", "aria-label": "Clear all", children: "\uD83D\uDDD1" }), _jsx("button", { className: "control-btn", onClick: () => setShowPlayerWindowControl(true), title: "Settings", "aria-label": "Settings", children: "\uD83C\uDF9B\uFE0F" })] })] }), _jsxs("div", { className: "card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 }, children: [_jsx("h2", { style: { margin: 0 }, children: "\uD83C\uDFBC Break Music" }), _jsxs("div", { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }, children: [_jsx("button", { className: "control-btn", title: "Manage break music library and playlist", style: { padding: '8px 10px', minWidth: 40 }, onClick: openBreakMusicManager, disabled: busy, children: "\uD83D\uDEE0\uFE0F" }), _jsx("button", { className: "control-btn", title: "Play previous break playlist track", style: { padding: '8px 10px', minWidth: 40 }, onClick: () => controlBreakMusic('previous'), disabled: busy || breakPlaylistTrackIds.length === 0, children: "\u23EE\uFE0F" }), _jsx("button", { className: "control-btn", title: breakMusicPaused ? 'Resume break music' : 'Pause break music', style: { padding: '8px 10px', minWidth: 40 }, onClick: () => controlBreakMusic(breakMusicPaused ? 'resume' : 'pause'), disabled: busy || !breakMusicTrack, children: breakMusicPaused ? '▶️' : '⏸️' }), _jsx("button", { className: "control-btn", title: "Skip to next break playlist track", style: { padding: '8px 10px', minWidth: 40 }, onClick: () => controlBreakMusic('skip'), disabled: busy || breakPlaylistTrackIds.length === 0, children: "\u23ED\uFE0F" })] })] }), breakMusicTrack ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { marginBottom: 8, fontSize: 15 }, children: [_jsx("strong", { children: breakMusicTrack.title }), " by ", _jsx("strong", { children: breakMusicTrack.artist || 'Unknown Artist' })] }), _jsxs("div", { style: { marginBottom: 10, color: 'var(--color-text-secondary)', fontSize: 14 }, children: ["Time remaining: ", breakMusicRemainingSec == null ? '—' : formatTime(breakMusicRemainingSec)] })] })) : (_jsx("div", { style: { marginBottom: 10, color: 'var(--color-text-secondary)', fontSize: 14 }, children: "No break track selected" })), activeBreakPlaylistName && (_jsxs("div", { role: "status", "aria-live": "polite", style: { color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }, children: ["Loaded playlist: ", _jsx("strong", { style: { color: 'var(--color-text-primary)' }, children: activeBreakPlaylistName })] })), breakPlaylistTrackIds.length > 0 && (_jsxs("div", { role: "status", "aria-live": "polite", style: { color: 'var(--color-text-secondary)', fontSize: 13 }, children: ["Playlist tracks: ", breakPlaylistTrackIds.length] }))] })] }), _jsxs("div", { className: "card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12 }, children: [_jsx("h2", { style: { margin: 0 }, children: "\uD83C\uDFA4 Queue Order" }), _jsxs("div", { style: { display: 'flex', gap: 12, alignItems: 'center' }, children: [_jsxs("span", { className: "stat-pill", children: [queueState?.queueOrder.length ?? 0, " singers"] }), _jsxs("span", { className: "stat-pill", children: [queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length, " queued"] }), _jsx("button", { className: "control-btn primary", onClick: () => setShowManualRequest(true), disabled: busy, title: "Manually add a song to the queue", style: { padding: '8px 12px', fontSize: '16px', lineHeight: 1 }, children: "\u2795" }), _jsx("button", { className: "control-btn", onClick: openHistoryManager, disabled: busy, title: "Manage singer history import/export", "aria-label": "Manage singer history import/export", style: { padding: '8px 12px', lineHeight: 1 }, children: _jsx("span", { className: "material-symbols-rounded", style: { fontSize: 22, display: 'block' }, children: "manage_history" }) })] })] }), (!queueState || queueState.queueOrder.length === 0) ? (_jsxs("div", { style: { textAlign: 'center', padding: '40px 20px', color: 'var(--color-text-secondary)' }, children: [_jsx("div", { style: { fontSize: 48, marginBottom: 16, opacity: 0.5 }, children: "\uD83C\uDFB5" }), _jsx("div", { children: "No singers in queue" }), _jsx("div", { style: { fontSize: 14, marginTop: 8 }, children: "Songs added from the Requests page will appear here automatically" })] })) : (_jsx("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 }, children: (() => {
                                             const tagged = queueState.queueOrder.map(s => ({
                                                 ...s,
                                                 isSinging: s.queuedSongs.some(q => q.status === 'playing'),
@@ -2858,7 +3167,50 @@ export default function Host() {
                                                                             ? _jsxs(_Fragment, { children: [_jsx("strong", { style: { color: 'var(--color-text-primary)' }, children: isSinging ? 'Singing:' : 'Next:' }), " ", singer.nextSong.title || 'Unknown', " \u2014 ", singer.nextSong.artist || 'Unknown'] })
                                                                             : _jsx("span", { style: { opacity: 0.6 }, children: "No queued song" }) }), _jsxs("div", { style: { display: 'flex', gap: 16, marginTop: 4, fontSize: 12, color: 'var(--color-text-muted)' }, children: [_jsxs("span", { children: ["\uD83C\uDFB5 ", singer.queuedSongsCount, " queued"] }), _jsxs("span", { children: ["\u2705 ", singer.totalSongsSung, " sang"] }), singer.lastSangAt && _jsxs("span", { children: ["\uD83D\uDD50 ", formatTimeAgo(singer.lastSangAt)] })] })] }), _jsxs("div", { style: { display: 'flex', gap: 6, flex: '0 0 auto' }, children: [_jsx("button", { className: "control-btn", title: "View singer queue and history", onClick: () => openSingerModal(singer.singerId), style: { padding: '6px 10px', fontSize: 16, lineHeight: 1 }, children: "\uD83D\uDC41" }), _jsx("button", { className: "control-btn danger", title: "Remove singer from rotation", disabled: busy, onClick: () => removeSingerFromRotation(singer.singerId), style: { padding: '6px 10px', fontSize: 13 }, children: "\u2715" })] })] }) }, singer.singerId));
                                             });
-                                        })() })), !queueState && queue.length > 0 && (_jsxs("div", { style: { marginTop: 16 }, children: [_jsx("div", { style: { color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 8 }, children: "(Flat queue \u2014 singer grouping unavailable)" }), queue.map(item => (_jsxs("div", { className: `queue-item ${item.status === 'playing' ? 'playing' : ''}`, children: [_jsx("span", { style: { fontWeight: 600 }, children: item.requested_by }), ' — ', item.title, " by ", item.artist] }, item.id)))] }))] }), singerModalOpen && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: closeSingerModal }), _jsxs("div", { className: "modal", style: { maxWidth: 600 }, children: [_jsxs("div", { className: "modal-header", children: [_jsxs("h3", { style: { margin: 0 }, children: ["\uD83C\uDFA4 ", selectedSingerHistory?.singer.displayName ?? (queueState?.queueOrder.find(s => s.singerId === selectedSingerId)?.displayName ?? 'Singer'), " \u2014 Queue & History"] }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: closeSingerModal, children: "\u2715" })] }), singerModalLoading ? (_jsx("div", { style: { textAlign: 'center', padding: '32px 0', color: 'var(--color-text-secondary)' }, children: "Loading\u2026" })) : selectedSingerHistory ? (_jsxs("div", { style: { flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 16 }, children: [_jsxs("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap' }, children: [_jsxs("span", { className: "stat-pill", children: ["\uD83C\uDFB5 ", selectedSingerHistory.singer.totalSongsSung, " songs sung"] }), selectedSingerHistory.singer.lastSangAt && (_jsxs("span", { className: "stat-pill", children: ["\uD83D\uDD50 Last: ", formatTimeAgo(selectedSingerHistory.singer.lastSangAt)] })), _jsx("span", { className: "stat-pill", style: { background: 'rgba(99,102,241,0.15)', color: 'var(--color-accent)' }, children: selectedSingerHistory.singer.status })] }), _jsxs("div", { children: [_jsxs("div", { style: { fontWeight: 600, marginBottom: 8, color: 'var(--color-text-secondary)', textTransform: 'uppercase', fontSize: 11, letterSpacing: 1 }, children: ["Queue (", selectedSingerHistory.queuedSongs.length, ")", selectedSingerHistory.queuedSongs.filter(s => s.status === 'queued').length > 1 && (_jsx("span", { style: { fontWeight: 400, fontSize: 10, marginLeft: 8, opacity: 0.7 }, children: "drag to reorder" }))] }), selectedSingerHistory.queuedSongs.length === 0 ? (_jsx("div", { style: { color: 'var(--color-text-muted)', fontSize: 13, padding: '8px 0', opacity: 0.7 }, children: "No songs queued" })) : (_jsx("table", { style: { width: '100%', borderCollapse: 'collapse', fontSize: 13 }, children: _jsx("tbody", { children: (() => {
+                                        })() })), !queueState && queue.length > 0 && (_jsxs("div", { style: { marginTop: 16 }, children: [_jsx("div", { style: { color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 8 }, children: "(Flat queue \u2014 singer grouping unavailable)" }), queue.map(item => (_jsxs("div", { className: `queue-item ${item.status === 'playing' ? 'playing' : ''}`, children: [_jsx("span", { style: { fontWeight: 600 }, children: item.requested_by }), ' — ', item.title, " by ", item.artist] }, item.id)))] }))] }), historyManagerOpen && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: closeHistoryManager }), _jsxs("div", { className: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "history-manager-title", style: { maxWidth: 560 }, children: [_jsxs("div", { className: "modal-header", children: [_jsxs("h3", { id: "history-manager-title", style: { margin: 0, display: 'flex', alignItems: 'center', gap: 10 }, children: [_jsx("span", { className: "material-symbols-rounded", "aria-hidden": "true", children: "manage_history" }), "Singer History"] }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: closeHistoryManager, "aria-label": "Close singer history manager", children: "\u2715" })] }), historyManagerMode === 'menu' && (_jsxs("div", { style: { display: 'grid', gap: 12 }, children: [_jsx("button", { className: "control-btn primary", type: "button", disabled: busy, onClick: () => setHistoryManagerMode('export'), style: { justifyContent: 'center', padding: '14px 18px' }, children: "Export Singer History" }), _jsx("button", { className: "control-btn", type: "button", disabled: busy, onClick: () => setHistoryManagerMode('import'), style: { justifyContent: 'center', padding: '14px 18px' }, children: "Import Singer History" })] })), historyManagerMode === 'export' && (_jsxs("div", { style: { display: 'grid', gap: 16 }, children: [_jsx("div", { style: { color: 'var(--color-text-secondary)', fontSize: 14 }, children: "Choose active singers to export, or export all singer history." }), _jsxs("div", { style: { display: 'flex', gap: 8, flexWrap: 'wrap' }, children: [_jsx("button", { className: "control-btn primary", type: "button", disabled: busy, onClick: () => void exportAllSingerHistory(), children: "Export All Singers" }), _jsx("button", { className: "control-btn", type: "button", disabled: busy || historyExportSelectedSingerIds.size === 0, onClick: () => void exportSelectedSingerHistory(), children: "Export Selected" }), _jsx("button", { className: "control-btn", type: "button", disabled: busy, onClick: () => setHistoryExportSelectedSingerIds(new Set((queueState?.queueOrder ?? []).map((singer) => singer.singerId))), children: "Select All Active" })] }), (queueState?.queueOrder.length ?? 0) === 0 ? (_jsx("div", { style: { color: 'var(--color-text-secondary)', padding: 16, textAlign: 'center' }, children: "No active singers to choose from. Use Export All Singers to export stored history." })) : (_jsx("div", { style: { display: 'grid', gap: 8, maxHeight: 320, overflowY: 'auto' }, children: (queueState?.queueOrder ?? []).map((singer) => (_jsxs("label", { style: {
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: 10,
+                                                                padding: 12,
+                                                                borderRadius: 10,
+                                                                border: '1px solid var(--color-border)',
+                                                                background: 'var(--color-bg-secondary)',
+                                                                cursor: 'pointer',
+                                                            }, children: [_jsx("input", { type: "checkbox", checked: historyExportSelectedSingerIds.has(singer.singerId), onChange: (event) => {
+                                                                        setHistoryExportSelectedSingerIds((prev) => {
+                                                                            const next = new Set(prev);
+                                                                            if (event.currentTarget.checked)
+                                                                                next.add(singer.singerId);
+                                                                            else
+                                                                                next.delete(singer.singerId);
+                                                                            return next;
+                                                                        });
+                                                                    } }), _jsx("span", { style: { flex: 1, fontWeight: 600 }, children: singer.displayName }), _jsxs("span", { style: { color: 'var(--color-text-secondary)', fontSize: 12 }, children: [singer.totalSongsSung, " sang"] })] }, singer.singerId))) }))] })), historyManagerMode === 'import' && (_jsxs("div", { style: { display: 'grid', gap: 16 }, children: [_jsx("input", { ref: hostHistoryImportInputRef, type: "file", accept: ".kd,application/json", style: { display: 'none' }, onChange: (event) => void loadHistoryImportFile(event.currentTarget.files?.[0]) }), _jsx("div", { style: { color: 'var(--color-text-secondary)', fontSize: 14 }, children: "Upload a KaraokeDock history file, then choose whether to import every singer or selected singers." }), _jsx("button", { className: "control-btn primary", type: "button", disabled: busy, onClick: () => hostHistoryImportInputRef.current?.click(), style: { justifyContent: 'center', padding: '12px 16px' }, children: "Upload .kd File" }), pendingHistoryImportData && (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: 'grid', gap: 8 }, children: [_jsx("strong", { children: "Import all singers from this file?" }), _jsxs("div", { style: { color: 'var(--color-text-secondary)', fontSize: 13 }, children: ["Found ", (pendingHistoryImportData.singers ?? []).length, " singer", (pendingHistoryImportData.singers ?? []).length === 1 ? '' : 's', "."] }), _jsxs("div", { style: { display: 'flex', gap: 8, flexWrap: 'wrap' }, children: [_jsx("button", { className: "control-btn primary", type: "button", disabled: busy || (pendingHistoryImportData.singers ?? []).length === 0, onClick: () => void importPendingHostSingerHistory(true), children: "Yes, Import All" }), _jsx("button", { className: "control-btn", type: "button", disabled: busy || historyImportSelectedIndexes.size === 0, onClick: () => void importPendingHostSingerHistory(false), children: "Import Selected" })] })] }), _jsx("div", { style: { display: 'grid', gap: 8, maxHeight: 320, overflowY: 'auto' }, children: (pendingHistoryImportData.singers ?? []).map((singer, index) => (_jsxs("label", { style: {
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        gap: 10,
+                                                                        padding: 12,
+                                                                        borderRadius: 10,
+                                                                        border: '1px solid var(--color-border)',
+                                                                        background: 'var(--color-bg-secondary)',
+                                                                        cursor: 'pointer',
+                                                                    }, children: [_jsx("input", { type: "checkbox", checked: historyImportSelectedIndexes.has(index), onChange: (event) => {
+                                                                                setHistoryImportSelectedIndexes((prev) => {
+                                                                                    const next = new Set(prev);
+                                                                                    if (event.currentTarget.checked)
+                                                                                        next.add(index);
+                                                                                    else
+                                                                                        next.delete(index);
+                                                                                    return next;
+                                                                                });
+                                                                            } }), _jsx("span", { style: { flex: 1, fontWeight: 600 }, children: getKdSingerDisplayName(singer, index) }), _jsxs("span", { style: { color: 'var(--color-text-secondary)', fontSize: 12 }, children: [singer.songs?.length ?? 0, " songs"] })] }, `${getKdSingerDisplayName(singer, index)}-${index}`))) })] }))] }))] })] })), singerModalOpen && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: closeSingerModal }), _jsxs("div", { className: "modal", style: { maxWidth: 600 }, children: [_jsxs("div", { className: "modal-header", children: [_jsxs("div", { style: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }, children: [_jsxs("h3", { style: { margin: 0 }, children: ["\uD83C\uDFA4 ", selectedSingerHistory?.singer.displayName ?? (queueState?.queueOrder.find(s => s.singerId === selectedSingerId)?.displayName ?? 'Singer'), " \u2014 Queue & History"] }), selectedSingerHistory && (_jsx("button", { className: "control-btn", type: "button", title: "Edit singer name", "aria-label": "Edit singer name", style: { width: 36, height: 36, padding: 0, flexShrink: 0 }, onClick: openRenameSingerDialog, children: "\u270F\uFE0F" })), selectedSingerHistory && (_jsx("button", { className: "control-btn", type: "button", title: "Merge another singer into this one", "aria-label": "Merge singer", style: { width: 36, height: 36, padding: 0, flexShrink: 0 }, onClick: () => { setMergeSingerDialogOpen(true); setMergeSingerError(''); setMergeSingerQuery(''); }, children: "\uD83D\uDD00" })), selectedSingerHistory && (_jsx("button", { className: "control-btn", type: "button", title: "Add a song to this singer's queue", "aria-label": "Add song to queue", style: { width: 36, height: 36, padding: 0, flexShrink: 0 }, onClick: () => {
+                                                                    setManualRequestForSingerId(selectedSingerId);
+                                                                    setManualRequestName(selectedSingerHistory.singer.displayName);
+                                                                    setManualRequestMode('local');
+                                                                    setManualRequestQuery('');
+                                                                    setManualRequestResults([]);
+                                                                    setShowManualRequest(true);
+                                                                }, children: "\u2795" }))] }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: closeSingerModal, children: "\u2715" })] }), singerModalLoading ? (_jsx("div", { style: { textAlign: 'center', padding: '32px 0', color: 'var(--color-text-secondary)' }, children: "Loading\u2026" })) : selectedSingerHistory ? (_jsxs("div", { style: { flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 16 }, children: [_jsxs("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap' }, children: [_jsxs("span", { className: "stat-pill", children: ["\uD83C\uDFB5 ", selectedSingerHistory.singer.totalSongsSung, " songs sung"] }), selectedSingerHistory.singer.lastSangAt && (_jsxs("span", { className: "stat-pill", children: ["\uD83D\uDD50 Last: ", formatTimeAgo(selectedSingerHistory.singer.lastSangAt)] })), _jsx("span", { className: "stat-pill", style: { background: 'rgba(99,102,241,0.15)', color: 'var(--color-accent)' }, children: selectedSingerHistory.singer.status })] }), _jsxs("div", { children: [_jsxs("div", { style: { fontWeight: 600, marginBottom: 8, color: 'var(--color-text-secondary)', textTransform: 'uppercase', fontSize: 11, letterSpacing: 1 }, children: ["Queue (", selectedSingerHistory.queuedSongs.length, ")", selectedSingerHistory.queuedSongs.filter(s => s.status === 'queued').length > 1 && (_jsx("span", { style: { fontWeight: 400, fontSize: 10, marginLeft: 8, opacity: 0.7 }, children: "drag to reorder" }))] }), selectedSingerHistory.queuedSongs.length === 0 ? (_jsx("div", { style: { color: 'var(--color-text-muted)', fontSize: 13, padding: '8px 0', opacity: 0.7 }, children: "No songs queued" })) : (_jsx("table", { style: { width: '100%', borderCollapse: 'collapse', fontSize: 13 }, children: _jsx("tbody", { children: (() => {
                                                                         const queuedOnly = selectedSingerHistory.queuedSongs.filter(s => s.status === 'queued');
                                                                         const queuedIdxMap = new Map(queuedOnly.map((s, idx) => [s.queueId, idx]));
                                                                         return selectedSingerHistory.queuedSongs.map((song, i) => {
@@ -2916,9 +3268,14 @@ export default function Host() {
                                                                                         fontSize: 11,
                                                                                         background: 'rgba(239,68,68,0.15)',
                                                                                         color: '#ef4444',
-                                                                                    }, title: song.status === 'skipped' ? 'Skipped' : 'Removed', children: song.status === 'skipped' ? '⏭' : '✕' }) })] }, song.queueId))) }) })] })), selectedSingerHistory.completedSongs.length === 0 &&
+                                                                                    }, title: song.status === 'skipped' ? 'Skipped' : 'Removed', children: song.status === 'skipped' ? '⏭' : '✕' }) }), _jsx("td", { style: { padding: '8px 6px', textAlign: 'center', width: 36, borderBottom: '1px solid var(--color-border)' }, children: _jsx("button", { className: "control-btn danger", style: { fontSize: 13, padding: '4px 8px', lineHeight: 1 }, disabled: busy, onClick: () => deleteSongFromHistory(song.queueId), title: "Remove this track from singer history", children: "\u2715" }) })] }, song.queueId))) }) })] })), selectedSingerHistory.completedSongs.length === 0 &&
                                                         selectedSingerHistory.skippedSongs.length === 0 &&
-                                                        selectedSingerHistory.removedSongs.length === 0 && (_jsx("div", { style: { color: 'var(--color-text-secondary)', textAlign: 'center', padding: '10px 0' }, children: "No sang history on record for this singer." }))] })) : (_jsx("div", { style: { color: 'var(--color-text-secondary)', textAlign: 'center', padding: '20px 0' }, children: "Could not load singer history." }))] })] })), showAccountManagement && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: () => setShowAccountManagement(false) }), _jsxs("div", { className: "modal", style: { maxWidth: 560 }, children: [_jsxs("div", { className: "modal-header", children: [_jsx("h3", { style: { margin: 0 }, children: "\uD83D\uDD10 Account Settings" }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: () => setShowAccountManagement(false), children: "\u2715" })] }), auth.isDefaultPassword && (_jsx("div", { className: "banner", style: { marginBottom: 16 }, children: "\u26A0\uFE0F You are using the default password. Please change it for security." })), _jsx("p", { style: { color: 'var(--color-text-secondary)', marginBottom: 20, fontSize: 14 }, children: "Change your username and password." }), !changingUsername && !changingPassword && (_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 20 }, children: [_jsxs("button", { className: "control-btn", style: { minWidth: 180, justifyContent: 'center', flex: 1 }, onClick: () => setChangingUsername(true), children: [_jsx("span", { children: "\uD83D\uDC64" }), " Change Username"] }), _jsxs("button", { className: "control-btn", style: { minWidth: 180, justifyContent: 'center', flex: 1 }, onClick: () => setChangingPassword(true), children: [_jsx("span", { children: "\uD83D\uDD12" }), " Change Password"] })] })), changingUsername && (_jsxs("form", { onSubmit: handleChangeUsername, style: {
+                                                        selectedSingerHistory.removedSongs.length === 0 && (_jsx("div", { style: { color: 'var(--color-text-secondary)', textAlign: 'center', padding: '10px 0' }, children: "No sang history on record for this singer." }))] })) : (_jsx("div", { style: { color: 'var(--color-text-secondary)', textAlign: 'center', padding: '20px 0' }, children: "Could not load singer history." }))] }), renameSingerDialogOpen && selectedSingerHistory && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: closeRenameSingerDialog }), _jsxs("div", { className: "modal", style: { maxWidth: 460, zIndex: 1001 }, children: [_jsxs("div", { className: "modal-header", children: [_jsx("h3", { style: { margin: 0 }, children: "\u270F\uFE0F Edit Singer Name" }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: closeRenameSingerDialog, children: "\u2715" })] }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 14 }, children: [_jsxs("div", { children: [_jsx("label", { className: "form-label", style: { marginBottom: 6 }, children: "Singer Name" }), _jsx("input", { className: "form-input", value: editingSingerName, onChange: e => setEditingSingerName(e.target.value), onKeyDown: e => {
+                                                                            if (e.key === 'Enter') {
+                                                                                e.preventDefault();
+                                                                                void renameSingerFromModal();
+                                                                            }
+                                                                        }, placeholder: "Enter singer name", autoFocus: true, disabled: savingSingerName })] }), _jsxs("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: 10 }, children: [_jsx("button", { className: "control-btn", type: "button", onClick: closeRenameSingerDialog, disabled: savingSingerName, children: "Cancel" }), _jsx("button", { className: "control-btn primary", type: "button", onClick: () => void renameSingerFromModal(), disabled: savingSingerName || editingSingerName.trim() === selectedSingerHistory.singer.displayName, children: savingSingerName ? 'Saving…' : 'Update Name' })] })] })] })] })), mergeSingerDialogOpen && selectedSingerHistory && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: () => setMergeSingerDialogOpen(false) }), _jsxs("div", { className: "modal", style: { maxWidth: 460, zIndex: 1001 }, children: [_jsxs("div", { className: "modal-header", children: [_jsx("h3", { style: { margin: 0 }, children: "\uD83D\uDD00 Merge Singer" }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: () => setMergeSingerDialogOpen(false), children: "\u2715" })] }), _jsxs("p", { style: { color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }, children: ["Merge another singer's history and queue into ", _jsx("strong", { children: selectedSingerHistory.singer.displayName }), ". The other singer will be removed."] }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 14 }, children: [_jsxs("div", { children: [_jsx("label", { className: "form-label", style: { marginBottom: 6 }, children: "Singer to merge (source)" }), _jsx("input", { className: "form-input", list: "merge-singer-list", value: mergeSingerQuery, onChange: e => { setMergeSingerQuery(e.target.value); setMergeSingerError(''); }, placeholder: "Type singer name\u2026", autoFocus: true, disabled: mergingSinger }), _jsx("datalist", { id: "merge-singer-list", children: (queueState?.queueOrder ?? []).filter(s => s.singerId !== selectedSingerId).map(s => (_jsx("option", { value: s.displayName }, s.singerId))) })] }), mergeSingerError && _jsx("div", { style: { color: '#ef4444', fontSize: 13 }, children: mergeSingerError }), _jsxs("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: 10 }, children: [_jsx("button", { className: "control-btn", type: "button", onClick: () => setMergeSingerDialogOpen(false), disabled: mergingSinger, children: "Cancel" }), _jsx("button", { className: "control-btn primary", type: "button", onClick: () => void mergeSingerIntoTarget(), disabled: mergingSinger || !mergeSingerQuery.trim(), children: mergingSinger ? 'Merging…' : 'Merge' })] })] })] })] }))] })), showAccountManagement && (_jsxs(_Fragment, { children: [_jsx("div", { className: "modal-backdrop", onClick: () => setShowAccountManagement(false) }), _jsxs("div", { className: "modal", style: { maxWidth: 560 }, children: [_jsxs("div", { className: "modal-header", children: [_jsx("h3", { style: { margin: 0 }, children: "\uD83D\uDD10 Account Settings" }), _jsx("button", { className: "control-btn", style: { width: 40, height: 40, padding: 0 }, onClick: () => setShowAccountManagement(false), children: "\u2715" })] }), auth.isDefaultPassword && (_jsx("div", { className: "banner", style: { marginBottom: 16 }, children: "\u26A0\uFE0F You are using the default password. Please change it for security." })), _jsx("p", { style: { color: 'var(--color-text-secondary)', marginBottom: 20, fontSize: 14 }, children: "Change your username and password." }), !changingUsername && !changingPassword && (_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 20 }, children: [_jsxs("button", { className: "control-btn", style: { minWidth: 180, justifyContent: 'center', flex: 1 }, onClick: () => setChangingUsername(true), children: [_jsx("span", { children: "\uD83D\uDC64" }), " Change Username"] }), _jsxs("button", { className: "control-btn", style: { minWidth: 180, justifyContent: 'center', flex: 1 }, onClick: () => setChangingPassword(true), children: [_jsx("span", { children: "\uD83D\uDD12" }), " Change Password"] })] })), changingUsername && (_jsxs("form", { onSubmit: handleChangeUsername, style: {
                                                     display: 'flex',
                                                     flexDirection: 'column',
                                                     gap: 12,
@@ -3168,7 +3525,22 @@ export default function Host() {
                                                                                                             } }) })] }), _jsx("span", { style: {
                                                                                                     color: showQrCode ? 'var(--color-success)' : 'var(--color-text-secondary)',
                                                                                                     fontSize: '14px', fontWeight: '500', minWidth: '60px'
-                                                                                                }, children: showQrCode ? 'Visible' : 'Hidden' })] })] })] })] }))] }), overlayVisible && (_jsxs("div", { className: "settings-section", children: [_jsx("div", { className: "settings-title", children: "Custom Message" }), _jsx("input", { type: "text", className: "form-input", placeholder: "Enter custom message for overlay...", value: customMessage, onChange: e => setCustomMessage(e.target.value), onBlur: () => updateOverlaySettings(overlayVisible, overlayHeight, qrSize, customMessage), onKeyDown: e => {
+                                                                                                }, children: showQrCode ? 'Visible' : 'Hidden' })] })] }), _jsxs("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' }, children: [_jsx("span", { style: { fontSize: '14px', fontWeight: '500' }, children: "Show Request URL" }), _jsxs("div", { style: { display: 'flex', alignItems: 'center', gap: '12px' }, children: [_jsxs("label", { style: { position: 'relative', display: 'inline-block', width: '48px', height: '24px' }, children: [_jsx("input", { type: "checkbox", checked: showRequestsUrl, onChange: e => {
+                                                                                                            const val = e.target.checked;
+                                                                                                            setShowRequestsUrl(val);
+                                                                                                            updateOverlaySettings(overlayVisible, overlayHeight, qrSize, undefined, showRoller, showQrCode, hideSingerQueue, keepRotationScrollerSingers, val);
+                                                                                                        }, style: { opacity: 0, width: 0, height: 0 } }), _jsx("span", { style: {
+                                                                                                            position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
+                                                                                                            backgroundColor: showRequestsUrl ? '#10b981' : '#374151',
+                                                                                                            transition: '.4s', borderRadius: '34px'
+                                                                                                        }, children: _jsx("span", { style: {
+                                                                                                                position: 'absolute', height: '16px', width: '16px',
+                                                                                                                left: showRequestsUrl ? '28px' : '4px', bottom: '4px',
+                                                                                                                backgroundColor: 'white', transition: '.4s', borderRadius: '50%'
+                                                                                                            } }) })] }), _jsx("span", { style: {
+                                                                                                    color: showRequestsUrl ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                                                                                                    fontSize: '14px', fontWeight: '500', minWidth: '60px'
+                                                                                                }, children: showRequestsUrl ? 'Visible' : 'Hidden' })] })] })] })] }))] }), overlayVisible && (_jsxs("div", { className: "settings-section", children: [_jsx("div", { className: "settings-title", children: "Custom Message" }), _jsx("input", { type: "text", className: "form-input", placeholder: "Enter custom message for overlay...", value: customMessage, onChange: e => setCustomMessage(e.target.value), onBlur: () => updateOverlaySettings(overlayVisible, overlayHeight, qrSize, customMessage), onKeyDown: e => {
                                                                     if (e.key === 'Enter') {
                                                                         updateOverlaySettings(overlayVisible, overlayHeight, qrSize, customMessage);
                                                                     }
@@ -3205,7 +3577,34 @@ export default function Host() {
                                                                                             } }) })] }), _jsx("span", { style: {
                                                                                     color: hideSingerQueue ? 'var(--color-success)' : 'var(--color-text-secondary)',
                                                                                     fontSize: '14px', fontWeight: '500', minWidth: '60px'
-                                                                                }, children: hideSingerQueue ? 'Hidden' : 'Visible' })] })] })] }), _jsxs("div", { className: "settings-section", children: [_jsx("div", { className: "settings-title", children: "Rotation Settings" }), _jsxs("div", { style: {
+                                                                                }, children: hideSingerQueue ? 'Hidden' : 'Visible' })] })] }), _jsxs("div", { style: {
+                                                                    display: 'flex',
+                                                                    alignItems: 'center',
+                                                                    justifyContent: 'space-between',
+                                                                    padding: '12px 0',
+                                                                    borderTop: '1px solid var(--color-border)'
+                                                                }, children: [_jsxs("div", { children: [_jsx("span", { style: { fontSize: '15px', fontWeight: '500' }, children: "Keep Rotation Singers Visible" }), _jsx("div", { style: { fontSize: '12px', color: 'var(--color-text-secondary)', marginTop: '2px' }, children: "When singer-only queue mode is enabled, keep rotation singers in the scroller even without queued songs" })] }), _jsxs("div", { style: { display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0, marginLeft: '16px' }, children: [_jsxs("label", { style: {
+                                                                                    position: 'relative',
+                                                                                    display: 'inline-block',
+                                                                                    width: '48px',
+                                                                                    height: '24px',
+                                                                                    opacity: hideSingerQueue ? 1 : 0.5
+                                                                                }, children: [_jsx("input", { type: "checkbox", checked: keepRotationScrollerSingers, disabled: !hideSingerQueue, onChange: e => {
+                                                                                            const val = e.target.checked;
+                                                                                            setKeepRotationScrollerSingers(val);
+                                                                                            updateOverlaySettings(overlayVisible, overlayHeight, qrSize, undefined, showRoller, showQrCode, hideSingerQueue, val);
+                                                                                        }, style: { opacity: 0, width: 0, height: 0 } }), _jsx("span", { style: {
+                                                                                            position: 'absolute', cursor: hideSingerQueue ? 'pointer' : 'not-allowed', top: 0, left: 0, right: 0, bottom: 0,
+                                                                                            backgroundColor: keepRotationScrollerSingers ? '#10b981' : '#374151',
+                                                                                            transition: '.4s', borderRadius: '34px'
+                                                                                        }, children: _jsx("span", { style: {
+                                                                                                position: 'absolute', height: '16px', width: '16px',
+                                                                                                left: keepRotationScrollerSingers ? '28px' : '4px', bottom: '4px',
+                                                                                                backgroundColor: 'white', transition: '.4s', borderRadius: '50%'
+                                                                                            } }) })] }), _jsx("span", { style: {
+                                                                                    color: keepRotationScrollerSingers ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                                                                                    fontSize: '14px', fontWeight: '500', minWidth: '60px'
+                                                                                }, children: keepRotationScrollerSingers ? 'Shown' : 'Hidden' })] })] })] }), _jsxs("div", { className: "settings-section", children: [_jsx("div", { className: "settings-title", children: "Rotation Settings" }), _jsxs("div", { style: {
                                                                     padding: '16px',
                                                                     background: 'var(--color-bg-secondary)',
                                                                     borderRadius: '12px',
@@ -3448,7 +3847,7 @@ export default function Host() {
                                                             height: '32px',
                                                             borderRadius: '8px',
                                                             transition: 'all 0.3s ease'
-                                                        }, onMouseEnter: e => e.currentTarget.style.background = 'var(--color-bg-hover)', onMouseLeave: e => e.currentTarget.style.background = 'transparent', onClick: resetManualRequestModal, children: "\u2715" })] }), _jsxs("div", { className: "form-group", style: { position: 'relative' }, children: [_jsx("label", { className: "form-label", children: "Singer Name (Optional)" }), _jsx("input", { className: "form-input", placeholder: "Enter singer name...", value: manualRequestName, autoComplete: "off", onChange: e => {
+                                                        }, onMouseEnter: e => e.currentTarget.style.background = 'var(--color-bg-hover)', onMouseLeave: e => e.currentTarget.style.background = 'transparent', onClick: resetManualRequestModal, children: "\u2715" })] }), manualRequestForSingerId ? (_jsxs("div", { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(99,102,241,0.1)', borderRadius: 8, border: '1px solid rgba(99,102,241,0.2)' }, children: [_jsx("span", { style: { fontSize: 13, color: 'var(--color-text-secondary)' }, children: "Adding for:" }), _jsxs("strong", { style: { fontSize: 13 }, children: ["\uD83C\uDFA4 ", manualRequestName] })] })) : (_jsxs("div", { className: "form-group", style: { position: 'relative' }, children: [_jsx("label", { className: "form-label", children: "Singer Name (Optional)" }), _jsx("input", { className: "form-input", placeholder: "Enter singer name...", value: manualRequestName, autoComplete: "off", onChange: e => {
                                                             setManualRequestName(e.target.value);
                                                             setShowManualSingerSuggestions(true);
                                                             setManualSingerHighlightIndex(0);
@@ -3487,7 +3886,7 @@ export default function Host() {
                                                         } }), showManualSingerSuggestions && manualSingerSuggestions.length > 0 && (_jsx("div", { className: "manual-singer-suggestions", children: manualSingerSuggestions.map((name, index) => (_jsxs("button", { type: "button", className: `manual-singer-suggestion${index === manualSingerHighlightIndex ? ' active' : ''}`, onMouseDown: (e) => {
                                                                 e.preventDefault();
                                                                 selectManualRequestSinger(name);
-                                                            }, children: [_jsx("span", { children: name }), _jsx("span", { className: "manual-singer-suggestion-hint", children: "Use existing singer" })] }, name))) }))] }), _jsxs("div", { className: "search-mode-toggle", children: [localLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'local' ? 'active' : ''}`, onClick: () => setManualRequestMode('local'), children: [_jsx("img", { src: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg", alt: "Local Library", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "Local"] })), externalLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'external' ? 'active karaoke-nerds' : ''}`, onClick: () => setManualRequestMode('external'), children: [_jsx("img", { src: "https://karaokenerds.com/Content/Icons/favicon.ico", alt: "Karaoke Nerds", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "External"] })), _jsx("button", { className: `mode-button ${manualRequestMode === 'url' ? 'active' : ''}`, onClick: () => setManualRequestMode('url'), children: "\uD83D\uDD17 URL" })] }), manualRequestMode === 'url' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "form-group", children: [_jsx("label", { className: "form-label", children: "Video URL" }), _jsx("input", { className: "form-input", placeholder: "Enter YouTube or video URL...", value: manualRequestUrl, onChange: e => setManualRequestUrl(e.target.value), autoFocus: true, style: {
+                                                            }, children: [_jsx("span", { children: name }), _jsx("span", { className: "manual-singer-suggestion-hint", children: "Use existing singer" })] }, name))) }))] })), _jsxs("div", { className: "search-mode-toggle", children: [localLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'local' ? 'active' : ''}`, onClick: () => setManualRequestMode('local'), children: [_jsx("img", { src: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg", alt: "Local Library", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "Local"] })), externalLibraryEnabled && (_jsxs("button", { className: `mode-button ${manualRequestMode === 'external' ? 'active karaoke-nerds' : ''}`, onClick: () => setManualRequestMode('external'), children: [_jsx("img", { src: "https://karaokenerds.com/Content/Icons/favicon.ico", alt: "Karaoke Nerds", className: "mode-icon", style: { width: "20px", height: "20px", marginRight: "6px" } }), "External"] })), _jsx("button", { className: `mode-button ${manualRequestMode === 'url' ? 'active' : ''}`, onClick: () => setManualRequestMode('url'), children: "\uD83D\uDD17 URL" })] }), manualRequestMode === 'url' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "form-group", children: [_jsx("label", { className: "form-label", children: "Video URL" }), _jsx("input", { className: "form-input", placeholder: "Enter YouTube or video URL...", value: manualRequestUrl, onChange: e => setManualRequestUrl(e.target.value), autoFocus: true, style: {
                                                                     width: '100%',
                                                                     boxSizing: 'border-box',
                                                                     marginBottom: '16px'

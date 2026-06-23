@@ -11,85 +11,229 @@ export type BreakParsedMeta = {
   title: string | null;
 };
 
-/**
- * Handles various filename patterns:
- * 1) "CC2101-01 - Artist - Title.ext" -> discId "CC2101-01"
- * 2) "SF123-45 - Artist - Title.ext" -> discId "SF123-45"
- * 3) "BellySings - Artist - Title.ext" -> discId "BellySings" (labels become disc IDs)
- * 4) "Artist - Title.ext" -> no disc ID
- */
-export function parseFromFilename(basename: string): ParsedMeta {
-  const base = basename.replace(/\.[^.]+$/i, '').trim(); // remove extension
-  const parts = base.split(' - ').map(p => p.trim()).filter(Boolean);
+export const LIBRARY_PARSE_MODES = [
+  'discid-artist-title',
+  'discid-title-artist',
+  'artist-title-discid',
+  'title-artist-discid',
+  'artist-title',
+  'title-artist',
+  'discid_title_artist',
+] as const;
 
+export type LibraryParseMode = (typeof LIBRARY_PARSE_MODES)[number];
+
+export const DEFAULT_LIBRARY_PARSE_MODE: LibraryParseMode = 'discid-artist-title';
+
+const DISC_ID_PATTERN = /^[A-Z]{1,6}\d{1,6}(-\d{1,4})?$/i;
+const KNOWN_LABELS = [
+  'BellySings',
+  'Karaoke',
+  'SunFly',
+  'Sunfly',
+  'Sound Choice',
+  'Zoom',
+  'Chartbuster',
+  'Pioneer',
+  'DK',
+  'Nutech',
+  'All Star',
+];
+
+function cleanValue(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeDiscId(value: string | null): string | null {
+  if (!value) return null;
+  return DISC_ID_PATTERN.test(value) ? value.toUpperCase() : value;
+}
+
+function isKnownDiscLabel(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return KNOWN_LABELS.some(
+    (label) =>
+      normalized === label.toLowerCase() || normalized.startsWith(label.toLowerCase())
+  );
+}
+
+function splitGreedy(base: string, separator: string): string[] {
+  return base.split(separator).map((part) => part.trim()).filter(Boolean);
+}
+
+function parseLegacyDefault(parts: string[]): ParsedMeta {
   let discId: string | null = null;
   let artist: string | null = null;
   let title: string | null = null;
 
   if (parts.length >= 3) {
-    // For 3+ parts, first part is always treated as disc ID (whether it's a code or label)
-    discId = parts[0];
-    artist = parts[1] || null;
-    title = parts.slice(2).join(' - ') || null;
-    
-    // Normalize disc IDs that look like traditional codes to uppercase
-    const discPattern = /^[A-Z]{1,6}\d{1,6}(-\d{1,4})?$/i;
-    if (discPattern.test(discId)) {
-      discId = discId.toUpperCase();
-    }
-    // Otherwise keep the label/disc ID as-is (preserving case for readability)
-    
+    discId = normalizeDiscId(cleanValue(parts[0]));
+    artist = cleanValue(parts[1]);
+    title = cleanValue(parts.slice(2).join(' - '));
   } else if (parts.length === 2) {
-    // For 2 parts, check if first part looks like a disc code
-    const discPattern = /^[A-Z]{1,6}\d{1,6}(-\d{1,4})?$/i;
-    
-    // Also check if it's a known label (treat these as disc IDs too)
-    const knownLabels = [
-      'BellySings', 
-      'Karaoke', 
-      'SunFly', 
-      'Sunfly',
-      'Sound Choice',
-      'Zoom',
-      'Chartbuster',
-      'Pioneer',
-      'DK',
-      'Nutech',
-      'All Star'
-    ];
-    
-    const looksLikeLabel = knownLabels.some(label => 
-      parts[0].toLowerCase() === label.toLowerCase() ||
-      parts[0].toLowerCase().startsWith(label.toLowerCase())
-    );
-    
-    if (discPattern.test(parts[0])) {
-      // Traditional disc code pattern
-      discId = parts[0].toUpperCase();
-      title = parts[1] || null;
-    } else if (looksLikeLabel) {
-      // Known label as disc ID
-      discId = parts[0];
-      title = parts[1] || null;
+    if (DISC_ID_PATTERN.test(parts[0])) {
+      discId = normalizeDiscId(cleanValue(parts[0]));
+      title = cleanValue(parts[1]);
+    } else if (isKnownDiscLabel(parts[0])) {
+      discId = cleanValue(parts[0]);
+      title = cleanValue(parts[1]);
     } else {
-      // Assume Artist - Title format
-      artist = parts[0] || null;
-      title = parts[1] || null;
+      artist = cleanValue(parts[0]);
+      title = cleanValue(parts[1]);
     }
   } else if (parts.length === 1) {
-    // Just use as title
-    title = parts[0] || null;
+    title = cleanValue(parts[0]);
   }
 
-  // Normalize empty strings to null
-  if (artist && !artist.trim()) artist = null;
-  if (title && !title.trim()) title = null;
-  if (discId && !discId.trim()) discId = null;
+  return { artist, title, discId };
+}
 
-  // Log for debugging
-  console.log(`Parsed: "${basename}" -> discId: "${discId}", artist: "${artist}", title: "${title}"`);
+function parseThreePartMode(parts: string[], mode: LibraryParseMode): ParsedMeta {
+  if (mode === DEFAULT_LIBRARY_PARSE_MODE) {
+    return parseLegacyDefault(parts);
+  }
+
+  if (parts.length === 0) {
+    return { artist: null, title: null, discId: null };
+  }
+
+  if (parts.length === 1) {
+    switch (mode) {
+      case 'discid-title-artist':
+        return { artist: null, title: null, discId: normalizeDiscId(cleanValue(parts[0])) };
+      case 'artist-title-discid':
+        return { artist: cleanValue(parts[0]), title: null, discId: null };
+      case 'title-artist-discid':
+        return { artist: null, title: cleanValue(parts[0]), discId: null };
+      default:
+        return parseLegacyDefault(parts);
+    }
+  }
+
+  if (parts.length === 2) {
+    switch (mode) {
+      case 'discid-title-artist':
+        return {
+          artist: null,
+          title: cleanValue(parts[1]),
+          discId: normalizeDiscId(cleanValue(parts[0])),
+        };
+      case 'artist-title-discid':
+        return {
+          artist: cleanValue(parts[0]),
+          title: cleanValue(parts[1]),
+          discId: null,
+        };
+      case 'title-artist-discid':
+        return {
+          artist: cleanValue(parts[1]),
+          title: cleanValue(parts[0]),
+          discId: null,
+        };
+      default:
+        return parseLegacyDefault(parts);
+    }
+  }
+
+  let discId: string | null = null;
+  let artist: string | null = null;
+  let title: string | null = null;
+
+  switch (mode) {
+    case 'discid-title-artist':
+      discId = normalizeDiscId(cleanValue(parts[0]));
+      if (parts.length >= 2) {
+        title = cleanValue(parts.slice(1, Math.max(parts.length - 1, 2)).join(' - '));
+      }
+      artist = cleanValue(parts.length >= 2 ? parts[parts.length - 1] : null);
+      break;
+    case 'artist-title-discid':
+      artist = cleanValue(parts[0]);
+      if (parts.length >= 2) {
+        title = cleanValue(parts.slice(1, Math.max(parts.length - 1, 2)).join(' - '));
+      }
+      discId = normalizeDiscId(cleanValue(parts.length >= 2 ? parts[parts.length - 1] : null));
+      break;
+    case 'title-artist-discid':
+      title = cleanValue(parts.slice(0, Math.max(parts.length - 2, 1)).join(' - '));
+      artist = cleanValue(parts.length >= 2 ? parts[parts.length - 2] : null);
+      discId = normalizeDiscId(cleanValue(parts.length >= 1 ? parts[parts.length - 1] : null));
+      break;
+    default:
+      return parseLegacyDefault(parts);
+  }
 
   return { artist, title, discId };
+}
+
+function parseTwoPartMode(parts: string[], mode: LibraryParseMode): ParsedMeta {
+  switch (mode) {
+    case 'artist-title':
+      return {
+        artist: cleanValue(parts[0]),
+        title: cleanValue(parts.slice(1).join(' - ')),
+        discId: null,
+      };
+    case 'title-artist':
+      return {
+        artist: cleanValue(parts.length >= 2 ? parts[parts.length - 1] : null),
+        title: cleanValue(parts.slice(0, Math.max(parts.length - 1, 1)).join(' - ')),
+        discId: null,
+      };
+    default:
+      return parseThreePartMode(parts, mode);
+  }
+}
+
+function parseUnderscoreMode(base: string): ParsedMeta {
+  const parts = splitGreedy(base, '_');
+  if (parts.length === 0) {
+    return { artist: null, title: null, discId: null };
+  }
+
+  if (parts.length === 1) {
+    return { artist: null, title: null, discId: normalizeDiscId(cleanValue(parts[0])) };
+  }
+
+  if (parts.length === 2) {
+    return {
+      artist: null,
+      title: cleanValue(parts[1]),
+      discId: normalizeDiscId(cleanValue(parts[0])),
+    };
+  }
+
+  return {
+    artist: cleanValue(parts[parts.length - 1]),
+    title: cleanValue(parts.slice(1, -1).join('_')),
+    discId: normalizeDiscId(cleanValue(parts[0])),
+  };
+}
+
+export function isLibraryParseMode(value: unknown): value is LibraryParseMode {
+  return typeof value === 'string' && LIBRARY_PARSE_MODES.includes(value as LibraryParseMode);
+}
+
+/**
+ * Parse karaoke metadata from a filename according to the selected library format.
+ */
+export function parseFromFilename(
+  basename: string,
+  mode: LibraryParseMode = DEFAULT_LIBRARY_PARSE_MODE
+): ParsedMeta {
+  const base = basename.replace(/\.[^.]+$/i, '').trim();
+
+  const parsed =
+    mode === 'discid_title_artist'
+      ? parseUnderscoreMode(base)
+      : parseTwoPartMode(splitGreedy(base, ' - '), mode);
+
+  console.log(
+    `Parsed (${mode}): "${basename}" -> discId: "${parsed.discId}", artist: "${parsed.artist}", title: "${parsed.title}"`
+  );
+
+  return parsed;
 }
 
 /**
@@ -98,24 +242,20 @@ export function parseFromFilename(basename: string): ParsedMeta {
  */
 export function parseBreakMusicFromFilename(basename: string): BreakParsedMeta {
   const base = basename.replace(/\.[^.]+$/i, '').trim();
-  const parts = base.split(' - ').map(p => p.trim()).filter(Boolean);
-  const discPattern = /^[A-Z]{1,6}\d{1,6}(-\d{1,4})?$/i;
+  const parts = base.split(' - ').map((p) => p.trim()).filter(Boolean);
 
   let artist: string | null = null;
   let title: string | null = null;
 
-  if (parts.length >= 3 && discPattern.test(parts[0])) {
-    artist = parts[1] || null;
-    title = parts.slice(2).join(' - ') || null;
+  if (parts.length >= 3 && DISC_ID_PATTERN.test(parts[0])) {
+    artist = cleanValue(parts[1]);
+    title = cleanValue(parts.slice(2).join(' - '));
   } else if (parts.length >= 2) {
-    artist = parts[0] || null;
-    title = parts.slice(1).join(' - ') || null;
+    artist = cleanValue(parts[0]);
+    title = cleanValue(parts.slice(1).join(' - '));
   } else if (parts.length === 1) {
-    title = parts[0] || null;
+    title = cleanValue(parts[0]);
   }
-
-  if (artist && !artist.trim()) artist = null;
-  if (title && !title.trim()) title = null;
 
   return { artist, title };
 }

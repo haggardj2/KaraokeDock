@@ -7,7 +7,9 @@ export const DEFAULT_OVERLAY_SETTINGS = {
     customMessage: '',
     showRoller: true,
     showQrCode: true,
-    hideSingerQueue: false
+    hideSingerQueue: false,
+    keepRotationScrollerSingers: false,
+    showRequestsUrl: true
 };
 export default function QueueOverlay({ now, upNext, settings = DEFAULT_OVERLAY_SETTINGS }) {
     // Don't render if not visible

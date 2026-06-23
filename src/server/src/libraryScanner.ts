@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { getSetting, query, setSetting } from './db.js';
 import { logger } from './logger.js';
+import { DEFAULT_LIBRARY_PARSE_MODE, type LibraryParseMode } from './parsing.js';
 import { scanPath } from './scanner.js';
 
 export class LibraryScanAlreadyInProgressError extends Error {
@@ -15,6 +16,7 @@ type LibraryScanEvent = 'start' | 'progress' | 'done';
 export interface LibraryScanRequest {
   libraryId: number;
   libraryPath: string;
+  parseMode?: LibraryParseMode;
   scanRoot?: string;
   cleanupRoot?: string;
 }
@@ -100,6 +102,7 @@ async function runLibraryScanRequestsInternal(
           {
             scanRoot: request.scanRoot,
             cleanupRoot: request.cleanupRoot,
+            parseMode: request.parseMode,
           }
         );
         allStats[request.libraryId] = mergeLibraryScanStats(allStats[request.libraryId], stats);
@@ -127,8 +130,8 @@ export async function runLibraryScanRequests(
 
 export async function runLibraryScan(libraryId?: number | null): Promise<{ stats: Record<number, any> | any }> {
   if (libraryId != null) {
-    const result = await query<{ id: number; path: string }>(
-      `SELECT id, path FROM libraries WHERE id = $1`,
+    const result = await query<{ id: number; path: string; parse_mode: LibraryParseMode | null }>(
+      `SELECT id, path, parse_mode FROM libraries WHERE id = $1`,
       [libraryId]
     );
     if (!result.rows.length) {
@@ -136,12 +139,24 @@ export async function runLibraryScan(libraryId?: number | null): Promise<{ stats
     }
 
     const lib = result.rows[0];
-    const scanResult = await runLibraryScanRequestsInternal([{ libraryId: lib.id, libraryPath: lib.path }]);
+    const scanResult = await runLibraryScanRequestsInternal([
+      {
+        libraryId: lib.id,
+        libraryPath: lib.path,
+        parseMode: lib.parse_mode ?? DEFAULT_LIBRARY_PARSE_MODE,
+      },
+    ]);
     return { stats: scanResult.stats[lib.id] };
   }
 
-  const libs = await query<{ id: number; path: string }>(`SELECT id, path FROM libraries ORDER BY id`);
+  const libs = await query<{ id: number; path: string; parse_mode: LibraryParseMode | null }>(
+    `SELECT id, path, parse_mode FROM libraries ORDER BY id`
+  );
   return runLibraryScanRequestsInternal(
-    libs.rows.map((lib) => ({ libraryId: lib.id, libraryPath: lib.path }))
+    libs.rows.map((lib) => ({
+      libraryId: lib.id,
+      libraryPath: lib.path,
+      parseMode: lib.parse_mode ?? DEFAULT_LIBRARY_PARSE_MODE,
+    }))
   );
 }

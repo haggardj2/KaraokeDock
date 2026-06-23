@@ -16,6 +16,8 @@ export type OverlaySettings = {
   showRoller: boolean // Whether to show the scrolling ticker/roller
   showQrCode: boolean // Whether to show the QR code
   hideSingerQueue: boolean // Whether to hide the songs the singer has queued (show singer name only)
+  keepRotationScrollerSingers: boolean
+  showRequestsUrl: boolean
 }
 
 export const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
@@ -25,7 +27,9 @@ export const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   customMessage: '',
   showRoller: true,
   showQrCode: true,
-  hideSingerQueue: false
+  hideSingerQueue: false,
+  keepRotationScrollerSingers: false,
+  showRequestsUrl: true
 }
 
 export default function QueueOverlay({

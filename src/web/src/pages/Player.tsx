@@ -40,6 +40,39 @@ type BreakMusicState = {
   } | null;
 };
 
+type RotationScrollerSinger = {
+  displayName: string;
+  position: number;
+  hasQueuedSong: boolean;
+};
+
+function getDefaultRequestsUrl(): string {
+  if (typeof window === "undefined" || !window.location?.origin) {
+    return "/requests";
+  }
+  return new URL("/requests", window.location.origin).toString();
+}
+
+function formatRequestsUrlForDisplay(value: string): string {
+  try {
+    const parsed = new URL(
+      value,
+      typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "http://localhost",
+    );
+    const trimmedPath = parsed.pathname
+      .replace(/\/requests\/?$/i, "")
+      .replace(/\/$/, "");
+    return `${parsed.host}${trimmedPath}`;
+  } catch {
+    return value
+      .replace(/^https?:\/\//i, "")
+      .replace(/\/requests\/?$/i, "")
+      .replace(/\/$/, "");
+  }
+}
+
 // Helper function to extract YouTube video ID from URL
 function getYouTubeVideoId(url: string): string | null {
   if (!url) return null;
@@ -77,6 +110,7 @@ function getYouTubeVideoId(url: string): string | null {
         return normalizeVideoId(segments[1]);
       }
     }
+
   } catch {
     return null;
   }
@@ -89,6 +123,18 @@ function isValidDuration(duration: number | null | undefined): boolean {
   return duration != null && !isNaN(duration) && isFinite(duration) && duration > 0;
 }
 
+/**
+ * Format a singer's display name.
+ * If short=true and the name has a first + last component, return "First L."
+ */
+function formatSingerName(name: string | null | undefined, short = false): string {
+  if (!name) return "Anonymous";
+  if (!short) return name;
+  const parts = name.trim().split(/\s+/);
+  if (parts.length < 2) return name;
+  return `${parts[0]} ${parts[parts.length - 1][0]}.`;
+}
+
 const AUTOPLAY_UNMUTE_DELAY_MS = 100; // Delay before unmuting video after autoplay starts
 const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   visible: true,
@@ -98,6 +144,8 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   showRoller: true,
   showQrCode: true,
   hideSingerQueue: false,
+  keepRotationScrollerSingers: false,
+  showRequestsUrl: true,
 };
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
@@ -140,6 +188,14 @@ function normalizeOverlaySettings(value: unknown): OverlaySettings {
       settings.hideSingerQueue,
       DEFAULT_OVERLAY_SETTINGS.hideSingerQueue,
     ),
+    keepRotationScrollerSingers: parseBoolean(
+      settings.keepRotationScrollerSingers,
+      DEFAULT_OVERLAY_SETTINGS.keepRotationScrollerSingers,
+    ),
+    showRequestsUrl: parseBoolean(
+      settings.showRequestsUrl,
+      DEFAULT_OVERLAY_SETTINGS.showRequestsUrl,
+    ),
   };
 }
 
@@ -155,6 +211,10 @@ export default function Player() {
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>(
     DEFAULT_OVERLAY_SETTINGS,
   );
+  const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
+  const [rotationScrollerSingers, setRotationScrollerSingers] = useState<
+    RotationScrollerSinger[]
+  >([]);
   const [autoPlay, setAutoPlay] = useState(false);
   const [autoPlayDelay, setAutoPlayDelay] = useState(5);
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -182,6 +242,12 @@ export default function Player() {
   const breakTrackIdRef = useRef<number | null>(null);
   const breakTrackSrcRef = useRef<string>("");
   const hideSingerQueueEnabled = overlaySettings.hideSingerQueue;
+  const keepRotationScrollerSingersEnabled =
+    hideSingerQueueEnabled && overlaySettings.keepRotationScrollerSingers;
+  const splashRequestsUrl = useMemo(
+    () => formatRequestsUrlForDisplay(requestsUrl),
+    [requestsUrl],
+  );
 
   // Force dark theme
   useEffect(() => {
@@ -284,8 +350,14 @@ export default function Player() {
 
   // Fetch queue + determine current
   async function refresh() {
-    const q: QItem[] = await api("/api/queue");
+    const [q, rotationSingers] = await Promise.all([
+      api("/api/queue") as Promise<QItem[]>,
+      api("/api/overlay/rotation-singers")
+        .then((rows: RotationScrollerSinger[]) => rows)
+        .catch(() => [] as RotationScrollerSinger[]),
+    ]);
     setQueue(q);
+    setRotationScrollerSingers(rotationSingers);
     const cur = q.find((x) => x.status === "playing") || null;
     setNow((prev) => {
       // No change: nothing was playing, nothing is playing now
@@ -341,6 +413,18 @@ export default function Player() {
       });
   }, []);
 
+  useEffect(() => {
+    api("/api/settings/public")
+      .then((settings: { "requests.url"?: string }) => {
+        if (typeof settings["requests.url"] === "string" && settings["requests.url"].trim()) {
+          setRequestsUrl(settings["requests.url"]);
+        }
+      })
+      .catch(() => {
+        // Keep the client-derived fallback URL on error
+      });
+  }, []);
+
   // Fetch initial autoplay settings
   useEffect(() => {
     api("/api/autoplay/settings")
@@ -387,7 +471,13 @@ export default function Player() {
             }
             // Handle overlay settings updates
             if (msg.type === "overlay.settings") {
-              setOverlaySettings(normalizeOverlaySettings(msg));
+              const settings = normalizeOverlaySettings(msg);
+              setOverlaySettings(settings);
+              if (!settings.keepRotationScrollerSingers) {
+                setRotationScrollerSingers([]);
+              } else {
+                refresh();
+              }
             }
             // Handle autoplay settings updates
             if (msg.type === "autoplay.settings") {
@@ -460,9 +550,9 @@ export default function Player() {
       // Clean up YouTube player when song ends
       if (youtubePlayerRef.current) {
         try {
-          youtubePlayerRef.current.destroy();
+          youtubePlayerRef.current.stopVideo();
         } catch (err) {
-          console.warn('Failed to destroy YouTube player:', err);
+          console.warn('Failed to stop YouTube player:', err);
         }
         youtubePlayerRef.current = null;
       }
@@ -821,6 +911,8 @@ export default function Player() {
               // YT.PlayerState.ENDED = 0
               if (event.data === 0) {
                 console.log("YouTube video ended, sending final timing update");
+                // Guard against stale closure — verify the current song is still this one
+                if (!now) return;
                 try {
                   const duration = event.target.getDuration();
                   if (isValidDuration(duration)) {
@@ -858,9 +950,9 @@ export default function Player() {
       }
       if (youtubePlayerRef.current) {
         try {
-          youtubePlayerRef.current.destroy();
+          youtubePlayerRef.current.stopVideo();
         } catch (err) {
-          console.warn('Failed to destroy YouTube player in cleanup:', err);
+          console.warn('Failed to stop YouTube player in cleanup:', err);
         }
         youtubePlayerRef.current = null;
       }
@@ -1014,9 +1106,18 @@ export default function Player() {
 
   // Build ticker text with current singer and queue
   const tickerText = useMemo(() => {
+    const rotationText = rotationScrollerSingers
+      .slice(0, 8)
+      .map((singer, idx) =>
+        singer.hasQueuedSong
+          ? `${idx + 1}. ${singer.displayName}`
+          : `${idx + 1}. ${singer.displayName} (waiting)`,
+      )
+      .join(" • ");
+
     // If nothing is playing
     if (!now) {
-      if (upNext.length === 0) {
+      if (upNext.length === 0 && !rotationText) {
         // Show custom message at end if set, otherwise waiting message
         if (overlaySettings.customMessage) {
           return `🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     `;
@@ -1025,13 +1126,16 @@ export default function Player() {
       }
 
       // Show upcoming queue when nothing is playing
-      const queueText = upNext
-        .slice(0, 5)
-        .map((item, idx) => {
-          const singer = item.requested_by || "Anonymous";
-          return `${idx + 1}. ${singer}`;
-        })
-        .join(" • ");
+      const queueText =
+        keepRotationScrollerSingersEnabled && rotationText
+          ? rotationText
+          : upNext
+              .slice(0, 5)
+              .map((item, idx) => {
+                const singer = formatSingerName(item.requested_by, true);
+                return `${idx + 1}. ${singer}`;
+              })
+              .join(" • ");
 
       // Add countdown info if autoplay is enabled and not manually stopped
       const countdownInfo =
@@ -1049,20 +1153,23 @@ export default function Player() {
     // Current singer is playing - always show who is singing
     const current = hideSingerQueueEnabled
       ? now.requested_by
-        ? `🎤 NOW SINGING: ${now.requested_by}`
+        ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)}`
         : `🎤 NOW PLAYING`
       : now.requested_by
-        ? `🎤 NOW SINGING: ${now.requested_by} — ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
+        ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)} — ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
         : `🎤 NOW PLAYING: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`;
 
     // Build queue list
-    const queueText = upNext
-      .slice(0, 5)
-      .map((item, idx) => {
-        const singer = item.requested_by || "Anonymous";
-        return `${idx + 1}. ${singer}`;
-      })
-      .join(" • ");
+    const queueText =
+      keepRotationScrollerSingersEnabled && rotationText
+        ? rotationText
+        : upNext
+            .slice(0, 5)
+            .map((item, idx) => {
+              const singer = formatSingerName(item.requested_by, true);
+              return `${idx + 1}. ${singer}`;
+            })
+            .join(" • ");
 
     // Combine with proper spacing, adding custom message at the end if set
     let fullText = queueText ? `${current} ⭐ UP NEXT: ${queueText}` : current;
@@ -1074,7 +1181,17 @@ export default function Player() {
 
     // Repeat for smooth scrolling with divider
     return `${fullText}     🎵     ${fullText}     🎵     `;
-  }, [now, upNext, overlaySettings.customMessage, hideSingerQueueEnabled, autoPlay, countdown, manualStop]);
+  }, [
+    now,
+    upNext,
+    overlaySettings.customMessage,
+    hideSingerQueueEnabled,
+    keepRotationScrollerSingersEnabled,
+    rotationScrollerSingers,
+    autoPlay,
+    countdown,
+    manualStop,
+  ]);
 
   // Render the overlay (shown always, unless visibility is false)
   const renderOverlay = () => {
@@ -1312,7 +1429,7 @@ export default function Player() {
                     marginBottom: "8px",
                   }}
                 >
-                  {upNext[0].requested_by || "Anonymous"}
+                  {formatSingerName(upNext[0].requested_by) || "Anonymous"}
                 </div>
                 {!hideSingerQueueEnabled && (
                   <div
@@ -1351,6 +1468,27 @@ export default function Player() {
               >
                 Add your song from the request page! 
               </p>
+              {overlaySettings.showRequestsUrl && (
+                <p
+                  style={{
+                    fontSize: "clamp(16px, 2.1vw, 24px)",
+                    color: "rgba(226, 232, 240, 0.95)",
+                    margin: "16px 0 0 0",
+                    fontFamily: '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
+                    fontWeight: 700,
+                    letterSpacing: "0.04em",
+                    textTransform: "lowercase",
+                    wordBreak: "break-word",
+                    padding: "12px 20px",
+                    borderRadius: 999,
+                    background: "rgba(15, 23, 42, 0.72)",
+                    border: "1px solid rgba(148, 163, 184, 0.28)",
+                    boxShadow: "0 10px 30px rgba(15, 23, 42, 0.25)",
+                  }}
+                >
+                  {splashRequestsUrl}
+                </p>
+              )}
             </div>
           )}
 
@@ -1450,6 +1588,7 @@ export default function Player() {
         {/* YouTube iframe for YouTube videos */}
         {isYouTube && youtubeVideoId ? (
           <iframe
+            key={youtubeVideoId}
             id={`youtube-player-${youtubeVideoId}`}
             ref={iframeRef}
             src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=1&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`}

@@ -816,10 +816,85 @@ export async function moveSinger(
       WHERE rotation_id = $1 AND position >= $2 AND singer_id != $3`,
     [rotationId, newPosition, singerId],
   );
-  await query(
-    `UPDATE rotation_singers SET position = $1 WHERE rotation_id = $2 AND singer_id = $3`,
+  // Update existing row, or insert if singer is not yet in this rotation
+  const updated = await query<{ id: string }>(
+    `UPDATE rotation_singers SET position = $1 WHERE rotation_id = $2 AND singer_id = $3 RETURNING id`,
     [newPosition, rotationId, singerId],
   );
+  if (updated.rows.length === 0) {
+    const roundRes = await query<{ current_round: number }>(
+      `SELECT current_round FROM rotations WHERE id = $1`,
+      [rotationId],
+    );
+    const currentRound = roundRes.rows[0]?.current_round ?? 1;
+    await query(
+      `INSERT INTO rotation_singers (rotation_id, singer_id, status, position, current_round_joined)
+       VALUES ($1, $2, 'active', $3, $4)
+       ON CONFLICT (rotation_id, singer_id) DO UPDATE SET position = EXCLUDED.position, status = 'active'`,
+      [rotationId, singerId, newPosition, currentRound],
+    );
+  }
+}
+
+export async function reorderSingers(
+  rotationId: bigint,
+  orderedSingerIds: bigint[],
+): Promise<void> {
+  if (orderedSingerIds.length === 0) return;
+
+  const existing = await query<{ singer_id: string; position: number }>(
+    `SELECT singer_id, position
+       FROM rotation_singers
+      WHERE rotation_id = $1
+        AND status = 'active'
+      ORDER BY position`,
+    [rotationId],
+  );
+  if (existing.rows.length === 0) return;
+
+  const existingById = new Map(existing.rows.map((row) => [String(row.singer_id), row.position]));
+  const requestedIds = orderedSingerIds.map((id) => id.toString()).filter((id) => existingById.has(id));
+  if (requestedIds.length === 0) return;
+
+  const seen = new Set<string>();
+  const nextOrder = requestedIds.filter((id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  for (const row of existing.rows) {
+    const id = String(row.singer_id);
+    if (!seen.has(id)) nextOrder.push(id);
+  }
+
+  const positions = existing.rows.map((row) => Number(row.position)).sort((a, b) => a - b);
+  const TEMP_OFFSET = 1_000_000;
+
+  await query('BEGIN');
+  try {
+    for (let i = 0; i < nextOrder.length; i++) {
+      await query(
+        `UPDATE rotation_singers
+            SET position = $1
+          WHERE rotation_id = $2
+            AND singer_id = $3`,
+        [TEMP_OFFSET + i, rotationId, nextOrder[i]],
+      );
+    }
+    for (let i = 0; i < nextOrder.length; i++) {
+      await query(
+        `UPDATE rotation_singers
+            SET position = $1
+          WHERE rotation_id = $2
+            AND singer_id = $3`,
+        [positions[i] ?? i, rotationId, nextOrder[i]],
+      );
+    }
+    await query('COMMIT');
+  } catch (e) {
+    await query('ROLLBACK');
+    throw e;
+  }
 }
 
 export async function insertSingerNext(rotationId: bigint, singerId: bigint): Promise<void> {

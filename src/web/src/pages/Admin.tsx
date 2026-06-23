@@ -4,7 +4,16 @@ import { useAuth } from "../auth-context";
 import { parseBooleanSetting } from "../utils/settings";
 import { clearStoredSessionToken, readStoredSessionToken, writeStoredSessionToken } from "../session-token";
 
-type Library = { id: number; name: string; path: string };
+type LibraryParseMode =
+  | 'discid-artist-title'
+  | 'discid-title-artist'
+  | 'artist-title-discid'
+  | 'title-artist-discid'
+  | 'artist-title'
+  | 'title-artist'
+  | 'discid_title_artist';
+
+type Library = { id: number; name: string; path: string; parseMode: LibraryParseMode };
 type BreakFolder = { id: number; name: string; path: string };
 type Stats = {
   artists: number;
@@ -43,6 +52,90 @@ type OidcPublicConfig = {
   passwordLoginEnabled: boolean;
 };
 
+const LIBRARY_PARSE_MODE_OPTIONS: Array<{
+  value: LibraryParseMode;
+  label: string;
+  example: string;
+}> = [
+  {
+    value: 'discid-artist-title',
+    label: 'discID - Artist - Title',
+    example: 'SC1234-01 - Queen - Bohemian Rhapsody',
+  },
+  {
+    value: 'discid-title-artist',
+    label: 'discID - Title - Artist',
+    example: 'SC1234-01 - Bohemian Rhapsody - Queen',
+  },
+  {
+    value: 'artist-title-discid',
+    label: 'Artist - Title - discID',
+    example: 'Queen - Bohemian Rhapsody - SC1234-01',
+  },
+  {
+    value: 'title-artist-discid',
+    label: 'Title - Artist - discID',
+    example: 'Bohemian Rhapsody - Queen - SC1234-01',
+  },
+  {
+    value: 'artist-title',
+    label: 'Artist - Title',
+    example: 'Queen - Bohemian Rhapsody',
+  },
+  {
+    value: 'title-artist',
+    label: 'Title - Artist',
+    example: 'Bohemian Rhapsody - Queen',
+  },
+  {
+    value: 'discid_title_artist',
+    label: 'discID_title_artist',
+    example: 'SC1234-01_Bohemian_Rhapsody_Queen',
+  },
+];
+
+const ADMIN_CARD_STATE_KEY = 'karaokedock.admin.cardState';
+
+type AdminCardState = {
+  mediaLibrariesExpanded: boolean;
+  breakMusicExpanded: boolean;
+  systemSettingsExpanded: boolean;
+  usersExpanded: boolean;
+  oidcSettingsExpanded: boolean;
+};
+
+function loadAdminCardState(): AdminCardState {
+  const defaults: AdminCardState = {
+    mediaLibrariesExpanded: true,
+    breakMusicExpanded: true,
+    systemSettingsExpanded: true,
+    usersExpanded: true,
+    oidcSettingsExpanded: false,
+  };
+
+  if (typeof window === 'undefined') {
+    return defaults;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ADMIN_CARD_STATE_KEY);
+    if (!raw) {
+      return defaults;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<AdminCardState>;
+    return {
+      mediaLibrariesExpanded: parsed.mediaLibrariesExpanded ?? defaults.mediaLibrariesExpanded,
+      breakMusicExpanded: parsed.breakMusicExpanded ?? defaults.breakMusicExpanded,
+      systemSettingsExpanded: parsed.systemSettingsExpanded ?? defaults.systemSettingsExpanded,
+      usersExpanded: parsed.usersExpanded ?? defaults.usersExpanded,
+      oidcSettingsExpanded: parsed.oidcSettingsExpanded ?? defaults.oidcSettingsExpanded,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
 const getUserDisplayName = (user: Pick<ManagedUser, 'username' | 'display_name'>) =>
   user.display_name?.trim() || user.username;
 
@@ -51,6 +144,8 @@ export default function Admin() {
   const [libs, setLibs] = useState<Library[]>([]);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
+  const [libraryParseMode, setLibraryParseMode] = useState<LibraryParseMode>('discid-artist-title');
+  const [showAddLibraryModal, setShowAddLibraryModal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [banner, setBanner] = useState<string>("");
@@ -62,6 +157,7 @@ export default function Admin() {
   const [breakFolders, setBreakFolders] = useState<BreakFolder[]>([]);
   const [breakFolderName, setBreakFolderName] = useState("");
   const [breakFolderPath, setBreakFolderPath] = useState("");
+  const [showAddBreakFolderModal, setShowAddBreakFolderModal] = useState(false);
   const [breakPlaylistsFolder, setBreakPlaylistsFolder] = useState("/media/playlists");
 
   // Login state
@@ -105,13 +201,11 @@ export default function Admin() {
   const [showDownloadBrowser, setShowDownloadBrowser] = useState(false);
   
   // Collapsible card states
-  const [mediaLibrariesExpanded, setMediaLibrariesExpanded] = useState(true);
-  const [breakMusicExpanded, setBreakMusicExpanded] = useState(true);
-  const [systemSettingsExpanded, setSystemSettingsExpanded] = useState(true);
+  const [cardState, setCardState] = useState<AdminCardState>(() => loadAdminCardState());
+  const { mediaLibrariesExpanded, breakMusicExpanded, systemSettingsExpanded, usersExpanded, oidcSettingsExpanded } = cardState;
 
   // User Manager state
   const [users, setUsers] = useState<ManagedUser[]>([]);
-  const [usersExpanded, setUsersExpanded] = useState(true);
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [newUserUsername, setNewUserUsername] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
@@ -124,7 +218,6 @@ export default function Admin() {
   const [editUserError, setEditUserError] = useState("");
 
   // OIDC Settings state
-  const [oidcSettingsExpanded, setOidcSettingsExpanded] = useState(false);
   const [oidcSettings, setOidcSettings] = useState<OidcConfig>({
     enabled: false,
     issuer: '',
@@ -163,6 +256,31 @@ export default function Admin() {
     if (!auth.sessionToken || !auth.isLoggedIn) return;
     const s = await api("/api/admin/stats", { headers: sessionHeaders });
     setStats(s);
+  }
+
+  function updateCardState<K extends keyof AdminCardState>(key: K, value: AdminCardState[K]) {
+    setCardState((current) => ({ ...current, [key]: value }));
+  }
+
+  function resetLibraryForm() {
+    setName("");
+    setPath("");
+    setLibraryParseMode('discid-artist-title');
+  }
+
+  function closeAddLibraryModal() {
+    resetLibraryForm();
+    setShowAddLibraryModal(false);
+  }
+
+  function resetBreakFolderForm() {
+    setBreakFolderName("");
+    setBreakFolderPath("");
+  }
+
+  function closeAddBreakFolderModal() {
+    resetBreakFolderForm();
+    setShowAddBreakFolderModal(false);
   }
 
   async function handleLogin(e: React.FormEvent) {
@@ -344,7 +462,6 @@ export default function Admin() {
               displayName: result.displayName || "",
               picture: result.picture || "",
             });
-            refreshStats();
           } else {
             auth.setIsLoggedIn(false);
             auth.clearProfile();
@@ -385,6 +502,14 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(ADMIN_CARD_STATE_KEY, JSON.stringify(cardState));
+  }, [cardState]);
+
   async function addLibrary() {
     if (!auth.sessionToken || !auth.isLoggedIn) return alert("Please login first");
     if (! name. trim()) return alert("Library name is required");
@@ -395,11 +520,14 @@ export default function Admin() {
       await api("/api/libraries", {
         method: "POST",
         headers: sessionHeaders,
-        body: JSON.stringify({ name: name.trim(), path: path. trim() }),
+        body: JSON.stringify({
+          name: name.trim(),
+          path: path.trim(),
+          parseMode: libraryParseMode,
+        }),
       });
       await refreshLibs();
-      setName("");
-      setPath("");
+      closeAddLibraryModal();
     } finally {
       setBusy(false);
     }
@@ -431,9 +559,8 @@ export default function Admin() {
         headers: sessionHeaders,
         body: JSON.stringify({ name: breakFolderName.trim(), path: breakFolderPath.trim() }),
       });
-      setBreakFolderName("");
-      setBreakFolderPath("");
       await refreshBreakFolders();
+      closeAddBreakFolderModal();
     } finally {
       setBusy(false);
     }
@@ -952,13 +1079,16 @@ export default function Admin() {
   // Load yt-dlp version and settings on login
   useEffect(() => {
     if (auth.isLoggedIn && auth.isAdmin) {
+      refreshStats();
       fetchYtdlpVersion();
       loadSettings();
       refreshUsers();
       loadOidcSettings();
       refreshBreakFolders();
+    } else {
+      setStats(null);
     }
-  }, [auth.isLoggedIn, auth.isAdmin]);
+  }, [auth.isLoggedIn, auth.isAdmin, auth.sessionToken]);
 
   return (
     <div className="admin-page">
@@ -1800,7 +1930,7 @@ export default function Admin() {
 
             {/* Media Libraries Card */}
             <div className="card">
-              <div className="card-header" onClick={() => setMediaLibrariesExpanded(!mediaLibrariesExpanded)}>
+              <div className="card-header" onClick={() => updateCardState('mediaLibrariesExpanded', !mediaLibrariesExpanded)}>
                 <h2>📚 Media Libraries</h2>
                 <button className="card-toggle" type="button">
                   {mediaLibrariesExpanded ? '▼ Collapse' : '▶ Expand'}
@@ -1808,61 +1938,20 @@ export default function Admin() {
               </div>
               
               <div className={`card-content ${mediaLibrariesExpanded ? 'expanded' : 'collapsed'}`}>
-                {/* Add Library Form */}
-                <div style={{
-                  background: "var(--color-bg-secondary)",
-                  border: "1px solid var(--color-border)",
-                  borderRadius: 12,
-                  padding: 16,
-                  marginBottom: 20
-                }}>
-                  <div className="form-group">
-                    <label className="form-label">Library Name</label>
-                    <input
-                      className="form-input"
-                      placeholder="e.g., Main Collection"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Folder Path</label>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        className="form-input"
-                        placeholder="e.g., /media/karaoke"
-                        value={path}
-                      onChange={(e) => setPath(e.target.value)}
-                    />
-                    <button
-                      className="btn-icon"
-                      onClick={openBrowser}
-                      disabled={! auth.sessionToken || !auth.isLoggedIn}
-                      title="Browse folders"
-                      aria-label="Browse folders"
-                    >
-                      📁
-                    </button>
-                  </div>
+                <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'flex-end' }}>
+                  <button
+                    className="btn-icon primary"
+                    title="Add media library"
+                    aria-label="Add media library"
+                    onClick={() => {
+                      resetLibraryForm();
+                      setShowAddLibraryModal(true);
+                    }}
+                    disabled={!auth.sessionToken || !auth.isLoggedIn}
+                  >
+                    ➕
+                  </button>
                 </div>
-
-                <button
-                  className="btn-icon success"
-                  onClick={addLibrary}
-                  disabled={
-                    busy ||
-                    !auth.sessionToken ||
-                    !auth.isLoggedIn ||
-                    !name.trim() ||
-                    !path.trim()
-                  }
-                  title="Add library"
-                  aria-label="Add library"
-                >
-                  ➕
-                </button>
-              </div>
 
               {/* Libraries List */}
               {libs.length > 0 ? (
@@ -1873,6 +1962,9 @@ export default function Admin() {
                         <div className="library-info">
                           <div className="library-name">{l.name}</div>
                           <div className="library-path">📁 {l.path}</div>
+                          <div className="library-path">
+                            🏷️ {LIBRARY_PARSE_MODE_OPTIONS.find((option) => option.value === l.parseMode)?.label ?? l.parseMode}
+                          </div>
                         </div>
                         <div className="library-actions">
                           <button
@@ -1900,7 +1992,7 @@ export default function Admin() {
                 <div className="empty-state">
                   <div className="empty-icon">📁</div>
                   <div className="empty-text">No libraries configured yet</div>
-                  <div className="empty-subtext">Add a media library above to get started</div>
+                  <div className="empty-subtext">Use the add button to create your first media library</div>
                 </div>
               )}
               </div>
@@ -1908,7 +2000,7 @@ export default function Admin() {
 
             {/* Break Music Card */}
             <div className="card">
-              <div className="card-header" onClick={() => setBreakMusicExpanded(!breakMusicExpanded)}>
+              <div className="card-header" onClick={() => updateCardState('breakMusicExpanded', !breakMusicExpanded)}>
                 <h2>🎼 Break Music</h2>
                 <button className="card-toggle" type="button">
                   {breakMusicExpanded ? '▼ Collapse' : '▶ Expand'}
@@ -1916,51 +2008,8 @@ export default function Admin() {
               </div>
 
               <div className={`card-content ${breakMusicExpanded ? 'expanded' : 'collapsed'}`}>
-                <div style={{
-                  background: "var(--color-bg-secondary)",
-                  border: "1px solid var(--color-border)",
-                  borderRadius: 12,
-                  padding: 16,
-                  marginBottom: 20
-                }}>
-                  <div className="form-group">
-                    <label className="form-label">Break Folder Name</label>
-                    <input
-                      className="form-input"
-                      placeholder="e.g., Lobby Music"
-                      value={breakFolderName}
-                      onChange={(e) => setBreakFolderName(e.target.value)}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Break Music Folder Path</label>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        className="form-input"
-                        placeholder="e.g., /media/break-music"
-                        value={breakFolderPath}
-                        onChange={(e) => setBreakFolderPath(e.target.value)}
-                      />
-                      <button
-                        className="btn-icon"
-                        onClick={openBreakLibraryBrowser}
-                        disabled={!auth.sessionToken || !auth.isLoggedIn}
-                        title="Browse folders"
-                        aria-label="Browse break music folders"
-                      >
-                        📁
-                      </button>
-                    </div>
-                  </div>
+                <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                    <button
-                      className="btn-icon success"
-                      onClick={addBreakFolder}
-                      disabled={busy || !breakFolderName.trim() || !breakFolderPath.trim()}
-                      title="Add break music folder"
-                    >
-                      ➕
-                    </button>
                     <button
                       className="btn-icon primary"
                       onClick={() => scanBreakMusic()}
@@ -1978,6 +2027,18 @@ export default function Admin() {
                       🧹
                     </button>
                   </div>
+                  <button
+                    className="btn-icon primary"
+                    onClick={() => {
+                      resetBreakFolderForm();
+                      setShowAddBreakFolderModal(true);
+                    }}
+                    disabled={!auth.sessionToken || !auth.isLoggedIn}
+                    title="Add break music folder"
+                    aria-label="Add break music folder"
+                  >
+                    ➕
+                  </button>
                 </div>
 
                 <div style={{
@@ -2056,7 +2117,7 @@ export default function Admin() {
 
             {/* System Settings Card */}
             <div className="card">
-              <div className="card-header" onClick={() => setSystemSettingsExpanded(!systemSettingsExpanded)}>
+              <div className="card-header" onClick={() => updateCardState('systemSettingsExpanded', !systemSettingsExpanded)}>
                 <h2>⚙️ System Settings</h2>
                 <button className="card-toggle" type="button">
                   {systemSettingsExpanded ? '▼ Collapse' : '▶ Expand'}
@@ -2322,7 +2383,7 @@ export default function Admin() {
 
             {/* User Manager Card */}
             <div className="card">
-              <div className="card-header" onClick={() => setUsersExpanded(!usersExpanded)}>
+              <div className="card-header" onClick={() => updateCardState('usersExpanded', !usersExpanded)}>
                 <h2>👥 User Manager</h2>
                 <button className="card-toggle" type="button">
                   {usersExpanded ? '▼ Collapse' : '▶ Expand'}
@@ -2427,7 +2488,7 @@ export default function Admin() {
 
             {/* OIDC Settings Card */}
             <div className="card">
-              <div className="card-header" onClick={() => setOidcSettingsExpanded(!oidcSettingsExpanded)}>
+              <div className="card-header" onClick={() => updateCardState('oidcSettingsExpanded', !oidcSettingsExpanded)}>
                 <h2>🔗 SSO / OIDC Settings</h2>
                 <button className="card-toggle" type="button">
                   {oidcSettingsExpanded ? '▼ Collapse' : '▶ Expand'}
@@ -2544,6 +2605,137 @@ export default function Admin() {
                 </form>
               </div>
             </div>
+
+            {showAddLibraryModal && (
+              <>
+                <div className="modal-backdrop" onClick={closeAddLibraryModal} />
+                <div className="modal" style={{ maxWidth: 560 }}>
+                  <div className="modal-header">
+                    <h3 className="modal-title">📚 Add Media Library</h3>
+                    <button className="btn ghost" onClick={closeAddLibraryModal} style={{ padding: '4px 12px' }}>✕</button>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Library Name</label>
+                    <input
+                      className="form-input"
+                      placeholder="e.g., Main Collection"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Folder Path</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        className="form-input"
+                        placeholder="e.g., /media/karaoke"
+                        value={path}
+                        onChange={(e) => setPath(e.target.value)}
+                      />
+                      <button
+                        className="btn-icon"
+                        onClick={openBrowser}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        title="Browse folders"
+                        aria-label="Browse library folders"
+                      >
+                        📁
+                      </button>
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Filename Parsing</label>
+                    <select
+                      className="form-input"
+                      value={libraryParseMode}
+                      onChange={(e) => setLibraryParseMode(e.target.value as LibraryParseMode)}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      {LIBRARY_PARSE_MODE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="library-path" style={{ marginTop: 8 }}>
+                      Example: {LIBRARY_PARSE_MODE_OPTIONS.find((option) => option.value === libraryParseMode)?.example}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="btn primary"
+                      onClick={addLibrary}
+                      disabled={
+                        busy ||
+                        !auth.sessionToken ||
+                        !auth.isLoggedIn ||
+                        !name.trim() ||
+                        !path.trim()
+                      }
+                    >
+                      <span>➕</span> Add Library
+                    </button>
+                    <button className="btn ghost" onClick={closeAddLibraryModal}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {showAddBreakFolderModal && (
+              <>
+                <div className="modal-backdrop" onClick={closeAddBreakFolderModal} />
+                <div className="modal" style={{ maxWidth: 560 }}>
+                  <div className="modal-header">
+                    <h3 className="modal-title">🎼 Add Break Music Folder</h3>
+                    <button className="btn ghost" onClick={closeAddBreakFolderModal} style={{ padding: '4px 12px' }}>✕</button>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Folder Name</label>
+                    <input
+                      className="form-input"
+                      placeholder="e.g., Lobby Music"
+                      value={breakFolderName}
+                      onChange={(e) => setBreakFolderName(e.target.value)}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Break Music Folder Path</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        className="form-input"
+                        placeholder="e.g., /media/break-music"
+                        value={breakFolderPath}
+                        onChange={(e) => setBreakFolderPath(e.target.value)}
+                      />
+                      <button
+                        className="btn-icon"
+                        onClick={openBreakLibraryBrowser}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        title="Browse folders"
+                        aria-label="Browse break music folders"
+                      >
+                        📁
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="btn primary"
+                      onClick={addBreakFolder}
+                      disabled={busy || !breakFolderName.trim() || !breakFolderPath.trim()}
+                    >
+                      <span>➕</span> Add Folder
+                    </button>
+                    <button className="btn ghost" onClick={closeAddBreakFolderModal}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
 
             {/* Folder Browser Modal */}
             {showBrowser && (

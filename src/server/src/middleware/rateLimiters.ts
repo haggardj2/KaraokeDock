@@ -13,17 +13,19 @@ export const authLimiter = rateLimit({
 // Moderate rate limiter for search endpoints: 30 requests per minute per IP
 export const searchLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 30, // Limit each IP to 30 searches per minute
+  max: 150, // Shared Wi-Fi guests can generate many debounced searches per minute
   message: 'Too many search requests, please slow down.',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => Boolean(req.headers['x-session-token']),
 });
 
 // Rate limiter for queue operations: 20 requests per minute per IP
 export const queueLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 20, // Limit each IP to 20 queue operations per minute
+  max: 60, // Allow multiple singers on one network to queue songs without repeated lockouts
   message: 'Too many queue requests, please slow down.',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => Boolean(req.headers['x-session-token']),
 });
