@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
+import { useAuth } from "../auth-context";
 
 const MIN_KEY_ADJUSTMENT = -6;
 const MAX_KEY_ADJUSTMENT = 6;
@@ -129,6 +130,14 @@ function safeHistoryFilename(name: string): string {
   return `${name.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "singer-history"}.kd`;
 }
 
+function splitNameForFields(name: string): { firstName: string; lastName: string } {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return {
+    firstName: parts[0] ?? "",
+    lastName: parts.slice(1).join(" "),
+  };
+}
+
 function createSingerUuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -165,6 +174,7 @@ function readJsonFile(file: File): Promise<unknown> {
 }
 
 export default function Requests() {
+  const auth = useAuth();
   const [q, setQ] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -172,6 +182,11 @@ export default function Requests() {
   const requestedBy = [firstName.trim(), lastName.trim()]
     .filter(Boolean)
     .join(" ");
+  const signedInRequestName = (
+    auth.profile.displayName ||
+    auth.profile.username ||
+    ""
+  ).trim();
   const [keyAdjustments, setKeyAdjustments] = useState<Map<string, number>>(
     new Map(),
   );
@@ -443,6 +458,21 @@ export default function Requests() {
       localStorage.setItem("karaoke-name", requestedBy.trim());
     }
   }, [requestedBy]);
+
+  useEffect(() => {
+    if (!signedInRequestName) return;
+
+    const { firstName: signedInFirstName, lastName: signedInLastName } =
+      splitNameForFields(signedInRequestName);
+    setFirstName(signedInFirstName);
+    setLastName(signedInLastName);
+    setNameError("");
+    setNameConfirmed(true);
+    setNameModalOpen(false);
+    setNameEditOpen(false);
+    setShowNamePrompt(false);
+    localStorage.setItem("karaoke-name", signedInRequestName);
+  }, [signedInRequestName]);
 
   // Auto-open name modal on first load if name not yet confirmed.
   // Read localStorage directly — the nameConfirmed state hasn't been set yet
