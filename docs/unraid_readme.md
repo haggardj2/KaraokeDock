@@ -241,9 +241,9 @@ Check:
 Open a console to your Unraid server
 ```bash
 # Run password reset helper:
-docker exec -it karaokedock npm run reset-credentials
+docker exec -it KaraokeDock npm run reset-credentials
 # Defaults to username "admin" and generates a secure password if --password is omitted.
-docker exec -it karaokedock npm run reset-credentials -- --password supersecret
+docker exec -it KaraokeDock npm run reset-credentials -- --password supersecret
 # Or set a specific username/password:
-docker exec -it karaokedock npm run reset-credentials -- --username admin --password supersecret
+docker exec -it KaraokeDock npm run reset-credentials -- --username admin --password supersecret
 ```
