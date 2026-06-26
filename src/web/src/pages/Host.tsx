@@ -198,6 +198,7 @@ const DEFAULT_BREAK_COLUMNS: BreakColumnVisibility = {
 }
 
 const BREAK_COLUMNS_STORAGE_KEY = 'host.breakMusicColumns'
+const HOST_TOP_COLLAPSED_STORAGE_KEY = 'host.topCardCollapsed'
 const HOST_CONTROL_BUTTON_COUNT = 6
 
 function downloadJsonFile(filename: string, data: unknown) {
@@ -253,6 +254,11 @@ function getInitialBreakColumns(): BreakColumnVisibility {
   }
 }
 
+function getInitialHostTopCollapsed(): boolean {
+  if (typeof window === 'undefined') return false
+  return window.localStorage.getItem(HOST_TOP_COLLAPSED_STORAGE_KEY) === 'true'
+}
+
 export default function Host() {
   const auth = useAuth()
   const [queue, setQueue] = useState<Row[]>([])
@@ -287,6 +293,7 @@ export default function Host() {
   const [showRequestsUrl, setShowRequestsUrl] = useState(true)
   const [showPlayerWindowControl, setShowPlayerWindowControl] = useState(false)
   const [showAccountManagement, setShowAccountManagement] = useState(false)
+  const [hostTopCollapsed, setHostTopCollapsed] = useState(() => getInitialHostTopCollapsed())
   const [changingPassword, setChangingPassword] = useState(false)
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -1011,6 +1018,11 @@ export default function Host() {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(BREAK_COLUMNS_STORAGE_KEY, JSON.stringify(breakColumns))
   }, [breakColumns])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(HOST_TOP_COLLAPSED_STORAGE_KEY, String(hostTopCollapsed))
+  }, [hostTopCollapsed])
 
   function formatDurationMs(ms: number | null | undefined) {
     if (!ms || ms <= 0) return '—'
@@ -2625,11 +2637,37 @@ function closeDetails(e: React.SyntheticEvent) {
           gap: 12px;
         }
 
-        .host-top-panels {
-          display: grid;
-          grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
+        .host-top-card {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .host-top-card-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .host-top-card-content {
+          display: flex;
+          flex-direction: row;
           gap: 16px;
           align-items: stretch;
+        }
+
+        .host-top-section {
+          flex: 1 1 0;
+          min-width: 0;
+        }
+
+        .host-section-divider {
+          width: 1px;
+          align-self: stretch;
+          background: var(--color-border);
+          margin: 0 2px;
+          flex: 0 0 auto;
         }
 
         .host-controls-card .control-btn {
@@ -2637,6 +2675,39 @@ function closeDetails(e: React.SyntheticEvent) {
           min-width: 40px;
           font-size: 16px;
           min-height: 36px;
+        }
+
+        .host-controls-card {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .host-control-buttons {
+          display: flex;
+          gap: 8px;
+          flex-wrap: nowrap;
+          align-items: center;
+        }
+
+        .host-control-buttons .control-btn {
+          flex: 0 0 40px;
+        }
+
+        .now-playing-box {
+          padding: 12px;
+          border-radius: 14px;
+          background: var(--color-bg-secondary);
+          border: 1px solid var(--color-border);
+          overflow: visible;
+          min-height: 98px;
+          box-sizing: border-box;
+        }
+
+        .now-playing-box.now-playing {
+          padding: 12px;
+          border-radius: 14px;
+          overflow: visible;
         }
 
         .control-btn {
@@ -3275,8 +3346,31 @@ function closeDetails(e: React.SyntheticEvent) {
         }
 
         @media (max-width: 768px) {
-          .host-top-panels {
-            grid-template-columns: 1fr;
+          .host-top-card-content {
+            flex-direction: column;
+          }
+
+          .host-top-section {
+            flex: 0 1 auto;
+          }
+
+          .host-section-divider {
+            width: 100%;
+            height: 1px;
+            margin: 2px 0;
+          }
+
+          .host-control-buttons {
+            gap: 6px;
+          }
+
+          .host-control-buttons .control-btn {
+            flex: 1 1 0;
+            min-width: 0;
+            height: 38px;
+            min-height: 38px;
+            padding: 0;
+            border-radius: 10px;
           }
 
           .controls-grid {
@@ -3342,10 +3436,6 @@ function closeDetails(e: React.SyntheticEvent) {
 
         /* Even smaller screens */
         @media (max-width:  480px) {
-          .host-top-panels {
-            gap: 12px;
-          }
-
           .controls-grid {
             gap:  4px !important;
           }
@@ -3499,66 +3589,32 @@ function closeDetails(e: React.SyntheticEvent) {
               <h1 className="header-title">Host Panel</h1>
             </div>
 
-            <div className="host-top-panels">
-              <div className={`card host-controls-card${currentPlaying ? ' now-playing' : ''}`}>
-                {currentPlaying && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
-                      <div style={{ fontWeight: 700, fontSize: 16, color: '#10b981', minWidth: 0, flex: 1 }}>
-                        <MaterialIcon name="mic_external_on" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-                        {currentPlaying.title || 'Unknown Title'}{renderDiscIdTag(currentPlaying.disc_id)}
-                      </div>
-                      {renderReplaceButton(currentPlaying, 'Replace current song')}
-                    </div>
-                    <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }}>
-                      {currentPlaying.artist || 'Unknown Artist'}
-                      {currentPlaying.requested_by && <span style={{ marginLeft: 8 }}>· <strong style={{ color: 'var(--color-text-primary)' }}>{currentPlaying.requested_by}</strong></span>}
-                    </div>
-                    <div className="progress-bar" style={{ marginTop: 6 }}>
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${estimatedDuration > 0 ? Math.min(100, (currentTime / estimatedDuration) * 100) : 0}%` }}
-                      />
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                      <span>{formatTime(currentTime)}</span>
-                      <span>{formatTime(estimatedDuration)}</span>
-                    </div>
-                    {autoPlay && (
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, textAlign: 'center',
-                                    padding: '4px 8px', background: 'rgba(16,185,129,0.1)',
-                                    borderRadius: 6, border: '1px solid rgba(16,185,129,0.2)' }}>
-                        <MaterialIcon name="sync" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 4 }} />
-                        Auto-play enabled · {autoPlayDelay}s delay
-                      </div>
-                    )}
-                  </div>
-                )}
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <button className="control-btn success" onClick={playTop} disabled={busy} title="Play" aria-label="Play">
-                    <MaterialIcon name="play_arrow" />
-                  </button>
-                  <button className="control-btn primary" onClick={next} disabled={busy} title="Next" aria-label="Next">
-                    <MaterialIcon name="skip_next" />
-                  </button>
-                  <button className="control-btn danger" onClick={stop} disabled={busy} title="Stop" aria-label="Stop">
-                    <MaterialIcon name="stop" />
-                  </button>
-                  <button className="control-btn" onClick={refreshQueue} disabled={busy} title="Refresh" aria-label="Refresh">
-                    <MaterialIcon name="refresh" />
-                  </button>
-                  <button className="control-btn danger" onClick={clearAll} disabled={busy} title="Clear all" aria-label="Clear all">
-                    <MaterialIcon name="delete" />
-                  </button>
-                  <button className="control-btn" onClick={() => setShowPlayerWindowControl(true)} title="Settings" aria-label="Settings">
-                    <MaterialIcon name="tune" />
-                  </button>
+            <div className="card host-top-card">
+              <div className="host-top-card-header">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
+                  <MaterialIcon name="dashboard_customize" style={{ fontSize: 22 }} />
+                  <span>Host Controls</span>
                 </div>
+                <button
+                  className="control-btn"
+                  type="button"
+                  onClick={() => setHostTopCollapsed((collapsed) => !collapsed)}
+                  aria-expanded={!hostTopCollapsed}
+                  aria-controls="host-top-card-content"
+                  title={hostTopCollapsed ? 'Show host controls' : 'Hide host controls'}
+                  style={{ width: 40, height: 36, minHeight: 36, padding: 0 }}
+                >
+                  <MaterialIcon name={hostTopCollapsed ? 'expand_more' : 'expand_less'} />
+                </button>
               </div>
 
-              <div className="card">
+              {!hostTopCollapsed && (
+              <div id="host-top-card-content" className="host-top-card-content">
+              <section className="host-top-section">
                 <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8}}>
-                  <h2 style={{margin: 0}}><MaterialIcon name="music_note" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Break Music</h2>
+                  <h2 style={{margin: 0}} title="Break Music" aria-label="Break Music">
+                    <MaterialIcon name="music_note" style={{ fontSize: 24, verticalAlign: 'text-bottom' }} />
+                  </h2>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }}>
                     <button
                       className="control-btn"
@@ -3633,18 +3689,95 @@ function closeDetails(e: React.SyntheticEvent) {
                     Playlist tracks: {breakPlaylistTrackIds.length}
                   </div>
                 )}
+              </section>
+
+              <div className="host-section-divider" />
+
+              <section className="host-top-section host-controls-card">
+                <div className="host-control-buttons">
+                  <button className="control-btn success" onClick={playTop} disabled={busy} title="Play" aria-label="Play">
+                    <MaterialIcon name="play_arrow" />
+                  </button>
+                  <button className="control-btn primary" onClick={next} disabled={busy} title="Next" aria-label="Next">
+                    <MaterialIcon name="skip_next" />
+                  </button>
+                  <button className="control-btn danger" onClick={stop} disabled={busy} title="Stop" aria-label="Stop">
+                    <MaterialIcon name="stop" />
+                  </button>
+                  <button className="control-btn" onClick={refreshQueue} disabled={busy} title="Refresh" aria-label="Refresh">
+                    <MaterialIcon name="refresh" />
+                  </button>
+                  <button className="control-btn danger" onClick={clearAll} disabled={busy} title="Clear all" aria-label="Clear all">
+                    <MaterialIcon name="delete" />
+                  </button>
+                  <button className="control-btn" onClick={() => setShowPlayerWindowControl(true)} title="Settings" aria-label="Settings">
+                    <MaterialIcon name="tune" />
+                  </button>
+                </div>
+
+                <div className={`now-playing-box${currentPlaying ? ' now-playing' : ''}`}>
+                  {currentPlaying ? (
+                    <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
+                      <div style={{ fontWeight: 700, fontSize: 16, color: '#10b981', minWidth: 0, flex: '1 1 180px', overflowWrap: 'anywhere' }}>
+                        <MaterialIcon name="mic_external_on" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+                        {currentPlaying.title || 'Unknown Title'}{renderDiscIdTag(currentPlaying.disc_id)}
+                      </div>
+                      {renderReplaceButton(currentPlaying, 'Replace current song')}
+                    </div>
+                    <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }}>
+                      {currentPlaying.artist || 'Unknown Artist'}
+                      {currentPlaying.requested_by && <span style={{ marginLeft: 8 }}>· <strong style={{ color: 'var(--color-text-primary)' }}>{currentPlaying.requested_by}</strong></span>}
+                    </div>
+                    <div className="progress-bar" style={{ marginTop: 6 }}>
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${estimatedDuration > 0 ? Math.min(100, (currentTime / estimatedDuration) * 100) : 0}%` }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                      <span>{formatTime(currentTime)}</span>
+                      <span>{formatTime(estimatedDuration)}</span>
+                    </div>
+                    {autoPlay && (
+                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, textAlign: 'center',
+                                    padding: '4px 8px', background: 'rgba(16,185,129,0.1)',
+                                    borderRadius: 6, border: '1px solid rgba(16,185,129,0.2)' }}>
+                        <MaterialIcon name="sync" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 4 }} />
+                        Auto-play enabled · {autoPlayDelay}s delay
+                      </div>
+                    )}
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--color-text-secondary)', marginBottom: 4 }}>
+                        <MaterialIcon name="music_off" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+                        Nothing playing
+                      </div>
+                      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Select Play to start the next queued song.
+                      </div>
+                    </>
+                  )}
+                </div>
+              </section>
               </div>
+              )}
             </div>
 
             <div className="card">
               <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12}}>
-                <h2 style={{margin: 0}}><MaterialIcon name="mic_external_on" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Queue Order</h2>
+                <h2 style={{margin: 0}} title="Queue Order" aria-label="Queue Order">
+                  <MaterialIcon name="mic_external_on" style={{ fontSize: 24, verticalAlign: 'text-bottom' }} />
+                </h2>
                 <div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
-                  <span className="stat-pill">
-                    {queueState?.queueOrder.length ?? 0} singers
+                  <span className="stat-pill" title="Singers" aria-label={`${queueState?.queueOrder.length ?? 0} singers`}>
+                    <MaterialIcon name="group" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 4 }} />
+                    {queueState?.queueOrder.length ?? 0}
                   </span>
-                  <span className="stat-pill">
-                    {queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length} queued
+                  <span className="stat-pill" title="Queued songs" aria-label={`${queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length} queued songs`}>
+                    <MaterialIcon name="queue_music" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 4 }} />
+                    {queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length}
                   </span>
                   <button
                     className="control-btn primary"
