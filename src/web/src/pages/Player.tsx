@@ -111,7 +111,6 @@ function getYouTubeVideoId(url: string): string | null {
         return normalizeVideoId(segments[1]);
       }
     }
-
   } catch {
     return null;
   }
@@ -121,14 +120,19 @@ function getYouTubeVideoId(url: string): string | null {
 
 // Helper function to validate duration values
 function isValidDuration(duration: number | null | undefined): boolean {
-  return duration != null && !isNaN(duration) && isFinite(duration) && duration > 0;
+  return (
+    duration != null && !isNaN(duration) && isFinite(duration) && duration > 0
+  );
 }
 
 /**
  * Format a singer's display name.
  * If short=true and the name has a first + last component, return "First L."
  */
-function formatSingerName(name: string | null | undefined, short = false): string {
+function formatSingerName(
+  name: string | null | undefined,
+  short = false,
+): string {
   if (!name) return "Anonymous";
   if (!short) return name;
   const parts = name.trim().split(/\s+/);
@@ -372,7 +376,8 @@ export default function Player() {
       // Song changed: different song is now playing
       if (prev && cur && String(prev.id) !== String(cur.id)) return cur;
       // Same queue entry was replaced with another track; reload playback.
-      if (prev && cur && String(prev.track_id) !== String(cur.track_id)) return cur;
+      if (prev && cur && String(prev.track_id) !== String(cur.track_id))
+        return cur;
       // Same song is still playing - don't update to avoid triggering re-renders
       // that could restart the video
       return prev;
@@ -384,8 +389,14 @@ export default function Player() {
       const state = await api("/api/break-music/state");
       setBreakMusicState({
         paused: !!state.paused,
-        crossfadeSeconds: typeof state.crossfadeSeconds === "number" ? state.crossfadeSeconds : 3,
-        volumePercent: typeof state.volumePercent === "number" ? Math.max(0, Math.min(100, Math.round(state.volumePercent))) : 100,
+        crossfadeSeconds:
+          typeof state.crossfadeSeconds === "number"
+            ? state.crossfadeSeconds
+            : 3,
+        volumePercent:
+          typeof state.volumePercent === "number"
+            ? Math.max(0, Math.min(100, Math.round(state.volumePercent)))
+            : 100,
         elapsedSec: typeof state.elapsedSec === "number" ? state.elapsedSec : 0,
         currentTrack: state.currentTrack || null,
       });
@@ -421,7 +432,10 @@ export default function Player() {
   useEffect(() => {
     api("/api/settings/public")
       .then((settings: { "requests.url"?: string }) => {
-        if (typeof settings["requests.url"] === "string" && settings["requests.url"].trim()) {
+        if (
+          typeof settings["requests.url"] === "string" &&
+          settings["requests.url"].trim()
+        ) {
           setRequestsUrl(settings["requests.url"]);
         }
       })
@@ -467,7 +481,10 @@ export default function Player() {
               refresh();
               if (msg.type === "player.stop") {
                 setManualStop(true);
-              } else if (msg.type === "player.play" || msg.type === "player.next") {
+              } else if (
+                msg.type === "player.play" ||
+                msg.type === "player.next"
+              ) {
                 setManualStop(false);
               }
             }
@@ -504,7 +521,7 @@ export default function Player() {
           }
         };
         wsRef.current.onclose = () => {
-          console.log('WebSocket closed, reconnecting...');
+          console.log("WebSocket closed, reconnecting...");
           wsRef.current = null;
           // Clear heartbeat timer
           if (wsHeartbeatRef.current) {
@@ -514,10 +531,10 @@ export default function Player() {
           setTimeout(connect, 1000);
         };
         wsRef.current.onerror = (err) => {
-          console.error('WebSocket error:', err);
+          console.error("WebSocket error:", err);
         };
         wsRef.current.onopen = () => {
-          console.log('WebSocket connected');
+          console.log("WebSocket connected");
           // Re-fetch player state on reconnect to restore manualStop
           // (handles WS disconnect that occurred while stop was selected)
           api("/api/player/state")
@@ -530,7 +547,7 @@ export default function Player() {
           wsHeartbeatRef.current = setInterval(() => {
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               // Send a lightweight heartbeat message
-              wsRef.current.send(JSON.stringify({ type: 'heartbeat' }));
+              wsRef.current.send(JSON.stringify({ type: "heartbeat" }));
             }
           }, 45000);
         };
@@ -557,7 +574,7 @@ export default function Player() {
         try {
           youtubePlayerRef.current.stopVideo();
         } catch (err) {
-          console.warn('Failed to stop YouTube player:', err);
+          console.warn("Failed to stop YouTube player:", err);
         }
         youtubePlayerRef.current = null;
       }
@@ -677,11 +694,13 @@ export default function Player() {
         v.muted = true;
         await v.play();
         setIsPlaying(true);
-        
+
         // Wait for video to actually start playing before unmuting
         // This prevents browsers from blocking autoplay after unmute
-        await new Promise(resolve => setTimeout(resolve, AUTOPLAY_UNMUTE_DELAY_MS));
-        
+        await new Promise((resolve) =>
+          setTimeout(resolve, AUTOPLAY_UNMUTE_DELAY_MS),
+        );
+
         v.muted = false;
       } catch (err) {
         // If even muted play fails, we need user interaction
@@ -715,9 +734,14 @@ export default function Player() {
 
   const fallbackYouTubeToDownloadedTrack = useCallback(
     async (errorCode?: number | string) => {
-      if (!now?.id || !now.external_url || !getYouTubeVideoId(now.external_url)) return;
+      if (!now?.id || !now.external_url || !getYouTubeVideoId(now.external_url))
+        return;
       const attemptKey = `${now.id}:${now.external_url}`;
-      if (youtubeFallbackInFlightRef.current || youtubeFallbackAttemptedRef.current.has(attemptKey)) return;
+      if (
+        youtubeFallbackInFlightRef.current ||
+        youtubeFallbackAttemptedRef.current.has(attemptKey)
+      )
+        return;
 
       youtubeFallbackInFlightRef.current = true;
       youtubeFallbackAttemptedRef.current.add(attemptKey);
@@ -737,38 +761,45 @@ export default function Player() {
     [now?.id, now?.external_url, refresh],
   );
 
-  const fadeBreakAudioTo = useCallback((targetVolume: number, durationSeconds: number, onComplete?: () => void) => {
-    const audio = breakAudioRef.current;
-    if (!audio) return;
+  const fadeBreakAudioTo = useCallback(
+    (
+      targetVolume: number,
+      durationSeconds: number,
+      onComplete?: () => void,
+    ) => {
+      const audio = breakAudioRef.current;
+      if (!audio) return;
 
-    if (breakFadeRef.current) {
-      clearInterval(breakFadeRef.current);
-      breakFadeRef.current = null;
-    }
-
-    const start = audio.volume;
-    const clampedTarget = Math.max(0, Math.min(1, targetVolume));
-    if (durationSeconds <= 0) {
-      audio.volume = clampedTarget;
-      onComplete?.();
-      return;
-    }
-
-    const steps = Math.max(1, Math.floor((durationSeconds * 1000) / 100));
-    let currentStep = 0;
-    breakFadeRef.current = setInterval(() => {
-      currentStep += 1;
-      const t = Math.min(1, currentStep / steps);
-      audio.volume = start + (clampedTarget - start) * t;
-      if (t >= 1) {
-        if (breakFadeRef.current) {
-          clearInterval(breakFadeRef.current);
-          breakFadeRef.current = null;
-        }
-        onComplete?.();
+      if (breakFadeRef.current) {
+        clearInterval(breakFadeRef.current);
+        breakFadeRef.current = null;
       }
-    }, 100);
-  }, []);
+
+      const start = audio.volume;
+      const clampedTarget = Math.max(0, Math.min(1, targetVolume));
+      if (durationSeconds <= 0) {
+        audio.volume = clampedTarget;
+        onComplete?.();
+        return;
+      }
+
+      const steps = Math.max(1, Math.floor((durationSeconds * 1000) / 100));
+      let currentStep = 0;
+      breakFadeRef.current = setInterval(() => {
+        currentStep += 1;
+        const t = Math.min(1, currentStep / steps);
+        audio.volume = start + (clampedTarget - start) * t;
+        if (t >= 1) {
+          if (breakFadeRef.current) {
+            clearInterval(breakFadeRef.current);
+            breakFadeRef.current = null;
+          }
+          onComplete?.();
+        }
+      }, 100);
+    },
+    [],
+  );
 
   // Monitor video play/pause state and handle video end
   useEffect(() => {
@@ -785,9 +816,14 @@ export default function Player() {
       // 1. It's a CDG file (fragmented MP4 streams may report incorrect durations), OR
       // 2. Pitch adjustment is applied (re-encoding creates fragmented streams)
       let duration: number | undefined;
-      const hasPitchAdjustment = now.key_adjustment !== undefined && now.key_adjustment !== 0;
-      
-      if ((now.kind === 'cdgmp3' || hasPitchAdjustment) && now.duration_ms && now.duration_ms > 0) {
+      const hasPitchAdjustment =
+        now.key_adjustment !== undefined && now.key_adjustment !== 0;
+
+      if (
+        (now.kind === "cdgmp3" || hasPitchAdjustment) &&
+        now.duration_ms &&
+        now.duration_ms > 0
+      ) {
         // For CDG files or pitch-shifted tracks, always use database duration
         duration = now.duration_ms / 1000;
       } else {
@@ -807,7 +843,9 @@ export default function Player() {
       } else {
         // No valid duration available — send a sentinel value so the server
         // still marks the song as finished and advances to the next song.
-        console.warn("Video ended but no valid duration available; sending sentinel timing update");
+        console.warn(
+          "Video ended but no valid duration available; sending sentinel timing update",
+        );
         sendTimingUpdate(1, 1, now.id);
       }
     };
@@ -841,16 +879,21 @@ export default function Player() {
       // 1. It's a CDG file (fragmented MP4 streams may report incorrect durations), OR
       // 2. Pitch adjustment is applied (re-encoding creates fragmented streams)
       let duration: number | undefined;
-      const hasPitchAdjustment = now.key_adjustment !== undefined && now.key_adjustment !== 0;
-      
-      if ((now.kind === 'cdgmp3' || hasPitchAdjustment) && now.duration_ms && now.duration_ms > 0) {
+      const hasPitchAdjustment =
+        now.key_adjustment !== undefined && now.key_adjustment !== 0;
+
+      if (
+        (now.kind === "cdgmp3" || hasPitchAdjustment) &&
+        now.duration_ms &&
+        now.duration_ms > 0
+      ) {
         // For CDG files or pitch-shifted tracks, always use database duration if available
         // because re-encoded streams produce fragmented MP4s with unreliable duration
         duration = now.duration_ms / 1000; // Convert ms to seconds
       } else {
         // For regular MP4 files without pitch adjustment, try video element first
         duration = v.duration;
-        
+
         // Fall back to database duration if video element can't provide it
         if (!isValidDuration(duration)) {
           if (now.duration_ms && now.duration_ms > 0) {
@@ -864,7 +907,9 @@ export default function Player() {
         sendTimingUpdate(currentTime, duration, now.id);
       } else {
         // Log when we can't get duration (for debugging)
-        console.warn(`Cannot send timing update for song ${now.id}: duration not available (video.duration=${v.duration}, db.duration_ms=${now.duration_ms})`);
+        console.warn(
+          `Cannot send timing update for song ${now.id}: duration not available (video.duration=${v.duration}, db.duration_ms=${now.duration_ms})`,
+        );
       }
     }, 1000);
 
@@ -950,7 +995,9 @@ export default function Player() {
                     sendTimingUpdate(duration, duration, now.id);
                   } else {
                     // No valid duration from YouTube — send sentinel to force completion
-                    console.warn("YouTube ended but no valid duration; sending sentinel timing update");
+                    console.warn(
+                      "YouTube ended but no valid duration; sending sentinel timing update",
+                    );
                     sendTimingUpdate(1, 1, now.id);
                   }
                 } catch (err) {
@@ -983,21 +1030,31 @@ export default function Player() {
         try {
           youtubePlayerRef.current.stopVideo();
         } catch (err) {
-          console.warn('Failed to stop YouTube player in cleanup:', err);
+          console.warn("Failed to stop YouTube player in cleanup:", err);
         }
         youtubePlayerRef.current = null;
       }
     };
-  }, [now, isYouTube, youtubeVideoId, sendTimingUpdate, fallbackYouTubeToDownloadedTrack]);
+  }, [
+    now,
+    isYouTube,
+    youtubeVideoId,
+    sendTimingUpdate,
+    fallbackYouTubeToDownloadedTrack,
+  ]);
 
   useEffect(() => {
     const audio = breakAudioRef.current;
     if (!audio) return;
 
     const track = breakMusicState.currentTrack;
-    const shouldPlayBreak = !now && !breakMusicState.paused && !!track?.file_path;
+    const shouldPlayBreak =
+      !now && !breakMusicState.paused && !!track?.file_path;
     const fadeDuration = Math.max(0, breakMusicState.crossfadeSeconds || 0);
-    const targetVolume = Math.max(0, Math.min(1, (breakMusicState.volumePercent ?? 100) / 100));
+    const targetVolume = Math.max(
+      0,
+      Math.min(1, (breakMusicState.volumePercent ?? 100) / 100),
+    );
     const trackId = track?.id ?? null;
 
     if (!shouldPlayBreak) {
@@ -1009,7 +1066,10 @@ export default function Player() {
       breakTrackSrcRef.current = "";
       const pauseTrackId = trackId;
       fadeBreakAudioTo(0, fadeDuration, () => {
-        if (!breakShouldPlayRef.current && breakTrackIdRef.current === pauseTrackId) {
+        if (
+          !breakShouldPlayRef.current &&
+          breakTrackIdRef.current === pauseTrackId
+        ) {
           audio.pause();
         }
       });
@@ -1024,7 +1084,11 @@ export default function Player() {
       audio.load();
       breakTrackSrcRef.current = src;
     }
-    if (breakMusicState.elapsedSec > 0 && (srcChanged || Math.abs((audio.currentTime || 0) - breakMusicState.elapsedSec) > 2)) {
+    if (
+      breakMusicState.elapsedSec > 0 &&
+      (srcChanged ||
+        Math.abs((audio.currentTime || 0) - breakMusicState.elapsedSec) > 2)
+    ) {
       audio.currentTime = breakMusicState.elapsedSec;
     }
 
@@ -1069,7 +1133,8 @@ export default function Player() {
       clearInterval(breakTimingRef.current);
       breakTimingRef.current = null;
     }
-    if (now || breakMusicState.paused || !breakMusicState.currentTrack?.id) return;
+    if (now || breakMusicState.paused || !breakMusicState.currentTrack?.id)
+      return;
 
     breakTimingRef.current = setInterval(() => {
       refreshBreakMusicState().catch(() => {});
@@ -1108,7 +1173,7 @@ export default function Player() {
       // Capture the current autoplay delay value to use for this countdown
       // This ensures the countdown uses a consistent value even if settings change mid-countdown
       const delayToUse = autoPlayDelay;
-      
+
       // Initialize countdown to autoplay delay
       setCountdown(delayToUse);
 
@@ -1187,7 +1252,7 @@ export default function Player() {
         ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)}`
         : `🎤 NOW PLAYING`
       : now.requested_by
-        ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)} — ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
+        ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)}: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
         : `🎤 NOW PLAYING: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`;
 
     // Build queue list
@@ -1375,13 +1440,13 @@ export default function Player() {
             0% { transform: translateX(0); }
             100% { transform: translateX(-50%); }
           }
-          
+
           .ticker-text {
             display: inline-block;
             white-space: nowrap;
             animation: ticker-scroll 30s linear infinite;
           }
-          
+
           .controls-overlay {
             transition: opacity 0.3s ease-in-out;
           }
@@ -1403,7 +1468,11 @@ export default function Player() {
             cursor: showControls ? "default" : "none",
           }}
         >
-          <audio ref={breakAudioRef} preload="auto" style={{ display: "none" }} />
+          <audio
+            ref={breakAudioRef}
+            preload="auto"
+            style={{ display: "none" }}
+          />
           {/* Show waiting screen - queue is displayed in the roller overlay */}
           {upNext.length > 0 ? (
             <div
@@ -1469,13 +1538,16 @@ export default function Player() {
                       color: "rgba(161, 161, 170, 1)",
                     }}
                   >
-                    {upNext[0].title || "Unknown"} • {upNext[0].artist || "Unknown"}
+                    {upNext[0].title || "Unknown"} •{" "}
+                    {upNext[0].artist || "Unknown"}
                   </div>
                 )}
               </div>
             </div>
           ) : (
-            <div style={{ textAlign: "center", animation: "fadeInUp 0.6s ease" }}>
+            <div
+              style={{ textAlign: "center", animation: "fadeInUp 0.6s ease" }}
+            >
               <h1
                 style={{
                   fontSize: "clamp(32px, 6vw, 64px)",
@@ -1497,7 +1569,7 @@ export default function Player() {
                   margin: 0,
                 }}
               >
-                Add your song from the request page! 
+                Add your song from the request page!
               </p>
               {overlaySettings.showRequestsUrl && (
                 <p
@@ -1505,7 +1577,8 @@ export default function Player() {
                     fontSize: "clamp(16px, 2.1vw, 24px)",
                     color: "rgba(226, 232, 240, 0.95)",
                     margin: "16px 0 0 0",
-                    fontFamily: '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
+                    fontFamily:
+                      '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
                     fontWeight: 700,
                     letterSpacing: "0.04em",
                     textTransform: "lowercase",
@@ -1538,7 +1611,7 @@ export default function Player() {
           0% { transform: translateX(0); }
           100% { transform: translateX(-50%); }
         }
-        
+
         @keyframes fadeInUp {
           from {
             opacity: 0;
@@ -1558,17 +1631,17 @@ export default function Player() {
             opacity: 0.7;
           }
         }
-        
+
         .ticker-text {
           display: inline-block;
           white-space: nowrap;
           animation: ticker-scroll 30s linear infinite;
         }
-        
+
         .controls-overlay {
           transition: opacity 0.3s ease-in-out;
         }
-        
+
         .play-button-overlay {
           position: absolute;
           top: 50%;
@@ -1585,12 +1658,12 @@ export default function Player() {
           cursor: pointer;
           transition: transform 0.2s, background 0.2s;
         }
-        
+
         .play-button-overlay:hover {
           transform: translate(-50%, -50%) scale(1.1);
           background: rgba(0,0,0,0.8);
         }
-        
+
         .play-icon {
           width: 0;
           height: 0;
