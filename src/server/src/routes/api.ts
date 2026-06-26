@@ -3424,6 +3424,65 @@ apiRouter.post(
 );
 
 apiRouter.post(
+  '/queue/replace',
+  adminGuard,
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    const requestedTrackId = toInt(req.body?.trackId);
+    const external = req.body?.external;
+    if (id == null) return res.status(400).send('id required');
+
+    let trackId: number | null = null;
+    if (requestedTrackId != null) {
+      const found = await query<{ id: number }>(`SELECT id FROM tracks WHERE id = $1 LIMIT 1`, [requestedTrackId]);
+      if (found.rows.length === 0) return res.status(404).send('Track not found');
+      trackId = requestedTrackId;
+    } else if (external && typeof external === 'object') {
+      const title = String(external.title ?? '').trim();
+      const artist = String(external.artist ?? '').trim();
+      const url = String(external.url ?? '').trim();
+      const source = String(external.source ?? 'karaoke-nerds').trim() || 'karaoke-nerds';
+      if (!title || !url) return res.status(400).send('external.title and external.url are required');
+      const { upsertArtist, upsertExternalTrack } = await import('../db');
+      const artistId = artist ? await upsertArtist(artist) : null;
+      const track = await upsertExternalTrack({
+        artist_id: artistId,
+        title,
+        external_url: url,
+        source,
+        duration_ms: null,
+      });
+      trackId = Number(track.id);
+    } else {
+      return res.status(400).send('trackId or external track is required');
+    }
+
+    const current = await query<{ id: number; status: string }>(
+      `SELECT id, status FROM queue WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+    if (current.rows.length === 0) return res.status(404).send('Queue item not found');
+    const wasPlaying = current.rows[0].status === 'playing';
+
+    await query(
+      `UPDATE queue
+          SET track_id = $1,
+              started_at = CASE WHEN status = 'playing' THEN NOW() ELSE started_at END
+        WHERE id = $2`,
+      [trackId, id]
+    );
+
+    if (wasPlaying) {
+      postQueueUpdate('player.play');
+      await autoPauseBreakMusicForKaraoke();
+    } else {
+      postQueueUpdate('queue.updated');
+    }
+    res.json({ ok: true, trackId, wasPlaying });
+  })
+);
+
+apiRouter.post(
   '/queue/delete',
   adminGuard,
   ah(async (req, res) => {
@@ -3658,6 +3717,101 @@ apiRouter.post(
     postQueueUpdate('player.stop');
     await autoResumeBreakMusicForKaraoke();
     res.json({ ok: true });
+  })
+);
+
+apiRouter.post(
+  '/player/youtube-fallback',
+  ah(async (req, res) => {
+    const id = toInt(req.body?.id);
+    const errorCode = req.body?.errorCode != null ? String(req.body.errorCode) : null;
+    if (id == null) return res.status(400).json({ error: 'id required' });
+
+    const current = await query<{
+      id: number;
+      external_url: string | null;
+      title: string | null;
+      artist: string | null;
+      disc_id: string | null;
+    }>(
+      `SELECT q.id,
+              t.external_url,
+              t.title,
+              t.disc_id,
+              a.name AS artist
+         FROM queue q
+         JOIN tracks t ON t.id = q.track_id
+         LEFT JOIN artists a ON a.id = t.artist_id
+        WHERE q.id = $1
+          AND q.status = 'playing'
+        LIMIT 1`,
+      [id]
+    );
+    const row = current.rows[0];
+    if (!row) return res.status(404).json({ error: 'Current playing song not found' });
+    if (!row.external_url) return res.status(400).json({ error: 'Current song is not an external video' });
+
+    const postFallbackStatus = (status: 'downloading' | 'ready' | 'error', message: string) => {
+      postQueueUpdate('player.youtube_fallback', {
+        status,
+        message,
+        queueId: id,
+        title: row.title,
+        artist: row.artist,
+      });
+    };
+
+    const allowDownloads = await getSetting('ytdlp.allow_downloads');
+    if (allowDownloads === false) {
+      postFallbackStatus('error', '⚠️ YouTube fallback download is disabled.');
+      return res.status(403).json({ error: 'Downloads are disabled' });
+    }
+
+    postFallbackStatus('downloading', 'YouTube playback failed. Downloading a local fallback...');
+    logger.warn(
+      `[player] YouTube playback failed${errorCode ? ` (error ${errorCode})` : ''}; downloading fallback for queue ${id}.`
+    );
+    try {
+      const { downloadVideo, addDownloadedFileToDatabase } = await import('../ytdlp');
+      const result = await downloadVideo(row.external_url, {
+        title: row.title || undefined,
+        artist: row.artist || undefined,
+        discId: row.disc_id || undefined,
+      });
+
+      if (!result.success || !result.filePath) {
+        const message = result.message || 'Download failed';
+        postFallbackStatus('error', `⚠️ YouTube fallback failed: ${message}`);
+        return res.status(500).json({ error: message });
+      }
+
+      const dbResult = await addDownloadedFileToDatabase(result.filePath);
+      if (!dbResult.success || !dbResult.trackId) {
+        const message = dbResult.message || 'Downloaded file could not be added to database';
+        postFallbackStatus('error', `⚠️ YouTube fallback failed: ${message}`);
+        return res.status(500).json({ error: message });
+      }
+
+      await query(
+        `UPDATE queue
+            SET track_id = $1,
+                started_at = NOW()
+          WHERE id = $2
+            AND status = 'playing'`,
+        [dbResult.trackId, id]
+      );
+      postFallbackStatus('ready', '✔ Local fallback ready. Restarting playback...');
+      postQueueUpdate('player.play');
+      res.json({
+        ok: true,
+        trackId: dbResult.trackId,
+        filePath: result.filePath,
+        message: 'Downloaded fallback and replaced current song',
+      });
+    } catch (err) {
+      postFallbackStatus('error', '⚠️ YouTube fallback failed.');
+      throw err;
+    }
   })
 );
 

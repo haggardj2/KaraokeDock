@@ -14,9 +14,11 @@ export interface QueueSong {
   trackId: number;
   title: string;
   artist: string | null;
+  discId: string | null;
   status: 'queued' | 'playing' | 'done' | string;
   position: number;
   requestedAt: string | null;
+  requestedBy: string | null;
   startedAt: string | null;
   completedAt: string | null; // queue.finished_at
   keyAdjustment: number;
@@ -80,6 +82,8 @@ const ROW_TO_QUEUE_SONG = (r: any): QueueSong => ({
   status: r.status,
   position: Number(r.position),
   requestedAt: r.created_at ? new Date(r.created_at).toISOString() : null,
+  requestedBy: r.requested_by ?? null,
+  discId: r.disc_id ?? null,
   startedAt: r.started_at ? new Date(r.started_at).toISOString() : null,
   completedAt: r.finished_at ? new Date(r.finished_at).toISOString() : null,
   keyAdjustment: Number(r.key_adjustment ?? 0),
@@ -135,7 +139,7 @@ export async function getQueueState(): Promise<QueueState> {
   const qRes = await query<any>(`
     SELECT q.id, q.track_id, q.requested_by, q.singer_id, q.status, q.position,
            q.key_adjustment, q.created_at, q.started_at, q.finished_at,
-           t.title, t.duration_ms,
+           t.title, t.disc_id, t.duration_ms,
            a.name AS artist
       FROM queue q
       JOIN tracks t ON t.id = q.track_id
@@ -249,7 +253,7 @@ export async function getSingerHistory(singerId: bigint): Promise<SingerHistory 
   const qRes = await query<any>(`
     SELECT q.id, q.track_id, q.singer_id, q.requested_by, q.status, q.position,
            q.key_adjustment, q.created_at, q.started_at, q.finished_at,
-           t.title, t.duration_ms,
+           t.title, t.disc_id, t.duration_ms,
            a.name AS artist
       FROM queue q
       JOIN tracks t ON t.id = q.track_id

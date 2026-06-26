@@ -11,6 +11,7 @@ import { parseZipMediaRef } from "../zipMediaRef";
 
 type QItem = {
   id: number | string;
+  track_id?: number | string;
   artist?: string;
   title?: string;
   requested_by?: string | null;
@@ -234,6 +235,8 @@ export default function Player() {
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const youtubePlayerRef = useRef<YT.Player | null>(null);
   const youtubeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const youtubeFallbackInFlightRef = useRef(false);
+  const youtubeFallbackAttemptedRef = useRef<Set<string>>(new Set());
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wsHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const breakTimingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -349,7 +352,7 @@ export default function Player() {
   };
 
   // Fetch queue + determine current
-  async function refresh() {
+  const refresh = useCallback(async () => {
     const [q, rotationSingers] = await Promise.all([
       api("/api/queue") as Promise<QItem[]>,
       api("/api/overlay/rotation-singers")
@@ -368,13 +371,15 @@ export default function Player() {
       if (prev && !cur) return null;
       // Song changed: different song is now playing
       if (prev && cur && String(prev.id) !== String(cur.id)) return cur;
+      // Same queue entry was replaced with another track; reload playback.
+      if (prev && cur && String(prev.track_id) !== String(cur.track_id)) return cur;
       // Same song is still playing - don't update to avoid triggering re-renders
       // that could restart the video
       return prev;
     });
-  }
+  }, []);
 
-  async function refreshBreakMusicState() {
+  const refreshBreakMusicState = useCallback(async () => {
     try {
       const state = await api("/api/break-music/state");
       setBreakMusicState({
@@ -387,7 +392,7 @@ export default function Player() {
     } catch {
       // ignore
     }
-  }
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -540,7 +545,7 @@ export default function Player() {
       }
       wsRef.current?.close();
     };
-  }, []);
+  }, [refresh, refreshBreakMusicState]);
 
   // Determine YouTube state based on current song (moved out of useMemo to avoid side effects)
   useEffect(() => {
@@ -636,6 +641,7 @@ export default function Player() {
     return "";
   }, [
     now?.id,
+    now?.track_id,
     now?.external_url,
     now?.kind,
     now?.file_mp4,
@@ -705,6 +711,30 @@ export default function Player() {
       }
     },
     [],
+  );
+
+  const fallbackYouTubeToDownloadedTrack = useCallback(
+    async (errorCode?: number | string) => {
+      if (!now?.id || !now.external_url || !getYouTubeVideoId(now.external_url)) return;
+      const attemptKey = `${now.id}:${now.external_url}`;
+      if (youtubeFallbackInFlightRef.current || youtubeFallbackAttemptedRef.current.has(attemptKey)) return;
+
+      youtubeFallbackInFlightRef.current = true;
+      youtubeFallbackAttemptedRef.current.add(attemptKey);
+      try {
+        await api("/api/player/youtube-fallback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: now.id, errorCode }),
+        });
+        await refresh();
+      } catch (err) {
+        console.error("YouTube fallback download failed:", err);
+      } finally {
+        youtubeFallbackInFlightRef.current = false;
+      }
+    },
+    [now?.id, now?.external_url, refresh],
   );
 
   const fadeBreakAudioTo = useCallback((targetVolume: number, durationSeconds: number, onComplete?: () => void) => {
@@ -933,6 +963,7 @@ export default function Player() {
             },
             onError: (event: any) => {
               console.error("YouTube player error:", event.data);
+              void fallbackYouTubeToDownloadedTrack(event.data);
             },
           },
         });
@@ -957,7 +988,7 @@ export default function Player() {
         youtubePlayerRef.current = null;
       }
     };
-  }, [now, isYouTube, youtubeVideoId, sendTimingUpdate]);
+  }, [now, isYouTube, youtubeVideoId, sendTimingUpdate, fallbackYouTubeToDownloadedTrack]);
 
   useEffect(() => {
     const audio = breakAudioRef.current;

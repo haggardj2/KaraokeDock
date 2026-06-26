@@ -144,11 +144,17 @@ export async function upsertTrack(a: UpsertTrackArgs) {
       FROM existing e
       WHERE t.id = e.id
       RETURNING t.*
+    ),
+    inserted AS (
+      INSERT INTO tracks (artist_id, disc_id, title, kind, duration_ms, file_mp4, file_cdg, file_mp3, path, basename, library_id)
+      SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+      WHERE NOT EXISTS (SELECT 1 FROM existing)
+      RETURNING *
     )
-    INSERT INTO tracks (artist_id, disc_id, title, kind, duration_ms, file_mp4, file_cdg, file_mp3, path, basename, library_id)
-    SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
-    WHERE NOT EXISTS (SELECT 1 FROM existing)
-    RETURNING *;
+    SELECT * FROM updated
+    UNION ALL
+    SELECT * FROM inserted
+    LIMIT 1;
   `;
 
   const res = await query(sql, params);

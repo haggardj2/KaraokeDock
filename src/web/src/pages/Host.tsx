@@ -25,6 +25,7 @@ type QueueSong = {
   trackId: number | null
   title: string | null
   artist: string | null
+  discId?: string | null
   status: string
   position: number | null
   requestedAt: string | null
@@ -69,6 +70,7 @@ type SingerHistorySong = {
   trackId: number | null
   title: string | null
   artist: string | null
+  discId?: string | null
   status: string
   position: number | null
   requestedAt: string | null
@@ -118,6 +120,42 @@ type OidcPublicConfig = {
   buttonText: string
   buttonColor: string
   passwordLoginEnabled: boolean
+}
+
+function MaterialIcon({
+  name,
+  className = '',
+  style,
+}: {
+  name: string
+  className?: string
+  style?: React.CSSProperties
+}) {
+  return (
+    <span className={`material-symbols-rounded${className ? ` ${className}` : ''}`} aria-hidden="true" style={style}>
+      {name}
+    </span>
+  )
+}
+
+function renderStatusMessage(message: string) {
+  if (message.startsWith('⚠️')) {
+    return (
+      <>
+        <MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+        {message.replace(/^⚠️\s*/, '')}
+      </>
+    )
+  }
+  if (message.startsWith('✔')) {
+    return (
+      <>
+        <MaterialIcon name="check_circle" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+        {message.replace(/^✔\s*/, '')}
+      </>
+    )
+  }
+  return message
 }
 
 type BreakTrack = {
@@ -1561,6 +1599,103 @@ export default function Host() {
     return d.toLocaleDateString()
   }
 
+  function formatRequestedAt(dateStr: string | null | undefined): string | null {
+    if (!dateStr) return null
+    const d = new Date(dateStr)
+    if (Number.isNaN(d.getTime())) return null
+    const time = d
+      .toLocaleTimeString(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      })
+      .replace(/\s+/g, '')
+      .toLowerCase()
+    const date = d.toLocaleDateString(undefined, {
+      month: 'numeric',
+      day: 'numeric',
+      year: '2-digit',
+    })
+    return `${time} ${date}`
+  }
+
+  function renderDiscIdTag(discId: string | null | undefined) {
+    if (!discId) return null
+    return (
+      <span style={{
+        marginLeft: 8,
+        fontSize: 11,
+        padding: '1px 6px',
+        background: 'var(--color-bg-primary)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 4,
+        color: 'var(--color-text-secondary)',
+        whiteSpace: 'nowrap',
+      }}>
+        {discId}
+      </span>
+    )
+  }
+
+  function closeReplaceModal() {
+    setReplacingId(null)
+    setSearchQuery('')
+    setSearchResults([])
+    setReplaceUrl('')
+    setReplaceTitle('')
+    setReplaceArtist('')
+    setReplaceDiscId('')
+    setReplaceSearchMode('local')
+  }
+
+  function openReplaceSong(song: { queueId?: number; id?: number; title?: string | null; artist?: string | null }) {
+    const queueId = song.queueId ?? song.id
+    if (queueId == null) return
+    setReplacingId(queueId)
+    setSearchQuery(song.title || '')
+    setSearchResults([])
+    setReplaceUrl('')
+    setReplaceTitle(song.title || '')
+    setReplaceArtist(song.artist || '')
+    setReplaceDiscId('')
+    setReplaceSearchMode('local')
+  }
+
+  function renderReplaceButton(song: { queueId?: number; id?: number; title?: string | null; artist?: string | null }, label = 'Replace song') {
+    return (
+      <button
+        className="control-btn"
+        type="button"
+        title={label}
+        aria-label={label}
+        disabled={busy}
+        onClick={() => openReplaceSong(song)}
+        style={{ padding: '6px 10px', fontSize: 13, lineHeight: 1 }}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 18, display: 'block' }}>
+          contract_edit
+        </span>
+      </button>
+    )
+  }
+
+  function canReplaceQueueSong(song: { status?: string | null }) {
+    return song.status === 'queued' || song.status === 'playing'
+  }
+
+  async function refreshQueueViews() {
+    await refreshQueue()
+    await refreshQueueState()
+    if (selectedSingerId) {
+      try {
+        const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
+        setSelectedSingerHistory(history || null)
+      } catch (err) {
+        console.error('Failed to reload singer history:', err)
+      }
+    }
+  }
+
 
   useEffect(() => {
     api('/api/autoplay/settings')
@@ -1684,6 +1819,15 @@ export default function Host() {
               refreshQueueState()
             } else if (msg.type === 'break_music.updated') {
               loadBreakMusicState()
+            } else if (msg.type === 'player.youtube_fallback') {
+              const fallbackMessage =
+                typeof msg.message === 'string' && msg.message.trim()
+                  ? msg.message
+                  : 'YouTube fallback status updated.'
+              setBanner(fallbackMessage)
+              if (msg.status !== 'downloading') {
+                setTimeout(() => setBanner(''), 5000)
+              }
             } else if (msg.type === 'player.timing') {
               if (typeof msg.currentTime === 'number') {
                 setCurrentTime(msg.currentTime)
@@ -1813,7 +1957,7 @@ export default function Host() {
     if (currentPlaying) {
       console.log('Now playing:', currentPlaying.title)
     }
-  }, [currentPlaying?.id])
+  }, [currentPlaying?.id, currentPlaying?.track_id])
 
   useEffect(() => {
     return () => {
@@ -1894,68 +2038,46 @@ export default function Host() {
   async function replaceSong(queueId: number, newTrackId: number) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
 
-    const queueItem = queue.find(r => r.id === queueId)
-    if (!queueItem) return
-
     setBusy(true)
     try {
-      await api('/api/queue/delete', {
+      const result = await api('/api/queue/replace', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ id: queueId })
+        body: JSON.stringify({ id: queueId, trackId: newTrackId })
       })
 
-      await api('/api/queue', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          trackId: newTrackId,
-          requestedBy: queueItem.requested_by
-        })
-      })
-
-      setReplacingId(null)
-      setSearchQuery('')
-      setSearchResults([])
-      setReplaceSearchMode('local')
+      if (result.wasPlaying) setCurrentTime(0)
+      closeReplaceModal()
     } finally {
       setBusy(false)
-      await refreshQueue()
+      await refreshQueueViews()
     }
   }
 
   async function replaceSongWithKaraokeNerds(queueId: number, track: { title: string; artist: string; url: string }) {
     if (! auth.sessionToken || !auth.isLoggedIn) return
 
-    const queueItem = queue.find(r => r.id === queueId)
-    if (!queueItem) return
-
     setBusy(true)
     try {
-      await api('/api/queue/delete', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ id: queueId })
-      })
-
-      await api('/api/karaoke-nerds/add', {
+      const result = await api('/api/queue/replace', {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          title: track.title,
-          artist: track.artist,
-          url: track.url,
-          requestedBy: queueItem.requested_by
+          id: queueId,
+          external: {
+            title: track.title,
+            artist: track.artist,
+            url: track.url,
+            source: 'karaoke-nerds',
+          },
         })
       })
 
-      setReplacingId(null)
-      setSearchQuery('')
-      setSearchResults([])
-      setReplaceSearchMode('local')
+      if (result.wasPlaying) setCurrentTime(0)
+      closeReplaceModal()
     } finally {
       setBusy(false)
-      await refreshQueue()
+      await refreshQueueViews()
     }
   }
 
@@ -2089,38 +2211,27 @@ export default function Host() {
   async function replaceSongWithUrl(queueId: number, url: string, title: string, artist: string) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
 
-    const queueItem = queue.find(r => r.id === queueId)
-    if (!queueItem) return
-
     setBusy(true)
     try {
-      await api('/api/queue/delete', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ id: queueId })
-      })
-
-      await api('/api/karaoke-nerds/add', {
+      const result = await api('/api/queue/replace', {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          title: title || 'Video',
-          artist: artist || 'Unknown',
-          url,
-          requestedBy: queueItem.requested_by
+          id: queueId,
+          external: {
+            title: title || 'Video',
+            artist: artist || 'Unknown',
+            url,
+            source: 'url',
+          },
         })
       })
 
-      setReplacingId(null)
-      setSearchQuery('')
-      setSearchResults([])
-      setReplaceUrl('')
-      setReplaceTitle('')
-      setReplaceArtist('')
-      setReplaceSearchMode('local')
+      if (result.wasPlaying) setCurrentTime(0)
+      closeReplaceModal()
     } finally {
       setBusy(false)
-      await refreshQueue()
+      await refreshQueueViews()
     }
   }
 
@@ -3269,7 +3380,7 @@ function closeDetails(e: React.SyntheticEvent) {
 
       <div className="container">
         {banner && (
-          <div className="banner">{banner}</div>
+          <div className="banner">{renderStatusMessage(banner)}</div>
         )}
 
         {!auth.isLoggedIn ? (
@@ -3278,7 +3389,8 @@ function closeDetails(e: React.SyntheticEvent) {
             style={{ maxWidth: 400, margin: '100px auto', overflow: 'hidden' }}
           >
             <h1 style={{ textAlign: 'center', marginBottom: 32 }}>
-              🎤 Host Login
+              <MaterialIcon name="mic_external_on" style={{ fontSize: 30, verticalAlign: 'middle', marginRight: 8 }} />
+              Host Login
             </h1>
 
             {oidcConfig?.passwordLoginEnabled !== false && (
@@ -3391,7 +3503,13 @@ function closeDetails(e: React.SyntheticEvent) {
               <div className={`card host-controls-card${currentPlaying ? ' now-playing' : ''}`}>
                 {currentPlaying && (
                   <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontWeight: 700, fontSize: 16, color: '#10b981', marginBottom: 2 }}>🎤 {currentPlaying.title || 'Unknown Title'}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                      <div style={{ fontWeight: 700, fontSize: 16, color: '#10b981', minWidth: 0, flex: 1 }}>
+                        <MaterialIcon name="mic_external_on" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+                        {currentPlaying.title || 'Unknown Title'}{renderDiscIdTag(currentPlaying.disc_id)}
+                      </div>
+                      {renderReplaceButton(currentPlaying, 'Replace current song')}
+                    </div>
                     <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }}>
                       {currentPlaying.artist || 'Unknown Artist'}
                       {currentPlaying.requested_by && <span style={{ marginLeft: 8 }}>· <strong style={{ color: 'var(--color-text-primary)' }}>{currentPlaying.requested_by}</strong></span>}
@@ -3410,36 +3528,37 @@ function closeDetails(e: React.SyntheticEvent) {
                       <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, textAlign: 'center',
                                     padding: '4px 8px', background: 'rgba(16,185,129,0.1)',
                                     borderRadius: 6, border: '1px solid rgba(16,185,129,0.2)' }}>
-                        🔄 Auto-play enabled · {autoPlayDelay}s delay
+                        <MaterialIcon name="sync" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 4 }} />
+                        Auto-play enabled · {autoPlayDelay}s delay
                       </div>
                     )}
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button className="control-btn success" onClick={playTop} disabled={busy} title="Play" aria-label="Play">
-                    ▶
+                    <MaterialIcon name="play_arrow" />
                   </button>
                   <button className="control-btn primary" onClick={next} disabled={busy} title="Next" aria-label="Next">
-                    ⏭
+                    <MaterialIcon name="skip_next" />
                   </button>
                   <button className="control-btn danger" onClick={stop} disabled={busy} title="Stop" aria-label="Stop">
-                    ⏹
+                    <MaterialIcon name="stop" />
                   </button>
                   <button className="control-btn" onClick={refreshQueue} disabled={busy} title="Refresh" aria-label="Refresh">
-                    🔄
+                    <MaterialIcon name="refresh" />
                   </button>
                   <button className="control-btn danger" onClick={clearAll} disabled={busy} title="Clear all" aria-label="Clear all">
-                    🗑
+                    <MaterialIcon name="delete" />
                   </button>
                   <button className="control-btn" onClick={() => setShowPlayerWindowControl(true)} title="Settings" aria-label="Settings">
-                    🎛️
+                    <MaterialIcon name="tune" />
                   </button>
                 </div>
               </div>
 
               <div className="card">
                 <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8}}>
-                  <h2 style={{margin: 0}}>🎼 Break Music</h2>
+                  <h2 style={{margin: 0}}><MaterialIcon name="music_note" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Break Music</h2>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }}>
                     <button
                       className="control-btn"
@@ -3448,7 +3567,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onClick={openBreakMusicManager}
                       disabled={busy}
                     >
-                      🛠️
+                      <MaterialIcon name="build" />
                     </button>
                     <button
                       className="control-btn"
@@ -3457,7 +3576,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onClick={() => controlBreakMusic('previous')}
                       disabled={busy || breakPlaylistTrackIds.length === 0}
                     >
-                      ⏮️
+                      <MaterialIcon name="skip_previous" />
                     </button>
                     <button
                       className="control-btn"
@@ -3466,7 +3585,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onClick={() => controlBreakMusic(breakMusicPaused ? 'resume' : 'pause')}
                       disabled={busy || !breakMusicTrack}
                     >
-                      {breakMusicPaused ? '▶️' : '⏸️'}
+                      <MaterialIcon name={breakMusicPaused ? 'play_arrow' : 'pause'} />
                     </button>
                     <button
                       className="control-btn"
@@ -3475,7 +3594,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onClick={() => controlBreakMusic('skip')}
                       disabled={busy || breakPlaylistTrackIds.length === 0}
                     >
-                      ⏭️
+                      <MaterialIcon name="skip_next" />
                     </button>
                   </div>
                 </div>
@@ -3519,7 +3638,7 @@ function closeDetails(e: React.SyntheticEvent) {
 
             <div className="card">
               <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12}}>
-                <h2 style={{margin: 0}}>🎤 Queue Order</h2>
+                <h2 style={{margin: 0}}><MaterialIcon name="mic_external_on" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Queue Order</h2>
                 <div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
                   <span className="stat-pill">
                     {queueState?.queueOrder.length ?? 0} singers
@@ -3534,7 +3653,7 @@ function closeDetails(e: React.SyntheticEvent) {
                     title="Manually add a song to the queue"
                     style={{ padding: '8px 12px', fontSize: '16px', lineHeight: 1 }}
                   >
-                    ➕
+                    <MaterialIcon name="add" />
                   </button>
                   <button
                     className="control-btn"
@@ -3557,7 +3676,7 @@ function closeDetails(e: React.SyntheticEvent) {
               {/* Singer-based queue order */}
               {(!queueState || queueState.queueOrder.length === 0) ? (
                 <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-text-secondary)' }}>
-                  <div style={{ fontSize: 48, marginBottom: 16, opacity: 0.5 }}>🎵</div>
+                  <MaterialIcon name="music_note" style={{ fontSize: 48, marginBottom: 16, opacity: 0.5 }} />
                   <div>No singers in queue</div>
                   <div style={{ fontSize: 14, marginTop: 8 }}>
                     Songs added from the Requests page will appear here automatically
@@ -3619,7 +3738,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           flex: '0 0 auto',
                           fontSize: 14,
                         }}>
-                          {isSinging ? '🎤' : idx + 1}
+                          {isSinging ? <MaterialIcon name="mic_external_on" style={{ fontSize: 18 }} /> : idx + 1}
                         </span>
 
                         {/* Singer info */}
@@ -3634,14 +3753,14 @@ function closeDetails(e: React.SyntheticEvent) {
                           </div>
                           <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 2 }}>
                             {singer.nextSong
-                              ? <><strong style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'}</strong> {singer.nextSong.title || 'Unknown'} — {singer.nextSong.artist || 'Unknown'}</>
+                              ? <><strong style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'}</strong> {singer.nextSong.title || 'Unknown'} — {singer.nextSong.artist || 'Unknown'}{renderDiscIdTag(singer.nextSong.discId)}</>
                               : <span style={{ opacity: 0.6 }}>No queued song</span>
                             }
                           </div>
                           <div style={{ display: 'flex', gap: 16, marginTop: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
-                            <span>🎵 {singer.queuedSongsCount} queued</span>
-                            <span>✅ {singer.totalSongsSung} sang</span>
-                            {singer.lastSangAt && <span>🕐 {formatTimeAgo(singer.lastSangAt)}</span>}
+                            <span><MaterialIcon name="music_note" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.queuedSongsCount} queued</span>
+                            <span><MaterialIcon name="check_circle" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.totalSongsSung} sang</span>
+                            {singer.lastSangAt && <span><MaterialIcon name="schedule" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{formatTimeAgo(singer.lastSangAt)}</span>}
                           </div>
                         </div>
 
@@ -3653,7 +3772,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             onClick={() => openSingerModal(singer.singerId)}
                             style={{ padding: '6px 10px', fontSize: 16, lineHeight: 1 }}
                           >
-                            👁
+                            <MaterialIcon name="visibility" />
                           </button>
                           <button
                             className="control-btn danger"
@@ -3662,7 +3781,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             onClick={() => removeSingerFromRotation(singer.singerId)}
                             style={{ padding: '6px 10px', fontSize: 13 }}
                           >
-                            ✕
+                            <MaterialIcon name="close" />
                           </button>
                         </div>
                       </div>
@@ -3686,7 +3805,7 @@ function closeDetails(e: React.SyntheticEvent) {
                     >
                       <span style={{ fontWeight: 600 }}>{item.requested_by}</span>
                       {' — '}
-                      {item.title} by {item.artist}
+                      {item.title}{renderDiscIdTag(item.disc_id)} by {item.artist}
                     </div>
                   ))}
                 </div>
@@ -3709,7 +3828,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onClick={closeHistoryManager}
                       aria-label="Close singer history manager"
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
@@ -3910,7 +4029,8 @@ function closeDetails(e: React.SyntheticEvent) {
                   <div className="modal-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                       <h3 style={{ margin: 0 }}>
-                        🎤 {selectedSingerHistory?.singer.displayName ?? (queueState?.queueOrder.find(s => s.singerId === selectedSingerId)?.displayName ?? 'Singer')} — Queue &amp; History
+                        <MaterialIcon name="mic_external_on" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />
+                        {selectedSingerHistory?.singer.displayName ?? (queueState?.queueOrder.find(s => s.singerId === selectedSingerId)?.displayName ?? 'Singer')} — Queue &amp; History
                       </h3>
                       {selectedSingerHistory && (
                         <button
@@ -3921,7 +4041,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
                           onClick={openRenameSingerDialog}
                         >
-                          ✏️
+                          <MaterialIcon name="edit" />
                         </button>
                       )}
                       {selectedSingerHistory && (
@@ -3933,7 +4053,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
                           onClick={() => { setMergeSingerDialogOpen(true); setMergeSingerError(''); setMergeSingerQuery('') }}
                         >
-                          🔀
+                          <MaterialIcon name="shuffle" />
                         </button>
                       )}
                       {selectedSingerHistory && (
@@ -3952,7 +4072,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             setShowManualRequest(true)
                           }}
                         >
-                          ➕
+                          <MaterialIcon name="add" />
                         </button>
                       )}
                     </div>
@@ -3961,7 +4081,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       style={{ width: 40, height: 40, padding: 0 }}
                       onClick={closeSingerModal}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
@@ -3973,9 +4093,9 @@ function closeDetails(e: React.SyntheticEvent) {
                     <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 16 }}>
                       {/* Singer stats */}
                       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                        <span className="stat-pill">🎵 {selectedSingerHistory.singer.totalSongsSung} songs sung</span>
+                        <span className="stat-pill"><MaterialIcon name="music_note" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{selectedSingerHistory.singer.totalSongsSung} songs sung</span>
                         {selectedSingerHistory.singer.lastSangAt && (
-                          <span className="stat-pill">🕐 Last: {formatTimeAgo(selectedSingerHistory.singer.lastSangAt)}</span>
+                          <span className="stat-pill"><MaterialIcon name="schedule" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />Last: {formatTimeAgo(selectedSingerHistory.singer.lastSangAt)}</span>
                         )}
                         <span className="stat-pill" style={{ background: 'rgba(99,102,241,0.15)', color: 'var(--color-accent)' }}>
                           {selectedSingerHistory.singer.status}
@@ -4035,12 +4155,19 @@ function closeDetails(e: React.SyntheticEvent) {
                                     </td>
                                     <td style={{ padding: '8px 6px', borderBottom: '1px solid var(--color-border)' }}>
                                       <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
-                                      <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{song.artist || 'Unknown'}</div>
+                                      <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                                        {song.artist || 'Unknown'}{renderDiscIdTag(song.discId)}
+                                      </div>
+                                      {song.requestedAt && (
+                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                          Requested at: {formatRequestedAt(song.requestedAt)}
+                                        </div>
+                                      )}
                                     </td>
                                     <td style={{ padding: '8px 6px', textAlign: 'center', whiteSpace: 'nowrap', borderBottom: '1px solid var(--color-border)' }}>
                                       {song.keyAdjustment !== 0 && (
                                         <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Key adjustment">
-                                          🎵{song.keyAdjustment > 0 ? '+' : ''}{song.keyAdjustment}
+                                          <MaterialIcon name="music_note" style={{ fontSize: 12, verticalAlign: 'text-bottom', marginRight: 2 }} />{song.keyAdjustment > 0 ? '+' : ''}{song.keyAdjustment}
                                         </span>
                                       )}
                                     </td>
@@ -4052,10 +4179,12 @@ function closeDetails(e: React.SyntheticEvent) {
                                         background: song.status === 'playing' ? 'rgba(16,185,129,0.2)' : 'rgba(99,102,241,0.15)',
                                         color: song.status === 'playing' ? '#10b981' : 'var(--color-accent)',
                                       }} title={song.status === 'playing' ? 'Playing' : 'Queued'}>
-                                        {song.status === 'playing' ? '▶' : '🎵'}
+                                        <MaterialIcon name={song.status === 'playing' ? 'play_arrow' : 'music_note'} style={{ fontSize: 14 }} />
                                       </span>
                                     </td>
-                                    <td style={{ padding: '8px 6px', textAlign: 'center', width: 36, borderBottom: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '8px 6px', textAlign: 'center', width: 80, borderBottom: '1px solid var(--color-border)' }}>
+                                      <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+                                        {canReplaceQueueSong(song) && renderReplaceButton(song)}
                                       {song.status === 'queued' && (
                                         <button
                                           onClick={() => removeSongFromQueue(song.queueId)}
@@ -4070,9 +4199,10 @@ function closeDetails(e: React.SyntheticEvent) {
                                             fontSize: 13,
                                             lineHeight: 1,
                                           }}>
-                                          ✕
+                                          <MaterialIcon name="close" style={{ fontSize: 14 }} />
                                         </button>
                                       )}
+                                      </div>
                                     </td>
                                   </tr>
                                 )
@@ -4097,12 +4227,19 @@ function closeDetails(e: React.SyntheticEvent) {
                                 }}>
                                   <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)' }}>
                                     <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{song.artist || 'Unknown'}</div>
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                                      {song.artist || 'Unknown'}{renderDiscIdTag(song.discId)}
+                                    </div>
+                                    {song.requestedAt && (
+                                      <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                        Requested at: {formatRequestedAt(song.requestedAt)}
+                                      </div>
+                                    )}
                                   </td>
                                   <td style={{ padding: '8px 6px', textAlign: 'center', whiteSpace: 'nowrap', borderBottom: '1px solid var(--color-border)' }}>
                                     {song.completedAt && (
                                       <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title={`Completed ${formatTimeAgo(song.completedAt)}`}>
-                                        🕐 {formatTimeAgo(song.completedAt)}
+                                        <MaterialIcon name="schedule" style={{ fontSize: 12, verticalAlign: 'text-bottom', marginRight: 2 }} />{formatTimeAgo(song.completedAt)}
                                       </span>
                                     )}
                                   </td>
@@ -4113,9 +4250,10 @@ function closeDetails(e: React.SyntheticEvent) {
                                       fontSize: 11,
                                       background: 'rgba(16,185,129,0.15)',
                                       color: '#10b981',
-                                    }} title="Completed">✅</span>
+                                    }} title="Completed"><MaterialIcon name="check_circle" style={{ fontSize: 14 }} /></span>
                                   </td>
-                                  <td style={{ padding: '8px 6px', textAlign: 'center', width: 36, borderBottom: '1px solid var(--color-border)' }}>
+                                  <td style={{ padding: '8px 6px', textAlign: 'center', width: 80, borderBottom: '1px solid var(--color-border)' }}>
+                                    <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
                                     <button
                                       className="control-btn"
                                       style={{ fontSize: 14, padding: '4px 8px', lineHeight: 1 }}
@@ -4123,8 +4261,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                       onClick={() => restoreSongToQueue(song.queueId)}
                                       title="Return this song to the queue"
                                     >
-                                      ↩
+                                      <MaterialIcon name="keyboard_return" />
                                     </button>
+                                    </div>
                                   </td>
                                 </tr>
                               ))}
@@ -4147,7 +4286,14 @@ function closeDetails(e: React.SyntheticEvent) {
                                 }}>
                                   <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)' }}>
                                     <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{song.artist || 'Unknown'}</div>
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                                      {song.artist || 'Unknown'}{renderDiscIdTag(song.discId)}
+                                    </div>
+                                    {song.requestedAt && (
+                                      <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                        Requested at: {formatRequestedAt(song.requestedAt)}
+                                      </div>
+                                    )}
                                   </td>
                                   <td style={{ padding: '8px 6px', textAlign: 'center', width: 36, borderBottom: '1px solid var(--color-border)' }}>
                                     <span style={{
@@ -4157,10 +4303,11 @@ function closeDetails(e: React.SyntheticEvent) {
                                       background: 'rgba(239,68,68,0.15)',
                                       color: '#ef4444',
                                     }} title={song.status === 'skipped' ? 'Skipped' : 'Removed'}>
-                                      {song.status === 'skipped' ? '⏭' : '✕'}
+                                      <MaterialIcon name={song.status === 'skipped' ? 'skip_next' : 'close'} style={{ fontSize: 14 }} />
                                     </span>
                                   </td>
-                                  <td style={{ padding: '8px 6px', textAlign: 'center', width: 36, borderBottom: '1px solid var(--color-border)' }}>
+                                  <td style={{ padding: '8px 6px', textAlign: 'center', width: 80, borderBottom: '1px solid var(--color-border)' }}>
+                                    <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
                                     <button
                                       className="control-btn danger"
                                       style={{ fontSize: 13, padding: '4px 8px', lineHeight: 1 }}
@@ -4168,8 +4315,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                       onClick={() => deleteSongFromHistory(song.queueId)}
                                       title="Remove this track from singer history"
                                     >
-                                      ✕
+                                      <MaterialIcon name="close" />
                                     </button>
+                                    </div>
                                   </td>
                                 </tr>
                               ))}
@@ -4197,13 +4345,13 @@ function closeDetails(e: React.SyntheticEvent) {
                     <div className="modal-backdrop" onClick={closeRenameSingerDialog} />
                     <div className="modal" style={{ maxWidth: 460, zIndex: 1001 }}>
                       <div className="modal-header">
-                        <h3 style={{ margin: 0 }}>✏️ Edit Singer Name</h3>
+                        <h3 style={{ margin: 0 }}><MaterialIcon name="edit" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Edit Singer Name</h3>
                         <button
                           className="control-btn"
                           style={{ width: 40, height: 40, padding: 0 }}
                           onClick={closeRenameSingerDialog}
                         >
-                          ✕
+                          <MaterialIcon name="close" />
                         </button>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -4251,8 +4399,8 @@ function closeDetails(e: React.SyntheticEvent) {
                     <div className="modal-backdrop" onClick={() => setMergeSingerDialogOpen(false)} />
                     <div className="modal" style={{ maxWidth: 460, zIndex: 1001 }}>
                       <div className="modal-header">
-                        <h3 style={{ margin: 0 }}>🔀 Merge Singer</h3>
-                        <button className="control-btn" style={{ width: 40, height: 40, padding: 0 }} onClick={() => setMergeSingerDialogOpen(false)}>✕</button>
+                        <h3 style={{ margin: 0 }}><MaterialIcon name="shuffle" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Merge Singer</h3>
+                        <button className="control-btn" style={{ width: 40, height: 40, padding: 0 }} onClick={() => setMergeSingerDialogOpen(false)}><MaterialIcon name="close" /></button>
                       </div>
                       <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>
                         Merge another singer's history and queue into <strong>{selectedSingerHistory.singer.displayName}</strong>. The other singer will be removed.
@@ -4295,19 +4443,20 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal-backdrop" onClick={() => setShowAccountManagement(false)} />
                 <div className="modal" style={{ maxWidth: 560 }}>
                   <div className="modal-header">
-                    <h3 style={{ margin: 0 }}>🔐 Account Settings</h3>
+                    <h3 style={{ margin: 0 }}><MaterialIcon name="lock" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Account Settings</h3>
                     <button
                       className="control-btn"
                       style={{ width: 40, height: 40, padding: 0 }}
                       onClick={() => setShowAccountManagement(false)}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
                   {auth.isDefaultPassword && (
                     <div className="banner" style={{ marginBottom: 16 }}>
-                      ⚠️ You are using the default password. Please change it for security.
+                      <MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+                      You are using the default password. Please change it for security.
                     </div>
                   )}
 
@@ -4322,14 +4471,14 @@ function closeDetails(e: React.SyntheticEvent) {
                         style={{ minWidth: 180, justifyContent: 'center', flex: 1 }}
                         onClick={() => setChangingUsername(true)}
                       >
-                        <span>👤</span> Change Username
+                        <MaterialIcon name="person" /> Change Username
                       </button>
                       <button
                         className="control-btn"
                         style={{ minWidth: 180, justifyContent: 'center', flex: 1 }}
                         onClick={() => setChangingPassword(true)}
                       >
-                        <span>🔒</span> Change Password
+                        <MaterialIcon name="lock" /> Change Password
                       </button>
                     </div>
                   )}
@@ -4376,7 +4525,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       {usernameError && <div className="error-msg" style={{ marginBottom: 0 }}>{usernameError}</div>}
                       <div style={{ display: 'flex', gap: 8 }}>
                         <button className="control-btn success" type="submit" disabled={busy}>
-                          <span>✓</span> Change Username
+                          <MaterialIcon name="check" /> Change Username
                         </button>
                         <button
                           type="button"
@@ -4447,7 +4596,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       {passwordError && <div className="error-msg" style={{ marginBottom: 0 }}>{passwordError}</div>}
                       <div style={{ display: 'flex', gap: 8 }}>
                         <button className="control-btn success" type="submit" disabled={busy}>
-                          <span>✓</span> Change Password
+                          <MaterialIcon name="check" /> Change Password
                         </button>
                         <button
                           type="button"
@@ -4475,7 +4624,7 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal-backdrop" onClick={() => setShowPlayerWindowControl(false)} />
                 <div className="modal">
                   <div className="modal-header">
-                    <h3 style={{ margin: 0 }}>🎛️ Player Settings</h3>
+                    <h3 style={{ margin: 0 }}><MaterialIcon name="tune" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Player Settings</h3>
                     <button
                       style={{
                         background: 'transparent',
@@ -4496,7 +4645,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onMouseLeave={e => e.currentTarget. style.background = 'transparent'}
                       onClick={() => setShowPlayerWindowControl(false)}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
@@ -5231,7 +5380,7 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal-backdrop" onClick={closeBreakMusicManager} />
                 <div className="modal break-manager-modal">
                   <div className="modal-header">
-                    <h3 style={{ margin: 0 }}>🎼 Manage Break Music</h3>
+                    <h3 style={{ margin: 0 }}><MaterialIcon name="music_note" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Manage Break Music</h3>
                     <button
                       title="Close"
                       style={{
@@ -5247,7 +5396,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       }}
                       onClick={closeBreakMusicManager}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
@@ -5276,7 +5425,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           disabled={!selectedBreakPlaylistId}
                           style={{ padding: '10px 12px', minWidth: 44, flexShrink: 0 }}
                         >
-                          📥
+                          <MaterialIcon name="download" />
                         </button>
                         <button
                           className="control-btn"
@@ -5286,7 +5435,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           onClick={saveBreakPlaylist}
                           style={{ padding: '10px 12px', flexShrink: 0 }}
                         >
-                          💾
+                          <MaterialIcon name="save" />
                         </button>
                         <button
                           className="control-btn"
@@ -5296,7 +5445,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           onClick={shuffleBreakPlaylist}
                           style={{ padding: '10px 12px', flexShrink: 0 }}
                         >
-                          🔀
+                          <MaterialIcon name="shuffle" />
                         </button>
                         <button
                           className="control-btn"
@@ -5306,7 +5455,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           onClick={clearBreakPlaylist}
                           style={{ padding: '10px 12px', flexShrink: 0 }}
                         >
-                          🗑️
+                          <MaterialIcon name="delete" />
                         </button>
                       </div>
                     </div>
@@ -5334,7 +5483,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 onClick={() => setShowBreakColumnMenu((prev) => !prev)}
                                 style={{ padding: '8px 10px', fontSize: 12 }}
                               >
-                                🧰 Columns
+                                <MaterialIcon name="view_column" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />Columns
                               </button>
                               {showBreakColumnMenu && (
                                 <div className="break-columns-popover">
@@ -5374,13 +5523,13 @@ function closeDetails(e: React.SyntheticEvent) {
                                 disabled={sortedFilteredBreakLibraryTracks.length === 0}
                                 style={{ border: 'none', background: 'transparent', color: 'var(--color-text-secondary)', cursor: 'pointer', fontSize: 14, padding: 0 }}
                               >
-                                ➕ All
+                                <MaterialIcon name="playlist_add" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 3 }} />All
                               </button>
                             </span>
                             {breakColumnEnabled('song') && (
                               <div className="break-table-header-cell">
                                 <button className="break-table-header-sort" onClick={() => toggleBreakSort('song')}>
-                                  Song{breakSort.column === 'song' ? (breakSort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+                                  Song{breakSort.column === 'song' && <MaterialIcon name={breakSort.direction === 'asc' ? 'arrow_drop_up' : 'arrow_drop_down'} style={{ fontSize: 18, verticalAlign: 'text-bottom' }} />}
                                 </button>
                                 <div className="break-table-header-resizer" onMouseDown={(event) => startBreakColumnResize('song', event)} />
                               </div>
@@ -5388,7 +5537,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             {breakColumnEnabled('artist') && (
                               <div className="break-table-header-cell">
                                 <button className="break-table-header-sort" onClick={() => toggleBreakSort('artist')}>
-                                  Artist{breakSort.column === 'artist' ? (breakSort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+                                  Artist{breakSort.column === 'artist' && <MaterialIcon name={breakSort.direction === 'asc' ? 'arrow_drop_up' : 'arrow_drop_down'} style={{ fontSize: 18, verticalAlign: 'text-bottom' }} />}
                                 </button>
                                 <div className="break-table-header-resizer" onMouseDown={(event) => startBreakColumnResize('artist', event)} />
                               </div>
@@ -5396,7 +5545,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             {breakColumnEnabled('genre') && (
                               <div className="break-table-header-cell">
                                 <button className="break-table-header-sort" onClick={() => toggleBreakSort('genre')}>
-                                  Genre{breakSort.column === 'genre' ? (breakSort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+                                  Genre{breakSort.column === 'genre' && <MaterialIcon name={breakSort.direction === 'asc' ? 'arrow_drop_up' : 'arrow_drop_down'} style={{ fontSize: 18, verticalAlign: 'text-bottom' }} />}
                                 </button>
                                 <div className="break-table-header-resizer" onMouseDown={(event) => startBreakColumnResize('genre', event)} />
                               </div>
@@ -5404,7 +5553,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             {breakColumnEnabled('length') && (
                               <div className="break-table-header-cell">
                                 <button className="break-table-header-sort" onClick={() => toggleBreakSort('length')}>
-                                  Length{breakSort.column === 'length' ? (breakSort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+                                  Length{breakSort.column === 'length' && <MaterialIcon name={breakSort.direction === 'asc' ? 'arrow_drop_up' : 'arrow_drop_down'} style={{ fontSize: 18, verticalAlign: 'text-bottom' }} />}
                                 </button>
                                 <div className="break-table-header-resizer" onMouseDown={(event) => startBreakColumnResize('length', event)} />
                               </div>
@@ -5412,7 +5561,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             {breakColumnEnabled('path') && (
                               <div className="break-table-header-cell">
                                 <button className="break-table-header-sort" onClick={() => toggleBreakSort('path')}>
-                                  Path{breakSort.column === 'path' ? (breakSort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+                                  Path{breakSort.column === 'path' && <MaterialIcon name={breakSort.direction === 'asc' ? 'arrow_drop_up' : 'arrow_drop_down'} style={{ fontSize: 18, verticalAlign: 'text-bottom' }} />}
                                 </button>
                                 <div className="break-table-header-resizer" onMouseDown={(event) => startBreakColumnResize('path', event)} />
                               </div>
@@ -5444,7 +5593,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 onClick={() => addBreakTrackToPlaylist(track)}
                                 style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer', fontSize: 16 }}
                               >
-                                ➕
+                                <MaterialIcon name="add" style={{ fontSize: 18 }} />
                               </button>
                               {breakColumnEnabled('song') && <span>{track.title}</span>}
                               {breakColumnEnabled('artist') && <span>{track.artist || '—'}</span>}
@@ -5538,7 +5687,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                   title="Drag to reorder playlist"
                                   style={{ color: 'var(--color-text-secondary)', cursor: 'grab', fontSize: 16, textAlign: 'center' }}
                                 >
-                                  ☰
+                                  <MaterialIcon name="drag_indicator" style={{ fontSize: 18 }} />
                                 </span>
                                 <div style={{ minWidth: 0 }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -5554,9 +5703,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                   </div>
                                 </div>
                                 <div style={{ display: 'flex', gap: 4 }}>
-                                  <button title="Move up" disabled={index === 0} onClick={() => moveBreakTrackInPlaylist(index, -1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}>⬆️</button>
-                                  <button title="Move down" disabled={index === breakPlaylistTracks.length - 1} onClick={() => moveBreakTrackInPlaylist(index, 1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}>⬇️</button>
-                                  <button title="Remove from playlist" onClick={() => removeBreakTrackFromPlaylist(index)} style={{ border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer' }}>🗑️</button>
+                                  <button title="Move up" disabled={index === 0} onClick={() => moveBreakTrackInPlaylist(index, -1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}><MaterialIcon name="keyboard_arrow_up" style={{ fontSize: 18 }} /></button>
+                                  <button title="Move down" disabled={index === breakPlaylistTracks.length - 1} onClick={() => moveBreakTrackInPlaylist(index, 1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}><MaterialIcon name="keyboard_arrow_down" style={{ fontSize: 18 }} /></button>
+                                  <button title="Remove from playlist" onClick={() => removeBreakTrackFromPlaylist(index)} style={{ border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer' }}><MaterialIcon name="delete" style={{ fontSize: 18 }} /></button>
                                 </div>
                               </div>
                             )
@@ -5577,19 +5726,13 @@ function closeDetails(e: React.SyntheticEvent) {
             {/* Replace Song Modal - CLEANED UP */}
             {replacingId !== null && (
               <>
-                <div className="modal-backdrop" onClick={() => {
-                  setReplacingId(null);
-                  setSearchQuery('');
-                  setSearchResults([]);
-                  setReplaceUrl('');
-                  setReplaceTitle('');
-                  setReplaceArtist('');
-                  setReplaceDiscId('');
-                  setReplaceSearchMode('local');
-                }} />
+                <div className="modal-backdrop" onClick={closeReplaceModal} />
                 <div className="modal">
                   <div className="modal-header">
-                    <h3 style={{ margin: 0 }}>🔄 Replace Song</h3>
+                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="material-symbols-rounded" style={{ fontSize: 24 }}>contract_edit</span>
+                      Replace Song
+                    </h3>
                     <button
                       style={{
                         background: 'transparent',
@@ -5608,18 +5751,9 @@ function closeDetails(e: React.SyntheticEvent) {
                       }}
                       onMouseEnter={e => e.currentTarget.style.background = 'var(--color-bg-hover)'}
                       onMouseLeave={e => e.currentTarget. style.background = 'transparent'}
-                      onClick={() => {
-                        setReplacingId(null);
-                        setSearchQuery('');
-                        setSearchResults([]);
-                        setReplaceUrl('');
-                        setReplaceTitle('');
-                        setReplaceArtist('');
-                        setReplaceDiscId('');
-                        setReplaceSearchMode('local');
-                      }}
+                      onClick={closeReplaceModal}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
@@ -5630,12 +5764,7 @@ function closeDetails(e: React.SyntheticEvent) {
                         className={`mode-button ${replaceSearchMode === 'local' ? 'active' : ''}`}
                         onClick={() => setReplaceSearchMode('local')}
                       >
-                        <img
-                          src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
-                          alt="Local Library"
-                          className="mode-icon"
-                          style={{ width: "20px", height: "20px", marginRight: "6px" }}
-                        />
+                        <MaterialIcon name="library_music" className="mode-icon" style={{ fontSize: 20, marginRight: 6 }} />
                         Local Library
                       </button>
                     )}
@@ -5659,7 +5788,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       className={`mode-button ${replaceSearchMode === 'url' ? 'active' : ''}`}
                       onClick={() => setReplaceSearchMode('url')}
                     >
-                      🔗 URL
+                      <MaterialIcon name="link" style={{ fontSize: 18, marginRight: 6 }} /> URL
                     </button>
                   </div>
 
@@ -5754,7 +5883,7 @@ function closeDetails(e: React.SyntheticEvent) {
                               <span className="loading-spinner"></span> Downloading...
                             </>
                           ) : (
-                            <>📥 Download to Library</>
+                            <><MaterialIcon name="download" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} /> Download to Library</>
                           )}
                         </button>
                       )}
@@ -5791,7 +5920,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           }}>
                             {searchQuery ? (
                               <>
-                                <div style={{ fontSize: '24px', marginBottom: '12px', opacity: 0.5 }}>🔍</div>
+                                <MaterialIcon name="search" style={{ fontSize: 24, marginBottom: 12, opacity: 0.5 }} />
                                 <div style={{ fontSize: '14px' }}>
                                   {replaceSearchMode === 'local' ? 'No local results found' : 'No Karaoke Nerds results found'}
                                 </div>
@@ -5801,7 +5930,7 @@ function closeDetails(e: React.SyntheticEvent) {
                               </>
                             ) : (
                               <>
-                                <div style={{ fontSize: '32px', marginBottom: '12px', opacity: 0.3 }}>🎵</div>
+                                <MaterialIcon name="music_note" style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
                             <div style={{ fontSize: '14px' }}>
                               Start typing to search {replaceSearchMode === 'local' ? 'local library' : 'Karaoke Nerds'}
                             </div>
@@ -5900,7 +6029,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                     disabled={busy || downloadingTrack === track.url}
                                     title="Download to local library"
                                   >
-                                    {downloadingTrack === track.url ? '⏳' : '📥'} Download
+                                    {downloadingTrack === track.url ? <MaterialIcon name="hourglass_top" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} /> : <MaterialIcon name="download" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />} Download
                                   </button>
                                 )}
                                 <button
@@ -5935,16 +6064,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       background: 'transparent',
                       border: '2px solid var(--color-border)'
                     }}
-                    onClick={() => {
-                      setReplacingId(null);
-                      setSearchQuery('');
-                      setSearchResults([]);
-                      setReplaceUrl('');
-                      setReplaceTitle('');
-                      setReplaceArtist('');
-                      setReplaceDiscId('');
-                      setReplaceSearchMode('local');
-                    }}
+                    onClick={closeReplaceModal}
                   >
                     Cancel
                   </button>
@@ -5958,7 +6078,7 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div className="modal-backdrop" onClick={resetManualRequestModal} />
                 <div className="modal">
                   <div className="modal-header">
-                    <h3 style={{ margin: 0 }}>➕ Add to Queue</h3>
+                    <h3 style={{ margin: 0 }}><MaterialIcon name="add" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Add to Queue</h3>
                     <button
                       style={{
                         background: 'transparent',
@@ -5979,7 +6099,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                       onClick={resetManualRequestModal}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
@@ -5987,7 +6107,7 @@ function closeDetails(e: React.SyntheticEvent) {
                   {manualRequestForSingerId ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(99,102,241,0.1)', borderRadius: 8, border: '1px solid rgba(99,102,241,0.2)' }}>
                       <span style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>Adding for:</span>
-                      <strong style={{ fontSize: 13 }}>🎤 {manualRequestName}</strong>
+                      <strong style={{ fontSize: 13 }}><MaterialIcon name="mic_external_on" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 3 }} />{manualRequestName}</strong>
                     </div>
                   ) : (
                   <div className="form-group" style={{ position: 'relative' }}>
@@ -6070,12 +6190,7 @@ function closeDetails(e: React.SyntheticEvent) {
                         className={`mode-button ${manualRequestMode === 'local' ? 'active' : ''}`}
                         onClick={() => setManualRequestMode('local')}
                       >
-                        <img
-                          src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
-                          alt="Local Library"
-                          className="mode-icon"
-                          style={{ width: "20px", height: "20px", marginRight: "6px" }}
-                        />
+                        <MaterialIcon name="library_music" className="mode-icon" style={{ fontSize: 20, marginRight: 6 }} />
                         Local
                       </button>
                     )}
@@ -6099,7 +6214,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       className={`mode-button ${manualRequestMode === 'url' ? 'active' : ''}`}
                       onClick={() => setManualRequestMode('url')}
                     >
-                      🔗 URL
+                      <MaterialIcon name="link" style={{ fontSize: 18, marginRight: 6 }} /> URL
                     </button>
                   </div>
 
@@ -6194,7 +6309,7 @@ function closeDetails(e: React.SyntheticEvent) {
                               <span className="loading-spinner"></span> Downloading...
                             </>
                           ) : (
-                            <>📥 Download to Library</>
+                            <><MaterialIcon name="download" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} /> Download to Library</>
                           )}
                         </button>
                       )}
@@ -6231,7 +6346,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           }}>
                             {manualRequestQuery ? (
                               <>
-                                <div style={{ fontSize: '24px', marginBottom: '12px', opacity: 0.5 }}>🔍</div>
+                                <MaterialIcon name="search" style={{ fontSize: 24, marginBottom: 12, opacity: 0.5 }} />
                                 <div style={{ fontSize: '14px' }}>
                                   {manualRequestMode === 'local' ? 'No local results found' : 'No external results found'}
                                 </div>
@@ -6241,7 +6356,7 @@ function closeDetails(e: React.SyntheticEvent) {
                               </>
                             ) : (
                               <>
-                                <div style={{ fontSize: '32px', marginBottom: '12px', opacity: 0.3 }}>🎵</div>
+                                <MaterialIcon name="music_note" style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
                                 <div style={{ fontSize: '14px' }}>
                                   Start typing to search {manualRequestMode === 'local' ? 'local library' : 'external library'}
                                 </div>
@@ -6293,7 +6408,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                     aria-label="Add to queue"
                                     title="Add to queue"
                                   >
-                                    {busy ? '…' : '➕'}
+                                    {busy ? '…' : <MaterialIcon name="add" style={{ fontSize: 16 }} />}
                                   </button>
                                 </div>
                               ))
@@ -6344,7 +6459,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                         aria-label={downloadingTrack === track.url ? 'Downloading to local library' : 'Download to local library'}
                                         title="Download to local library"
                                       >
-                                        {downloadingTrack === track.url ? '⏳' : '📥'}
+                                        <MaterialIcon name={downloadingTrack === track.url ? 'hourglass_top' : 'download'} style={{ fontSize: 16 }} />
                                       </button>
                                     )}
                                     <button
@@ -6363,7 +6478,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                       aria-label="Add to queue"
                                       title="Add to queue"
                                     >
-                                      {busy ? '…' : '➕'}
+                                      {busy ? '…' : <MaterialIcon name="add" style={{ fontSize: 16 }} />}
                                     </button>
                                   </div>
                                 </div>

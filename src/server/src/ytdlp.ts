@@ -410,10 +410,23 @@ export async function scanDownloadLocation(): Promise<{
       const files = await fs.readdir(downloadLocation);
       const mp4Files = files.filter(f => f.toLowerCase().endsWith('.mp4'));
       
-      logger.info(`[ytdlp] Scanning ${downloadLocation}: found ${mp4Files.length} MP4 files`);
+      logger.verbose(`[ytdlp] Scanning ${downloadLocation}: found ${mp4Files.length} MP4 files`);
       
       for (const file of mp4Files) {
         const filePath = path.join(downloadLocation, file);
+        const existing = await query(
+          `SELECT id
+             FROM tracks
+            WHERE library_id IS NULL
+              AND kind = 'mp4'
+              AND file_mp4 = $1
+            LIMIT 1`,
+          [filePath]
+        );
+        if (existing.rows.length > 0) {
+          continue;
+        }
+
         const result = await addDownloadedFileToDatabase(filePath);
         
         if (result.success) {

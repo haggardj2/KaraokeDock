@@ -52,6 +52,42 @@ type OidcPublicConfig = {
   passwordLoginEnabled: boolean;
 };
 
+function MaterialIcon({
+  name,
+  className = '',
+  style,
+}: {
+  name: string;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <span className={`material-symbols-rounded${className ? ` ${className}` : ''}`} aria-hidden="true" style={style}>
+      {name}
+    </span>
+  );
+}
+
+function renderStatusMessage(message: string) {
+  if (message.startsWith('⚠️')) {
+    return (
+      <>
+        <MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+        {message.replace(/^⚠️\s*/, '')}
+      </>
+    );
+  }
+  if (message.startsWith('✔')) {
+    return (
+      <>
+        <MaterialIcon name="check_circle" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+        {message.replace(/^✔\s*/, '')}
+      </>
+    );
+  }
+  return message;
+}
+
 const LIBRARY_PARSE_MODE_OPTIONS: Array<{
   value: LibraryParseMode;
   label: string;
@@ -1093,7 +1129,7 @@ export default function Admin() {
   return (
     <div className="admin-page">
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
 
         /* Animations */
         @keyframes fadeInUp {
@@ -1109,6 +1145,21 @@ export default function Admin() {
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.5; }
+        }
+
+        .material-symbols-rounded {
+          font-family: 'Material Symbols Rounded';
+          font-weight: normal;
+          font-style: normal;
+          line-height: 1;
+          letter-spacing: normal;
+          text-transform: none;
+          display: inline-block;
+          white-space: nowrap;
+          word-wrap: normal;
+          direction: ltr;
+          -webkit-font-feature-settings: 'liga';
+          -webkit-font-smoothing: antialiased;
         }
 
         @keyframes spin {
@@ -1763,7 +1814,7 @@ export default function Admin() {
       <div className="container">
         {banner && (
           <div className={`banner ${auth.isDefaultPassword ? 'warning' : banner.includes('✔') ? 'success' : ''}`}>
-            {banner}
+            {renderStatusMessage(banner)}
           </div>
         )}
 
@@ -1775,7 +1826,7 @@ export default function Admin() {
         {! auth.isLoggedIn ?  (
           <div className="card login-card">
             <div className="login-header">
-              <h2 className="login-title">🔐 Admin Login</h2>
+              <h2 className="login-title"><MaterialIcon name="lock" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Admin Login</h2>
             </div>
             {oidcConfig?.passwordLoginEnabled !== false && (
               <form onSubmit={handleLogin}>
@@ -1857,38 +1908,38 @@ export default function Admin() {
         ) : !auth.isAdmin ? (
           /* Access Denied for non-admin users */
           <div className="card" style={{ maxWidth: 480, margin: '80px auto', textAlign: 'center' }}>
-            <div style={{ fontSize: 64, marginBottom: 16 }}>🚫</div>
+            <MaterialIcon name="block" style={{ fontSize: 64, marginBottom: 16 }} />
             <h2 style={{ margin: '0 0 12px', fontSize: 22 }}>Access Denied</h2>
             <p style={{ color: 'var(--color-text-secondary)', marginBottom: 24 }}>
               Your account does not have administrator privileges.
             </p>
             <button className="btn danger" onClick={auth.handleLogout}>
-              <span>🚪</span> Logout
+              <MaterialIcon name="logout" /> Logout
             </button>
           </div>
         ) : (
           <>
             {/* Stats Card */}
             <div className="card">
-              <h2 style={{ margin: "0 0 20px", fontSize: 20 }}>📊 System Statistics</h2>
+              <h2 style={{ margin: "0 0 20px", fontSize: 20 }}><MaterialIcon name="bar_chart" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />System Statistics</h2>
               <div className="stats-grid">
                 <div className="stat-pill">
-                  <span className="stat-icon">🎤</span>
+                  <MaterialIcon name="mic_external_on" className="stat-icon" />
                   <span className="stat-value">{stats?.artists ??  "—"}</span>
                   <span className="stat-label">Artists</span>
                 </div>
                 <div className="stat-pill">
-                  <span className="stat-icon">🎵</span>
+                  <MaterialIcon name="music_note" className="stat-icon" />
                   <span className="stat-value">{stats?.tracks ?? "—"}</span>
                   <span className="stat-label">Tracks</span>
                 </div>
                 <div className="stat-pill">
-                  <span className="stat-icon">📋</span>
+                  <MaterialIcon name="queue_music" className="stat-icon" />
                   <span className="stat-value">{stats?.queued ?? "—"}</span>
                   <span className="stat-label">Queued</span>
                 </div>
                 <div className="stat-pill">
-                  <span className="stat-icon">⏰</span>
+                  <MaterialIcon name="schedule" className="stat-icon" />
                   <span className="stat-value" style={{ fontSize: 14 }}>
                     {stats?.lastScan?. finishedAt
                       ? new Date(stats.lastScan. finishedAt).toLocaleDateString()
@@ -1905,7 +1956,7 @@ export default function Admin() {
                   title="Scan all libraries"
                   aria-label="Scan all libraries"
                 >
-                  🔍
+                  <MaterialIcon name="search" />
                 </button>
                 <button
                   className="btn-icon danger"
@@ -1914,7 +1965,7 @@ export default function Admin() {
                   title="Clear database"
                   aria-label="Clear database"
                 >
-                  🗑️
+                  <MaterialIcon name="delete" />
                 </button>
                 <button
                   className="btn-icon"
@@ -1923,7 +1974,7 @@ export default function Admin() {
                   title="Refresh stats"
                   aria-label="Refresh stats"
                 >
-                  🔄
+                  <MaterialIcon name="refresh" />
                 </button>
               </div>
             </div>
@@ -1931,9 +1982,9 @@ export default function Admin() {
             {/* Media Libraries Card */}
             <div className="card">
               <div className="card-header" onClick={() => updateCardState('mediaLibrariesExpanded', !mediaLibrariesExpanded)}>
-                <h2>📚 Media Libraries</h2>
+                <h2><MaterialIcon name="library_music" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Media Libraries</h2>
                 <button className="card-toggle" type="button">
-                  {mediaLibrariesExpanded ? '▼ Collapse' : '▶ Expand'}
+                  {mediaLibrariesExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
                 </button>
               </div>
               
@@ -1949,7 +2000,7 @@ export default function Admin() {
                     }}
                     disabled={!auth.sessionToken || !auth.isLoggedIn}
                   >
-                    ➕
+                    <MaterialIcon name="add" />
                   </button>
                 </div>
 
@@ -1961,9 +2012,9 @@ export default function Admin() {
                       <div className="library-header">
                         <div className="library-info">
                           <div className="library-name">{l.name}</div>
-                          <div className="library-path">📁 {l.path}</div>
+                          <div className="library-path"><MaterialIcon name="folder" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />{l.path}</div>
                           <div className="library-path">
-                            🏷️ {LIBRARY_PARSE_MODE_OPTIONS.find((option) => option.value === l.parseMode)?.label ?? l.parseMode}
+                            <MaterialIcon name="sell" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />{LIBRARY_PARSE_MODE_OPTIONS.find((option) => option.value === l.parseMode)?.label ?? l.parseMode}
                           </div>
                         </div>
                         <div className="library-actions">
@@ -1973,7 +2024,7 @@ export default function Admin() {
                             disabled={busy || !auth.sessionToken || !auth.isLoggedIn}
                             title="Scan this library"
                           >
-                            🔍
+                            <MaterialIcon name="search" />
                           </button>
                           <button
                             className="btn-icon danger"
@@ -1981,7 +2032,7 @@ export default function Admin() {
                             disabled={busy || !auth.sessionToken || !auth.isLoggedIn}
                             title="Remove library"
                           >
-                            🗑️
+                            <MaterialIcon name="delete" />
                           </button>
                         </div>
                       </div>
@@ -1990,7 +2041,7 @@ export default function Admin() {
                 </div>
               ) : (
                 <div className="empty-state">
-                  <div className="empty-icon">📁</div>
+                  <MaterialIcon name="folder" className="empty-icon" />
                   <div className="empty-text">No libraries configured yet</div>
                   <div className="empty-subtext">Use the add button to create your first media library</div>
                 </div>
@@ -2001,9 +2052,9 @@ export default function Admin() {
             {/* Break Music Card */}
             <div className="card">
               <div className="card-header" onClick={() => updateCardState('breakMusicExpanded', !breakMusicExpanded)}>
-                <h2>🎼 Break Music</h2>
+                <h2><MaterialIcon name="music_note" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Break Music</h2>
                 <button className="card-toggle" type="button">
-                  {breakMusicExpanded ? '▼ Collapse' : '▶ Expand'}
+                  {breakMusicExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
                 </button>
               </div>
 
@@ -2016,7 +2067,7 @@ export default function Admin() {
                       disabled={busy}
                       title="Scan all break music folders"
                     >
-                      🔍
+                      <MaterialIcon name="search" />
                     </button>
                     <button
                       className="btn-icon danger"
@@ -2024,7 +2075,7 @@ export default function Admin() {
                       disabled={busy}
                       title="Clear break music tracks from database"
                     >
-                      🧹
+                      <MaterialIcon name="cleaning_services" />
                     </button>
                   </div>
                   <button
@@ -2037,7 +2088,7 @@ export default function Admin() {
                     title="Add break music folder"
                     aria-label="Add break music folder"
                   >
-                    ➕
+                    <MaterialIcon name="add" />
                   </button>
                 </div>
 
@@ -2048,7 +2099,7 @@ export default function Admin() {
                   padding: 16,
                   marginBottom: 16
                 }}>
-                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>💾 Saved Playlists Folder</h3>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="save" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />Saved Playlists Folder</h3>
                   <div style={{ display: "flex", gap: 8 }}>
                     <input
                       className="form-input"
@@ -2062,7 +2113,7 @@ export default function Admin() {
                       disabled={!auth.sessionToken || !auth.isLoggedIn}
                       title="Browse playlist folders"
                     >
-                      📁
+                      <MaterialIcon name="folder" />
                     </button>
                     <button
                       className="btn-icon primary"
@@ -2070,7 +2121,7 @@ export default function Admin() {
                       disabled={busy || !breakPlaylistsFolder.trim()}
                       title="Save playlists folder"
                     >
-                      💾
+                      <MaterialIcon name="save" />
                     </button>
                   </div>
                 </div>
@@ -2082,7 +2133,7 @@ export default function Admin() {
                         <div className="library-header">
                           <div className="library-info">
                             <div className="library-name">{f.name}</div>
-                            <div className="library-path">📁 {f.path}</div>
+                            <div className="library-path"><MaterialIcon name="folder" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />{f.path}</div>
                           </div>
                           <div className="library-actions">
                             <button
@@ -2091,7 +2142,7 @@ export default function Admin() {
                               disabled={busy}
                               title="Scan this folder"
                             >
-                              🔍
+                              <MaterialIcon name="search" />
                             </button>
                             <button
                               className="btn-icon danger"
@@ -2099,7 +2150,7 @@ export default function Admin() {
                               disabled={busy}
                               title="Remove folder"
                             >
-                              🗑️
+                              <MaterialIcon name="delete" />
                             </button>
                           </div>
                         </div>
@@ -2108,7 +2159,7 @@ export default function Admin() {
                   </div>
                 ) : (
                   <div className="empty-state">
-                    <div className="empty-icon">🎼</div>
+                    <MaterialIcon name="music_note" className="empty-icon" />
                     <div className="empty-text">No break music folders configured</div>
                   </div>
                 )}
@@ -2118,9 +2169,9 @@ export default function Admin() {
             {/* System Settings Card */}
             <div className="card">
               <div className="card-header" onClick={() => updateCardState('systemSettingsExpanded', !systemSettingsExpanded)}>
-                <h2>⚙️ System Settings</h2>
+                <h2><MaterialIcon name="settings" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />System Settings</h2>
                 <button className="card-toggle" type="button">
-                  {systemSettingsExpanded ? '▼ Collapse' : '▶ Expand'}
+                  {systemSettingsExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
                 </button>
               </div>
               
@@ -2133,7 +2184,7 @@ export default function Admin() {
                   padding: 16,
                   marginBottom: 16
                 }}>
-                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>📚 Library Availability & Requests</h3>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="library_music" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />Library Availability & Requests</h3>
                   <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                       <input
@@ -2198,7 +2249,7 @@ export default function Admin() {
                   padding: 16,
                   marginBottom: 16
                 }}>
-                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>📥 yt-dlp Integration</h3>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="download" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />yt-dlp Integration</h3>
                   
                   {/* Allow Downloads Toggle */}
                   <div style={{ marginBottom: 16 }}>
@@ -2236,7 +2287,7 @@ export default function Admin() {
                             <span className="loading-spinner" />
                           </>
                         ) : (
-                          <>🔄</>
+                          <MaterialIcon name="sync" />
                     )}
                   </button>
                 </div>
@@ -2258,7 +2309,7 @@ export default function Admin() {
                       title="Browse folders"
                       aria-label="Browse download folders"
                     >
-                      📁
+                      <MaterialIcon name="folder" />
                     </button>
                     <button
                       className="btn-icon primary"
@@ -2267,7 +2318,7 @@ export default function Admin() {
                       title="Scan download location for new files and remove missing ones"
                       aria-label="Scan download location"
                     >
-                      🔍
+                      <MaterialIcon name="search" />
                     </button>
                     <button
                       className="btn-icon success"
@@ -2276,7 +2327,7 @@ export default function Admin() {
                       title="Save download location"
                       aria-label="Save download location"
                     >
-                      ✓
+                      <MaterialIcon name="check" />
                     </button>
                   </div>
                 </div>
@@ -2291,7 +2342,7 @@ export default function Admin() {
                 padding: 16,
                 marginBottom: 16
               }}>
-                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>🔄 Background Tasks</h3>
+                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="sync" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />Background Tasks</h3>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                     <input
@@ -2361,7 +2412,7 @@ export default function Admin() {
                 borderRadius: 12,
                 padding: 16
               }}>
-                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>📋 Server Logging</h3>
+                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="list_alt" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />Server Logging</h3>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   <label className="form-label" style={{ margin: 0, whiteSpace: "nowrap" }}>Log Level</label>
                   <select
@@ -2384,9 +2435,9 @@ export default function Admin() {
             {/* User Manager Card */}
             <div className="card">
               <div className="card-header" onClick={() => updateCardState('usersExpanded', !usersExpanded)}>
-                <h2>👥 User Manager</h2>
+                <h2><MaterialIcon name="group" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />User Manager</h2>
                 <button className="card-toggle" type="button">
-                  {usersExpanded ? '▼ Collapse' : '▶ Expand'}
+                  {usersExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
                 </button>
               </div>
               <div className={`card-content ${usersExpanded ? 'expanded' : 'collapsed'}`}>
@@ -2397,7 +2448,7 @@ export default function Admin() {
                     aria-label="Create new user"
                     onClick={() => { setShowCreateUser(true); setUserError(""); }}
                   >
-                    ➕
+                    <MaterialIcon name="add" />
                   </button>
                 </div>
 
@@ -2433,7 +2484,7 @@ export default function Admin() {
                 {/* Users List */}
                 {users.length === 0 ? (
                   <div className="empty-state">
-                    <div className="empty-icon">👤</div>
+                    <MaterialIcon name="person" className="empty-icon" />
                     <div className="empty-text">No users yet</div>
                   </div>
                 ) : (
@@ -2471,12 +2522,12 @@ export default function Admin() {
                                 setEditUserPassword("");
                                 setEditUserError("");
                               }}
-                            >✏️</button>
+                            ><MaterialIcon name="edit" /></button>
                             <button
                               className="btn-icon danger"
                               title="Delete user"
                               onClick={() => handleDeleteUser(user)}
-                            >🗑️</button>
+                            ><MaterialIcon name="delete" /></button>
                           </div>
                         </div>
                       </div>
@@ -2489,15 +2540,15 @@ export default function Admin() {
             {/* OIDC Settings Card */}
             <div className="card">
               <div className="card-header" onClick={() => updateCardState('oidcSettingsExpanded', !oidcSettingsExpanded)}>
-                <h2>🔗 SSO / OIDC Settings</h2>
+                <h2><MaterialIcon name="link" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />SSO / OIDC Settings</h2>
                 <button className="card-toggle" type="button">
-                  {oidcSettingsExpanded ? '▼ Collapse' : '▶ Expand'}
+                  {oidcSettingsExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
                 </button>
               </div>
               <div className={`card-content ${oidcSettingsExpanded ? 'expanded' : 'collapsed'}`}>
                 {oidcBanner && (
                   <div className={`banner ${oidcBanner.includes('✔') ? 'success' : ''}`} style={{ marginBottom: 16 }}>
-                    {oidcBanner}
+                    {renderStatusMessage(oidcBanner)}
                   </div>
                 )}
                 <form onSubmit={saveOidcSettings}>
@@ -2600,7 +2651,7 @@ export default function Admin() {
                     title="Save OIDC settings"
                     aria-label="Save OIDC settings"
                   >
-                    {oidcSaving ? <><span className="loading-spinner"></span></> : '💾'}
+                    {oidcSaving ? <><span className="loading-spinner"></span></> : <MaterialIcon name="save" />}
                   </button>
                 </form>
               </div>
@@ -2611,8 +2662,8 @@ export default function Admin() {
                 <div className="modal-backdrop" onClick={closeAddLibraryModal} />
                 <div className="modal" style={{ maxWidth: 560 }}>
                   <div className="modal-header">
-                    <h3 className="modal-title">📚 Add Media Library</h3>
-                    <button className="btn ghost" onClick={closeAddLibraryModal} style={{ padding: '4px 12px' }}>✕</button>
+                    <h3 className="modal-title"><MaterialIcon name="library_music" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Add Media Library</h3>
+                    <button className="btn ghost" onClick={closeAddLibraryModal} style={{ padding: '4px 12px' }}><MaterialIcon name="close" /></button>
                   </div>
                   <div className="form-group">
                     <label className="form-label">Library Name</label>
@@ -2639,7 +2690,7 @@ export default function Admin() {
                         title="Browse folders"
                         aria-label="Browse library folders"
                       >
-                        📁
+                        <MaterialIcon name="folder" />
                       </button>
                     </div>
                   </div>
@@ -2674,7 +2725,7 @@ export default function Admin() {
                         !path.trim()
                       }
                     >
-                      <span>➕</span> Add Library
+                      <MaterialIcon name="add" /> Add Library
                     </button>
                     <button className="btn ghost" onClick={closeAddLibraryModal}>
                       Cancel
@@ -2689,8 +2740,8 @@ export default function Admin() {
                 <div className="modal-backdrop" onClick={closeAddBreakFolderModal} />
                 <div className="modal" style={{ maxWidth: 560 }}>
                   <div className="modal-header">
-                    <h3 className="modal-title">🎼 Add Break Music Folder</h3>
-                    <button className="btn ghost" onClick={closeAddBreakFolderModal} style={{ padding: '4px 12px' }}>✕</button>
+                    <h3 className="modal-title"><MaterialIcon name="music_note" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Add Break Music Folder</h3>
+                    <button className="btn ghost" onClick={closeAddBreakFolderModal} style={{ padding: '4px 12px' }}><MaterialIcon name="close" /></button>
                   </div>
                   <div className="form-group">
                     <label className="form-label">Folder Name</label>
@@ -2717,7 +2768,7 @@ export default function Admin() {
                         title="Browse folders"
                         aria-label="Browse break music folders"
                       >
-                        📁
+                        <MaterialIcon name="folder" />
                       </button>
                     </div>
                   </div>
@@ -2727,7 +2778,7 @@ export default function Admin() {
                       onClick={addBreakFolder}
                       disabled={busy || !breakFolderName.trim() || !breakFolderPath.trim()}
                     >
-                      <span>➕</span> Add Folder
+                      <MaterialIcon name="add" /> Add Folder
                     </button>
                     <button className="btn ghost" onClick={closeAddBreakFolderModal}>
                       Cancel
@@ -2746,18 +2797,18 @@ export default function Admin() {
                 />
                 <div className="modal">
                   <div className="modal-header">
-                    <h3 className="modal-title">📁 Select Media Folder</h3>
+                    <h3 className="modal-title"><MaterialIcon name="folder" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Select Media Folder</h3>
                     <button
                       className="btn ghost"
                       onClick={() => setShowBrowser(false)}
                       style={{ padding: "4px 12px" }}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
                   <div className="browser-path">
-                    <span>📍</span>
+                    <MaterialIcon name="location_on" />
                     <div className="breadcrumb">
                       <span
                         className="breadcrumb-part"
@@ -2786,13 +2837,13 @@ export default function Admin() {
                   </div>
 
                   {browseError && (
-                    <div className="error-msg">⚠️ {browseError}</div>
+                    <div className="error-msg"><MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />{browseError}</div>
                   )}
 
                   <div className="browser-container">
                     {currentBrowsePath !== "/" && (
                       <div className="folder-item" onClick={navigateUp}>
-                        <span className="folder-icon">⬆️</span>
+                        <MaterialIcon name="arrow_upward" className="folder-icon" />
                         <span className="folder-name">..</span>
                         <span style={{ opacity: 0.5, fontSize: 13 }}>(parent directory)</span>
                       </div>
@@ -2806,7 +2857,7 @@ export default function Admin() {
                           className="folder-item"
                           onClick={() => browseFolders(item.path)}
                         >
-                          <span className="folder-icon">📁</span>
+                          <MaterialIcon name="folder" className="folder-icon" />
                           <span className="folder-name">{item.name}</span>
                         </div>
                       ))}
@@ -2815,7 +2866,7 @@ export default function Admin() {
                       0 &&
                       !browseError && (
                         <div className="empty-state" style={{ padding: 40 }}>
-                          <div className="empty-icon" style={{ fontSize: 48 }}>📂</div>
+                          <MaterialIcon name="folder_open" className="empty-icon" style={{ fontSize: 48 }} />
                           <div className="empty-text" style={{ fontSize: 14 }}>No subfolders in this directory</div>
                         </div>
                       )}
@@ -2832,7 +2883,7 @@ export default function Admin() {
                       className="btn success"
                       onClick={() => selectFolder(currentBrowsePath)}
                     >
-                      <span>✓</span> Select This Folder
+                      <MaterialIcon name="check" /> Select This Folder
                     </button>
                     <button
                       className="btn ghost"
@@ -2854,18 +2905,18 @@ export default function Admin() {
                 />
                 <div className="modal">
                   <div className="modal-header">
-                    <h3 className="modal-title">📁 Select Download Folder</h3>
+                    <h3 className="modal-title"><MaterialIcon name="folder" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Select Download Folder</h3>
                     <button
                       className="btn ghost"
                       onClick={() => setShowDownloadBrowser(false)}
                       style={{ padding: "4px 12px" }}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
                   <div className="browser-path">
-                    <span>📍</span>
+                    <MaterialIcon name="location_on" />
                     <div className="breadcrumb">
                       <span
                         className="breadcrumb-part"
@@ -2894,13 +2945,13 @@ export default function Admin() {
                   </div>
 
                   {browseError && (
-                    <div className="error-msg">⚠️ {browseError}</div>
+                    <div className="error-msg"><MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />{browseError}</div>
                   )}
 
                   <div className="browser-container">
                     {currentBrowsePath !== "/" && (
                       <div className="folder-item" onClick={navigateUp}>
-                        <span className="folder-icon">⬆️</span>
+                        <MaterialIcon name="arrow_upward" className="folder-icon" />
                         <span className="folder-name">..</span>
                         <span style={{ opacity: 0.5, fontSize: 13 }}>(parent directory)</span>
                       </div>
@@ -2914,7 +2965,7 @@ export default function Admin() {
                           className="folder-item"
                           onClick={() => browseFolders(item.path)}
                         >
-                          <span className="folder-icon">📁</span>
+                          <MaterialIcon name="folder" className="folder-icon" />
                           <span className="folder-name">{item.name}</span>
                         </div>
                       ))}
@@ -2923,7 +2974,7 @@ export default function Admin() {
                       0 &&
                       !browseError && (
                         <div className="empty-state" style={{ padding: 40 }}>
-                          <div className="empty-icon" style={{ fontSize: 48 }}>📂</div>
+                          <MaterialIcon name="folder_open" className="empty-icon" style={{ fontSize: 48 }} />
                           <div className="empty-text" style={{ fontSize: 14 }}>No subfolders in this directory</div>
                         </div>
                       )}
@@ -2940,7 +2991,7 @@ export default function Admin() {
                       className="btn success"
                       onClick={() => selectDownloadFolder(currentBrowsePath)}
                     >
-                      <span>✓</span> Select This Folder
+                      <MaterialIcon name="check" /> Select This Folder
                     </button>
                     <button
                       className="btn ghost"
@@ -2959,19 +3010,20 @@ export default function Admin() {
                 <div className="modal-backdrop" onClick={() => setShowAccountManagement(false)} />
                 <div className="modal">
                   <div className="modal-header">
-                    <h3 className="modal-title">🔐 Account Settings</h3>
+                    <h3 className="modal-title"><MaterialIcon name="lock" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Account Settings</h3>
                     <button
                       className="btn ghost"
                       onClick={() => setShowAccountManagement(false)}
                       style={{ padding: "4px 12px" }}
                     >
-                      ✕
+                      <MaterialIcon name="close" />
                     </button>
                   </div>
 
                   {auth.isDefaultPassword && (
                     <div className="banner warning" style={{ marginBottom: 16 }}>
-                      ⚠️ You are using the default password. Please change it for security.
+                      <MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
+                      You are using the default password. Please change it for security.
                     </div>
                   )}
 
@@ -2986,14 +3038,14 @@ export default function Admin() {
                         style={{ minWidth: 180, justifyContent: "center", flex: 1 }}
                         onClick={() => setChangingUsername(true)}
                       >
-                        <span>👤</span> Change Username
+                        <MaterialIcon name="person" /> Change Username
                       </button>
                       <button
                         className="btn"
                         style={{ minWidth: 180, justifyContent: "center", flex: 1 }}
                         onClick={() => setChangingPassword(true)}
                       >
-                        <span>🔒</span> Change Password
+                        <MaterialIcon name="lock" /> Change Password
                       </button>
                     </div>
                   )}
@@ -3049,7 +3101,7 @@ export default function Admin() {
                             type="submit"
                             disabled={busy}
                           >
-                            <span>✓</span> Change Username
+                            <MaterialIcon name="check" /> Change Username
                           </button>
                           <button
                             type="button"
@@ -3124,7 +3176,7 @@ export default function Admin() {
                       )}
                       <div style={{ display: "flex", gap: 8 }}>
                         <button className="btn success" type="submit" disabled={busy}>
-                          <span>✓</span> Change Password
+                          <MaterialIcon name="check" /> Change Password
                         </button>
                         <button
                           type="button"
@@ -3151,8 +3203,8 @@ export default function Admin() {
                 <div className="modal-backdrop" onClick={() => setEditingUser(null)} />
                 <div className="modal" style={{ maxWidth: 480 }}>
                   <div className="modal-header">
-                    <h3 className="modal-title">✏️ Edit User: {getUserDisplayName(editingUser)}</h3>
-                    <button className="btn ghost" onClick={() => setEditingUser(null)} style={{ padding: '4px 12px' }}>✕</button>
+                    <h3 className="modal-title"><MaterialIcon name="edit" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Edit User: {getUserDisplayName(editingUser)}</h3>
+                    <button className="btn ghost" onClick={() => setEditingUser(null)} style={{ padding: '4px 12px' }}><MaterialIcon name="close" /></button>
                   </div>
                   <form onSubmit={handleUpdateUser}>
                     <div className="form-group">
