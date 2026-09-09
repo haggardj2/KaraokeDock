@@ -32,5 +32,6 @@ psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/init.sql
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/016_fix_queue_status_enum.sql || true
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/017_add_library_parse_mode.sql || true
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/018_singer_public_uuid.sql || true
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/019_add_fuzzy_search.sql
 
 echo "Migrations completed successfully"

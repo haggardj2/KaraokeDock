@@ -20,6 +20,7 @@
 -- Store application configuration as key-value pairs with JSONB values
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,

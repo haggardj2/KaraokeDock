@@ -49,8 +49,9 @@ import {
   syncDownloadScanTaskState,
   syncBreakMusicScanTaskState,
 } from '../backgroundTasks';
-import { findOrCreateSinger, ensureSingerInActiveRotation, normalizeSingerName, normalizeSingerUuid } from '../queueIdentity.js';
+import { findOrCreateSinger, ensureSingerInActiveRotation, normalizeSingerName, normalizeSingerUuid, type SingerRow } from '../queueIdentity.js';
 import { parseZipMediaRef } from '../zipMediaRef.js';
+import { buildOidcGrantCallbackUrl } from '../oidcRedirect.js';
 import {
   getQueueState,
   getSingerHistory,
@@ -73,7 +74,6 @@ import {
   BreakMusicScanAlreadyInProgressError,
   runBreakMusicScan,
 } from '../breakMusicScanner.js';
-import { buildOidcGrantCallbackUrl } from '../oidcRedirect.js';
 import {
   DownloadScanAlreadyInProgressError,
   scanDownloadLocation,
@@ -92,7 +92,301 @@ interface PublicSettings {
   'requests.url': string;
 }
 
-const DEFAULT_BREAK_PLAYLISTS_FOLDER = '/media/playlists';
+const DEFAULT_BREAK_PLAYLISTS_FOLDER = process.env.BREAK_MUSIC_PLAYLISTS_FOLDER || '/media/playlists';
+const DEFAULT_IMAGE_UPLOADS_DIR = process.env.IMAGE_UPLOADS_DIR || '/media/images';
+const PLAYER_BACKGROUND_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES = 30;
+const PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_INTERVAL_SECONDS = 10;
+const PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS = 3;
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS = 300;
+const PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_TRANSITION_DURATION_SECONDS = 3;
+const PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS = 0.5;
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS = 10;
+const PLAYER_BACKGROUND_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const PLAYER_BACKGROUND_TRANSITION_STYLES = new Set(['fade', 'slide', 'zoom']);
+const PLAYER_BACKGROUND_IMAGE_EXTENSION_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+type PlayerBackgroundMode = 'default' | 'image' | 'slideshow';
+type PlayerBackgroundTransitionStyle = 'fade' | 'slide' | 'zoom';
+type StoredPlayerBackgroundImage = {
+  id: string;
+  mime: string;
+  updatedAt: string;
+  data?: string;
+  filename?: string;
+};
+type PlayerBackgroundLibraryImage = {
+  filename: string;
+  mime: string;
+  updatedAt: string;
+  size: number;
+};
+
+function getPlayerBackgroundImageExtension(mime: string): string {
+  switch (mime) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/webp':
+      return '.webp';
+    case 'image/gif':
+      return '.gif';
+    case 'image/png':
+    default:
+      return '.png';
+  }
+}
+
+async function getImageUploadsDir(): Promise<string> {
+  const configured = await getSetting('images.upload_dir');
+  return typeof configured === 'string' && configured.trim()
+    ? configured.trim()
+    : DEFAULT_IMAGE_UPLOADS_DIR;
+}
+
+async function ensureImageUploadsDir(): Promise<string> {
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  await fs.mkdir(uploadDir, { recursive: true });
+  return uploadDir;
+}
+
+function getPlayerBackgroundMimeFromFilename(filename: string): string | null {
+  return PLAYER_BACKGROUND_IMAGE_EXTENSION_MIME_TYPES[path.extname(filename).toLowerCase()] ?? null;
+}
+
+function normalizeImageLibraryFilename(filename: unknown): string | null {
+  if (typeof filename !== 'string') return null;
+  const trimmed = filename.trim();
+  if (!trimmed || trimmed !== path.basename(trimmed)) return null;
+  return getPlayerBackgroundMimeFromFilename(trimmed) ? trimmed : null;
+}
+
+async function getPlayerBackgroundLibraryImage(filename: unknown): Promise<PlayerBackgroundLibraryImage | null> {
+  const normalizedFilename = normalizeImageLibraryFilename(filename);
+  if (!normalizedFilename) return null;
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  const filePath = path.resolve(uploadDir, normalizedFilename);
+  const relativePath = path.relative(uploadDir, filePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return null;
+
+  try {
+    const stat = await fs.stat(filePath);
+    const mime = getPlayerBackgroundMimeFromFilename(normalizedFilename);
+    if (!stat.isFile() || !mime) return null;
+    return {
+      filename: normalizedFilename,
+      mime,
+      updatedAt: stat.mtime.toISOString(),
+      size: stat.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getPlayerBackgroundLibraryImageUrl(filename: string, updatedAt: string): string {
+  return `/api/player/background/library-images/${encodeURIComponent(filename)}?updatedAt=${encodeURIComponent(updatedAt)}`;
+}
+
+async function listPlayerBackgroundLibraryImages(): Promise<PlayerBackgroundLibraryImage[]> {
+  const uploadDir = await ensureImageUploadsDir();
+  const entries = await fs.readdir(uploadDir, { withFileTypes: true });
+  const images = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && !!getPlayerBackgroundMimeFromFilename(entry.name))
+      .map((entry) => getPlayerBackgroundLibraryImage(entry.name)),
+  );
+  return images
+    .filter((image): image is PlayerBackgroundLibraryImage => !!image)
+    .sort((a, b) => a.filename.localeCompare(b.filename));
+}
+
+async function getStoredPlayerBackgroundImageBuffer(image: StoredPlayerBackgroundImage): Promise<Buffer | null> {
+  if (typeof image.data === 'string' && image.data) {
+    return Buffer.from(image.data, 'base64');
+  }
+  if (typeof image.filename !== 'string' || !image.filename) {
+    return null;
+  }
+
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  const filePath = path.resolve(uploadDir, image.filename);
+  const relativePath = path.relative(uploadDir, filePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  try {
+    return await fs.readFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+async function deleteStoredPlayerBackgroundImageFile(image: StoredPlayerBackgroundImage): Promise<void> {
+  if (typeof image.filename !== 'string' || !image.filename) return;
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  const filePath = path.resolve(uploadDir, image.filename);
+  const relativePath = path.relative(uploadDir, filePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return;
+  await fs.unlink(filePath).catch(() => undefined);
+}
+
+async function writePlayerBackgroundImageFile(buffer: Buffer, mime: string, id: string = crypto.randomUUID()): Promise<StoredPlayerBackgroundImage> {
+  const updatedAt = new Date().toISOString();
+  const filename = `player-background-${id}${getPlayerBackgroundImageExtension(mime)}`;
+  const uploadDir = await ensureImageUploadsDir();
+  await fs.writeFile(path.join(uploadDir, filename), buffer);
+  return { id, mime, filename, updatedAt };
+}
+
+function normalizePlayerBackgroundMode(value: unknown): PlayerBackgroundMode {
+  if (value === 'image' || value === 'slideshow') return value;
+  return 'default';
+}
+
+function normalizePlayerBackgroundTransitionStyle(value: unknown): PlayerBackgroundTransitionStyle {
+  return PLAYER_BACKGROUND_TRANSITION_STYLES.has(String(value)) ? value as PlayerBackgroundTransitionStyle : 'fade';
+}
+
+function normalizePlayerBackgroundSlideshowIntervalSeconds(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_INTERVAL_SECONDS;
+  return Math.max(
+    PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS,
+    Math.min(PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS, Math.round(numeric)),
+  );
+}
+
+function normalizePlayerBackgroundSlideshowTransitionDurationSeconds(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_TRANSITION_DURATION_SECONDS;
+  return Math.max(
+    PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS,
+    Math.min(PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS, Math.round(numeric * 10) / 10),
+  );
+}
+
+function getPlayerBackgroundImageUrl(updatedAt: string): string {
+  return `/api/player/background/image?updatedAt=${encodeURIComponent(updatedAt)}`;
+}
+
+function getPlayerBackgroundSlideshowImageUrl(id: string, updatedAt: string): string {
+  return `/api/player/background/slideshow-images/${encodeURIComponent(id)}?updatedAt=${encodeURIComponent(updatedAt)}`;
+}
+
+function isStoredPlayerBackgroundImage(value: unknown): value is StoredPlayerBackgroundImage {
+  if (!value || typeof value !== 'object') return false;
+  const image = value as Partial<StoredPlayerBackgroundImage>;
+  const hasStoredImage =
+    (typeof image.data === 'string' && !!image.data) ||
+    (typeof image.filename === 'string' && !!image.filename);
+  return (
+    typeof image.id === 'string' &&
+    !!image.id &&
+    typeof image.mime === 'string' &&
+    PLAYER_BACKGROUND_IMAGE_MIME_TYPES.has(image.mime) &&
+    hasStoredImage &&
+    typeof image.updatedAt === 'string' &&
+    !!image.updatedAt
+  );
+}
+
+async function getStoredPlayerBackgroundImageInfo(): Promise<StoredPlayerBackgroundImage | null> {
+  const mime = await getSetting('player.backgroundImageMime');
+  const data = await getSetting('player.backgroundImageData');
+  const filename = await getSetting('player.backgroundImageFilename');
+  const updatedAt = await getSetting('player.backgroundImageUpdatedAt');
+
+  if (
+    typeof mime !== 'string' ||
+    !PLAYER_BACKGROUND_IMAGE_MIME_TYPES.has(mime) ||
+    !((typeof data === 'string' && data) || (typeof filename === 'string' && filename)) ||
+    typeof updatedAt !== 'string' ||
+    !updatedAt
+  ) {
+    return null;
+  }
+
+  return {
+    id: 'static',
+    mime,
+    ...(typeof filename === 'string' && filename ? { filename } : {}),
+    ...(typeof data === 'string' && data ? { data } : {}),
+    updatedAt,
+  };
+}
+
+async function getStoredPlayerBackgroundSlideshowImages(): Promise<StoredPlayerBackgroundImage[]> {
+  const stored = await getSetting('player.backgroundSlideshowImages');
+  if (!Array.isArray(stored)) return [];
+  return stored.filter(isStoredPlayerBackgroundImage).slice(0, PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES);
+}
+
+async function getPlayerBackgroundSettingsResponse() {
+  const [
+    modeSetting,
+    imageInfo,
+    slideshowImages,
+    transitionStyle,
+    slideshowIntervalSeconds,
+    slideshowTransitionDurationSeconds,
+  ] = await Promise.all([
+    getSetting('player.backgroundMode'),
+    getStoredPlayerBackgroundImageInfo(),
+    getStoredPlayerBackgroundSlideshowImages(),
+    getSetting('player.backgroundSlideshowTransitionStyle'),
+    getSetting('player.backgroundSlideshowIntervalSeconds'),
+    getSetting('player.backgroundSlideshowTransitionDurationSeconds'),
+  ]);
+  const mode = normalizePlayerBackgroundMode(modeSetting);
+  const responseMode =
+    mode === 'image' && imageInfo
+      ? 'image'
+      : mode === 'slideshow' && slideshowImages.length > 0
+        ? 'slideshow'
+        : 'default';
+  return {
+    mode: responseMode,
+    imageUrl: imageInfo ? getPlayerBackgroundImageUrl(imageInfo.updatedAt) : null,
+    imageFilename: imageInfo?.filename ?? null,
+    updatedAt: imageInfo?.updatedAt ?? null,
+    slideshowImages: slideshowImages.map((image) => ({
+      id: image.id,
+      filename: image.filename ?? null,
+      imageUrl: getPlayerBackgroundSlideshowImageUrl(image.id, image.updatedAt),
+      updatedAt: image.updatedAt,
+    })),
+    slideshowTransitionStyle: normalizePlayerBackgroundTransitionStyle(transitionStyle),
+    slideshowIntervalSeconds: normalizePlayerBackgroundSlideshowIntervalSeconds(slideshowIntervalSeconds),
+    slideshowTransitionDurationSeconds:
+      normalizePlayerBackgroundSlideshowTransitionDurationSeconds(slideshowTransitionDurationSeconds),
+  };
+}
+
+async function broadcastPlayerBackgroundSettings(): Promise<void> {
+  postQueueUpdate('player.background.settings', await getPlayerBackgroundSettingsResponse());
+}
+
+function detectPlayerBackgroundImageMime(buffer: Buffer): string | null {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  const header = buffer.subarray(0, 12).toString('ascii');
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) {
+    return 'image/gif';
+  }
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
 
 let postQueueUpdate: (type?: string, data?: any) => void = () => {};
 export function setPostQueueUpdate(fn: (type?: string, data?: any) => void) {
@@ -108,6 +402,15 @@ const getAuthenticatedUser = async (req: express.Request): Promise<User | null> 
   const userId = Number((req as any).user?.userId);
   if (!Number.isFinite(userId) || userId <= 0) return null;
   return getUserById(userId);
+};
+
+const getOptionalAuthenticatedUser = async (req: express.Request): Promise<User | null> => {
+  const token = req.headers['x-session-token'];
+  if (typeof token !== 'string' || !token.trim()) return null;
+
+  const info = await validateSessionInfo(token);
+  if (!info.valid || !info.userId) return null;
+  return getUserById(info.userId);
 };
 
 // Session-based authentication guard (validates session, attaches user info)
@@ -202,8 +505,527 @@ type SingerHistoryKdFile = {
   singers: SingerHistoryKdSinger[];
 };
 
+type RemoteGatewayConfig = {
+  url: string;
+  token: string;
+};
+
+type RemoteGatewayPendingRequest = {
+  id: string;
+  trackId: string | number;
+  requestedBy: string;
+  singerUuid?: string | null;
+  keyAdjustment?: number | null;
+  notes?: string | null;
+  title?: string | null;
+  artist?: string | null;
+  discId?: string | null;
+  brand?: string | null;
+  externalUrl?: string | null;
+  source?: string | null;
+};
+
+type RemoteGatewayQueueAction = {
+  id: string;
+  type: 'reorder' | 'remove';
+  requestedBy?: string | null;
+  singerUuid?: string | null;
+  payload?: {
+    queueIds?: Array<string | number>;
+    queueId?: string | number;
+  };
+};
+
+const DEFAULT_REMOTE_GATEWAY_POLL_SECONDS = 5;
+const MIN_REMOTE_GATEWAY_POLL_SECONDS = 2;
+const REMOTE_GATEWAY_CATALOG_REFRESH_MS = 10 * 60_000;
+const REMOTE_GATEWAY_CATALOG_CHUNK_SIZE = 500;
+let remoteGatewayTimer: ReturnType<typeof setTimeout> | null = null;
+let remoteGatewayInFlight: Promise<void> | null = null;
+let remoteGatewayLastCatalogSync = 0;
+
 function toSafeFilename(value: string): string {
   return value.trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'singer-history';
+}
+
+function normalizeRemoteGatewayBaseUrl(value: unknown): string {
+  return String(value ?? '').trim().replace(/\/+$/, '');
+}
+
+async function getRemoteGatewayConfig(): Promise<RemoteGatewayConfig> {
+  const enabled = await getSetting('remote_gateway.enabled');
+  const url = normalizeRemoteGatewayBaseUrl(await getSetting('remote_gateway.url'));
+  const token = String(await getSetting('remote_gateway.api_token') ?? '').trim();
+  if (enabled !== true) {
+    throw Object.assign(new Error('Remote Requests Gateway is not enabled'), { status: 400 });
+  }
+  if (!url) {
+    throw Object.assign(new Error('Remote Requests Gateway URL is not configured'), { status: 400 });
+  }
+  if (!token) {
+    throw Object.assign(new Error('Remote Requests Gateway API token is not configured'), { status: 400 });
+  }
+  return { url, token };
+}
+
+async function callRemoteGateway(config: RemoteGatewayConfig, pathName: string, init: RequestInit = {}) {
+  const response = await fetch(`${config.url}${pathName}`, {
+    ...init,
+    headers: {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${config.token}`,
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  const text = await response.text();
+  let body: any = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  if (!response.ok) {
+    const message = typeof body === 'object' && body?.error ? body.error : text || response.statusText;
+    throw Object.assign(new Error(`Gateway ${response.status}: ${message}`), { status: response.status });
+  }
+  return body;
+}
+
+async function getRemoteGatewayStatus(config: RemoteGatewayConfig) {
+  return callRemoteGateway(config, '/api/station/status');
+}
+
+async function getRemoteGatewaySettingsPayload() {
+  return {
+    'libraries.local_enabled': await getSetting('libraries.local_enabled') !== false,
+    'libraries.external_enabled': await getSetting('libraries.external_enabled') !== false,
+    'requests.acceptance': await getSetting('requests.acceptance') || 'local',
+    'requests.local_browse_enabled': await getSetting('requests.local_browse_enabled') !== false,
+  };
+}
+
+async function pushRemoteGatewaySettings(config: RemoteGatewayConfig) {
+  return callRemoteGateway(config, '/api/station/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ settings: await getRemoteGatewaySettingsPayload() }),
+  });
+}
+
+async function pushRemoteGatewayCatalog(config: RemoteGatewayConfig) {
+  const tracks = await query<{
+    id: number;
+    title: string;
+    artist: string | null;
+    disc_id: string | null;
+    kind: string;
+    duration_ms: number | null;
+    source: string | null;
+    external_url: string | null;
+  }>(
+    `SELECT t.id,
+            t.title,
+            a.name AS artist,
+            t.disc_id,
+            t.kind,
+            t.duration_ms,
+            COALESCE(t.source, 'local') AS source,
+            t.external_url
+       FROM tracks t
+       LEFT JOIN artists a ON a.id = t.artist_id
+      WHERE COALESCE(t.title, '') <> ''
+      ORDER BY t.id`,
+  );
+
+  const syncId = `station-${Date.now()}-${crypto.randomUUID()}`;
+  const chunkCount = Math.max(1, Math.ceil(tracks.rows.length / REMOTE_GATEWAY_CATALOG_CHUNK_SIZE));
+  let accepted = 0;
+  let received = 0;
+  let response: any = null;
+
+  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+    const chunkRows = tracks.rows.slice(
+      chunkIndex * REMOTE_GATEWAY_CATALOG_CHUNK_SIZE,
+      (chunkIndex + 1) * REMOTE_GATEWAY_CATALOG_CHUNK_SIZE,
+    );
+    response = await callRemoteGateway(config, '/api/station/catalog', {
+      method: 'PUT',
+      body: JSON.stringify({
+        full: true,
+        syncId,
+        chunkIndex,
+        chunkCount,
+        complete: chunkIndex === chunkCount - 1,
+        tracks: chunkRows.map((track) => ({
+          id: track.id,
+          title: track.title,
+          artist: track.artist,
+          discId: track.disc_id,
+          kind: track.kind,
+          durationMs: track.duration_ms,
+          source: track.source || 'local',
+          externalUrl: track.external_url,
+        })),
+      }),
+    });
+    accepted += Number(response?.accepted || 0);
+    received += Number(response?.received || chunkRows.length);
+  }
+
+  return {
+    ...(response || { ok: true }),
+    received,
+    accepted,
+    chunks: chunkCount,
+    syncId,
+    stationTracks: tracks.rows.length,
+  };
+}
+
+async function pushRemoteGatewayQueueSnapshot(config: RemoteGatewayConfig) {
+  const queue = await query<{
+    id: string;
+    track_id: string;
+    requested_by: string | null;
+    singer_uuid: string | null;
+    status: string;
+    position: number;
+    key_adjustment: number | null;
+    title: string;
+    artist: string | null;
+  }>(
+    `SELECT q.id,
+            q.track_id,
+            q.requested_by,
+            s.public_uuid AS singer_uuid,
+            q.status,
+            q.position,
+            q.key_adjustment,
+            t.title,
+            a.name AS artist
+       FROM queue q
+       JOIN tracks t ON t.id = q.track_id
+       LEFT JOIN artists a ON a.id = t.artist_id
+       LEFT JOIN singers s ON s.id = q.singer_id
+      WHERE q.status <> 'removed'
+      ORDER BY q.position, q.created_at`,
+  );
+
+  const response = await callRemoteGateway(config, '/api/station/queue/snapshot', {
+    method: 'PUT',
+    body: JSON.stringify({
+      full: true,
+      queue: queue.rows.map((item) => ({
+        stationQueueId: item.id,
+        stationTrackId: item.track_id,
+        requestedBy: item.requested_by,
+        singerUuid: item.singer_uuid,
+        status: item.status,
+        position: item.position,
+        keyAdjustment: item.key_adjustment ?? 0,
+        title: item.title,
+        artist: item.artist,
+      })),
+    }),
+  });
+
+  return {
+    ...response,
+    stationQueueItems: queue.rows.length,
+  };
+}
+
+async function queueRemoteGatewayRequest(request: RemoteGatewayPendingRequest): Promise<{ status: 'queued' | 'rejected'; stationQueueId?: string; error?: string }> {
+  const requestedBy = String(request.requestedBy ?? '').trim();
+  if (!requestedBy) {
+    return { status: 'rejected', error: 'requestedBy is required' };
+  }
+
+  const keyAdjustment = toInt(request.keyAdjustment) ?? 0;
+  if (!validateKeyAdjustment(keyAdjustment)) {
+    return { status: 'rejected', error: 'keyAdjustment must be between -6 and 6' };
+  }
+
+  let trackId = Number(request.trackId);
+  let trackInfo = Number.isFinite(trackId)
+    ? await query<{ id: number; source: string | null }>('SELECT id, source FROM tracks WHERE id = $1 LIMIT 1', [trackId])
+    : { rows: [] as { id: number; source: string | null }[] };
+
+  if (trackInfo.rows.length === 0 && request.externalUrl) {
+    const title = String(request.title || request.externalUrl).trim();
+    const { upsertArtist, upsertExternalTrack } = await import('../db');
+    const artistId = request.artist ? await upsertArtist(request.artist) : null;
+    const track = await upsertExternalTrack({
+      artist_id: artistId,
+      disc_id: request.discId || request.brand || null,
+      title,
+      external_url: request.externalUrl,
+      source: request.source || 'karaoke-nerds',
+      duration_ms: null,
+    });
+    trackId = Number(track.id);
+    trackInfo = await query<{ id: number; source: string | null }>('SELECT id, source FROM tracks WHERE id = $1 LIMIT 1', [trackId]);
+  }
+
+  if (!Number.isFinite(trackId) || trackInfo.rows.length === 0) {
+    return { status: 'rejected', error: 'Track not found on Station' };
+  }
+
+  const isExternal = trackInfo.rows[0].source && trackInfo.rows[0].source !== 'local';
+  if (isExternal && await getSetting('libraries.external_enabled') === false) {
+    return { status: 'rejected', error: 'External library is disabled' };
+  }
+  if (!isExternal && await getSetting('libraries.local_enabled') === false) {
+    return { status: 'rejected', error: 'Local library is disabled' };
+  }
+
+  let singerId: bigint | null = null;
+  try {
+    const singer = await findOrCreateSinger(requestedBy, normalizeSingerUuid(request.singerUuid));
+    singerId = singer.id;
+    await ensureSingerInActiveRotation(singerId);
+  } catch (err) {
+    console.error('Remote Gateway singer creation failed:', err);
+  }
+
+  if (singerId) {
+    const dupCheck = await query<{ id: string }>(
+      `SELECT id FROM queue WHERE singer_id = $1 AND track_id = $2 AND status IN ('queued', 'playing') LIMIT 1`,
+      [singerId, trackId],
+    );
+    if (dupCheck.rows.length > 0) {
+      return { status: 'rejected', error: 'Singer already has this song in the queue' };
+    }
+  }
+
+  const posr = await query<{ p: number }>(`SELECT COALESCE(MAX(position),0)+1 AS p FROM queue`);
+  const position = (posr.rows[0] as any).p;
+  const inserted = await query<{ id: string }>(
+    `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment, notes)
+     VALUES ($1,$2,$3,'queued',$4,$5,$6)
+     RETURNING id`,
+    [trackId, requestedBy, singerId, position, keyAdjustment, request.notes || null],
+  );
+  await resortQueueByRotation();
+  postQueueUpdate('queue.updated');
+  return { status: 'queued', stationQueueId: String(inserted.rows[0].id) };
+}
+
+async function pullRemoteGatewayRequests(config: RemoteGatewayConfig) {
+  const pending = await callRemoteGateway(config, '/api/station/requests/pending?limit=100') as RemoteGatewayPendingRequest[];
+  const results = {
+    received: Array.isArray(pending) ? pending.length : 0,
+    queued: 0,
+    rejected: 0,
+  };
+  if (!Array.isArray(pending)) return results;
+
+  for (const request of pending) {
+    const result = await queueRemoteGatewayRequest(request);
+    if (result.status === 'queued') {
+      results.queued += 1;
+    } else {
+      results.rejected += 1;
+    }
+    await callRemoteGateway(config, `/api/station/requests/${encodeURIComponent(request.id)}/ack`, {
+      method: 'POST',
+      body: JSON.stringify(result),
+    });
+  }
+  return results;
+}
+
+async function applyRemoteGatewayQueueAction(action: RemoteGatewayQueueAction): Promise<{ status: 'applied' | 'rejected'; error?: string }> {
+  const requesterName = String(action.requestedBy ?? '').trim();
+  const singerUuid = normalizeSingerUuid(action.singerUuid);
+  const normalizedRequester = normalizeSingerName(requesterName);
+
+  async function ownsQueueItem(queueId: number): Promise<boolean> {
+    const row = await query<{ requested_by: string | null; public_uuid: string | null; status: string }>(
+      `SELECT q.requested_by, s.public_uuid, q.status
+         FROM queue q
+         LEFT JOIN singers s ON s.id = q.singer_id
+        WHERE q.id = $1
+        LIMIT 1`,
+      [queueId],
+    );
+    if (row.rows.length === 0 || row.rows[0].status !== 'queued') return false;
+    return Boolean(
+      (normalizedRequester && normalizeSingerName(row.rows[0].requested_by ?? '') === normalizedRequester) ||
+      (singerUuid && row.rows[0].public_uuid === singerUuid)
+    );
+  }
+
+  if (action.type === 'remove') {
+    const queueId = Number(action.payload?.queueId);
+    if (!Number.isFinite(queueId)) return { status: 'rejected', error: 'Invalid queue id' };
+    if (!(await ownsQueueItem(queueId))) return { status: 'rejected', error: 'Queue item is not removable by this singer' };
+    await query(`UPDATE queue SET status = 'removed' WHERE id = $1 AND status = 'queued'`, [queueId]);
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    return { status: 'applied' };
+  }
+
+  if (action.type === 'reorder') {
+    const queueIds = Array.isArray(action.payload?.queueIds)
+      ? action.payload!.queueIds!.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      : [];
+    if (queueIds.length === 0) return { status: 'rejected', error: 'No queue ids provided' };
+    for (const queueId of queueIds) {
+      if (!(await ownsQueueItem(queueId))) {
+        return { status: 'rejected', error: `Queue item ${queueId} is not reorderable by this singer` };
+      }
+    }
+
+    const curRes = await query<{ id: string; position: number }>(
+      `SELECT q.id, q.position
+         FROM queue q
+         LEFT JOIN singers s ON s.id = q.singer_id
+        WHERE q.status = 'queued'
+          AND (
+            ($1 <> '' AND LOWER(TRIM(q.requested_by)) = $1)
+            OR ($2 <> '' AND s.public_uuid = $2)
+          )
+        ORDER BY q.position`,
+      [normalizedRequester, singerUuid || ''],
+    );
+    const sortedPositions = curRes.rows.map((row) => row.position).sort((a, b) => a - b);
+    const TEMP_OFFSET = 2_500_000;
+    await query('BEGIN');
+    try {
+      for (let i = 0; i < queueIds.length && i < sortedPositions.length; i++) {
+        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, queueIds[i]]);
+      }
+      for (let i = 0; i < queueIds.length && i < sortedPositions.length; i++) {
+        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [sortedPositions[i], queueIds[i]]);
+      }
+      await query('COMMIT');
+    } catch (error) {
+      await query('ROLLBACK');
+      throw error;
+    }
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    return { status: 'applied' };
+  }
+
+  return { status: 'rejected', error: 'Unsupported queue action' };
+}
+
+async function pullRemoteGatewayQueueActions(config: RemoteGatewayConfig) {
+  const pending = await callRemoteGateway(config, '/api/station/queue-actions/pending?limit=100') as RemoteGatewayQueueAction[];
+  const results = {
+    received: Array.isArray(pending) ? pending.length : 0,
+    applied: 0,
+    rejected: 0,
+  };
+  if (!Array.isArray(pending)) return results;
+
+  for (const action of pending) {
+    const result = await applyRemoteGatewayQueueAction(action);
+    if (result.status === 'applied') {
+      results.applied += 1;
+    } else {
+      results.rejected += 1;
+    }
+    await callRemoteGateway(config, `/api/station/queue-actions/${encodeURIComponent(action.id)}/ack`, {
+      method: 'POST',
+      body: JSON.stringify(result),
+    });
+  }
+  return results;
+}
+
+async function runRemoteGatewaySync(options: { includeCatalog: boolean }) {
+  const config = await getRemoteGatewayConfig();
+  const settings = await pushRemoteGatewaySettings(config);
+  const catalog = options.includeCatalog ? await pushRemoteGatewayCatalog(config) : null;
+  if (catalog) {
+    remoteGatewayLastCatalogSync = Date.now();
+  }
+  const pulledRequests = await pullRemoteGatewayRequests(config);
+  const queueActions = await pullRemoteGatewayQueueActions(config);
+  const queue = await pushRemoteGatewayQueueSnapshot(config);
+  const status = await getRemoteGatewayStatus(config);
+  return {
+    ok: true,
+    gatewayUrl: config.url,
+    settings,
+    catalog,
+    pulledRequests,
+    queueActions,
+    queue,
+    status,
+  };
+}
+
+async function getRemoteGatewayPollIntervalMs(): Promise<number> {
+  const raw = await getSetting('remote_gateway.poll_interval_seconds');
+  const parsed = Number(raw ?? DEFAULT_REMOTE_GATEWAY_POLL_SECONDS);
+  const seconds = Number.isFinite(parsed) ? Math.max(MIN_REMOTE_GATEWAY_POLL_SECONDS, parsed) : DEFAULT_REMOTE_GATEWAY_POLL_SECONDS;
+  return Math.round(seconds * 1000);
+}
+
+function clearRemoteGatewayTimer() {
+  if (remoteGatewayTimer) {
+    clearTimeout(remoteGatewayTimer);
+    remoteGatewayTimer = null;
+  }
+}
+
+async function scheduleNextRemoteGatewayPoll(delayMs?: number) {
+  clearRemoteGatewayTimer();
+  const intervalMs = delayMs ?? await getRemoteGatewayPollIntervalMs();
+  remoteGatewayTimer = setTimeout(() => {
+    void runRemoteGatewayPollCycle();
+  }, intervalMs);
+  remoteGatewayTimer.unref?.();
+}
+
+async function runRemoteGatewayPollCycle() {
+  if (process.env.STATION_MODE !== 'true') return;
+  if (remoteGatewayInFlight) return remoteGatewayInFlight;
+
+  remoteGatewayInFlight = (async () => {
+    try {
+      const config = await getRemoteGatewayConfig();
+      const shouldRefreshCatalog = Date.now() - remoteGatewayLastCatalogSync > REMOTE_GATEWAY_CATALOG_REFRESH_MS;
+      const result = await runRemoteGatewaySync({ includeCatalog: shouldRefreshCatalog });
+      logger.info(
+        `[remoteGateway] poll complete: queued ${result.pulledRequests.queued}, rejected ${result.pulledRequests.rejected}, gateway pending ${result.status?.pendingRequests ?? 0}.`
+      );
+    } catch (err: any) {
+      if (!String(err?.message || '').includes('not configured')) {
+        logger.warn('[remoteGateway] poll failed:', err);
+      }
+    } finally {
+      remoteGatewayInFlight = null;
+      await scheduleNextRemoteGatewayPoll();
+    }
+  })();
+
+  return remoteGatewayInFlight;
+}
+
+export async function syncRemoteGatewayTaskState(options: { runImmediately?: boolean } = {}) {
+  if (process.env.STATION_MODE !== 'true') {
+    clearRemoteGatewayTimer();
+    return;
+  }
+
+  if (options.runImmediately) {
+    if (remoteGatewayInFlight) {
+      await remoteGatewayInFlight;
+    }
+    await runRemoteGatewayPollCycle();
+    return;
+  }
+
+  if (!remoteGatewayTimer && !remoteGatewayInFlight) {
+    await scheduleNextRemoteGatewayPoll(1_000);
+  }
 }
 
 function isSingerHistoryKdFile(value: any): value is SingerHistoryKdFile {
@@ -242,6 +1064,17 @@ async function resolveSingerForRequester(name: string, singerUuid?: string | nul
     };
   }
   return null;
+}
+
+function getUserRequesterName(user: User | null): string {
+  return String(user?.display_name || user?.username || '').trim();
+}
+
+async function getAuthenticatedRequesterSinger(req: express.Request, requestedBy: string): Promise<SingerRow | null> {
+  const user = await getOptionalAuthenticatedUser(req);
+  const userName = getUserRequesterName(user);
+  if (!userName) return null;
+  return findOrCreateSinger(userName, null);
 }
 
 async function updateActiveQueueRequesterName(singerId: bigint, displayName: string): Promise<void> {
@@ -388,6 +1221,7 @@ async function resolveKdTrack(song: SingerHistoryKdSong): Promise<number | null>
     const artistId = song.artist ? await upsertArtist(song.artist) : null;
     const track = await upsertExternalTrack({
       artist_id: artistId,
+      disc_id: null,
       title: song.title || song.track.url,
       external_url: song.track.url,
       source: song.track.source || 'karaoke-nerds',
@@ -472,6 +1306,16 @@ const getOidcDisplayName = (claims: Record<string, unknown>, fallback: string): 
 const getOidcPicture = (claims: Record<string, unknown>): string | null => {
   const picture = typeof claims.picture === 'string' ? claims.picture.trim() : '';
   return picture || null;
+};
+
+const getOidcErrorMessage = (err: any): string => {
+  const description = err?.error_description || err?.cause?.error_description;
+  if (typeof description === 'string' && description.trim()) return description.trim();
+  const error = err?.error || err?.cause?.error;
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  const message = err?.message;
+  if (typeof message === 'string' && message.trim()) return message.trim();
+  return 'OIDC error';
 };
 
 const findAvailableOidcUsername = async (baseUsername: string, currentUserId?: number): Promise<string | null> => {
@@ -1143,6 +1987,15 @@ apiRouter.delete(
 apiRouter.get(
   '/auth/oidc/config',
   ah(async (_req, res) => {
+    if (process.env.STATION_MODE === 'true') {
+      return res.json({
+        enabled: false,
+        buttonText: 'Login with SSO',
+        buttonColor: '#6366f1',
+        passwordLoginEnabled: true,
+      });
+    }
+
     const enabled = await getSetting('oidc.enabled');
     const buttonText = await getSetting('oidc.button_text');
     const buttonColor = await getSetting('oidc.button_color');
@@ -1161,6 +2014,22 @@ apiRouter.get(
   '/admin/settings/oidc',
   adminGuard,
   ah(async (_req, res) => {
+    if (process.env.STATION_MODE === 'true') {
+      return res.json({
+        enabled: false,
+        issuer: '',
+        clientId: '',
+        clientSecret: '',
+        redirectUri: '',
+        buttonText: 'Login with SSO',
+        buttonColor: '#6366f1',
+        autoCreateUsers: false,
+        defaultRole: 'user',
+        passwordLoginEnabled: true,
+        stationMode: true,
+      });
+    }
+
     const [enabled, issuer, clientId, clientSecret, redirectUri, buttonText, buttonColor, autoCreate, defaultRole, passwordLoginEnabled] =
       await Promise.all([
         getSetting('oidc.enabled'),
@@ -1194,6 +2063,10 @@ apiRouter.put(
   '/admin/settings/oidc',
   adminGuard,
   ah(async (req, res) => {
+    if (process.env.STATION_MODE === 'true') {
+      return res.status(403).json({ error: 'OIDC/SSO is not available in Station mode' });
+    }
+
     const {
       enabled,
       issuer,
@@ -1254,6 +2127,10 @@ setInterval(() => {
 apiRouter.get(
   '/auth/oidc/login',
   ah(async (req, res) => {
+    if (process.env.STATION_MODE === 'true') {
+      return res.status(404).json({ error: 'OIDC/SSO is not available in Station mode' });
+    }
+
     const oidcEnabled = await getSetting('oidc.enabled');
     if (!oidcEnabled) {
       return res.status(400).json({ error: 'OIDC is not enabled' });
@@ -1262,7 +2139,7 @@ apiRouter.get(
     const issuerUrl = await getSetting('oidc.issuer');
     const clientId = await getSetting('oidc.client_id');
     const clientSecret = await getSetting('oidc.client_secret');
-    const redirectUri = await getSetting('oidc.redirect_uri');
+    const redirectUri = String(await getSetting('oidc.redirect_uri') || '').trim();
 
     if (!issuerUrl || !clientId || !clientSecret || !redirectUri) {
       return res.status(400).json({ error: 'OIDC is not fully configured' });
@@ -1288,7 +2165,7 @@ apiRouter.get(
       oidcStateStore.set(state, { codeVerifier, createdAt: Date.now(), returnTo, redirectUri });
 
       const authUrl = oidc.buildAuthorizationUrl(config, {
-        redirect_uri: redirectUri,
+        redirect_uri: new URL(redirectUri).href,
         scope: 'openid email profile',
         state,
         code_challenge: codeChallenge,
@@ -1433,7 +2310,7 @@ apiRouter.get(
     } catch (err: any) {
       console.error('OIDC callback error:', err);
       const frontendUrl = await getOidcFrontendUrl(req).catch(() => '');
-      res.redirect(`${frontendUrl}/admin?oidc_error=${encodeURIComponent(err.message || 'OIDC error')}`);
+      res.redirect(`${frontendUrl}/admin?oidc_error=${encodeURIComponent(getOidcErrorMessage(err))}`);
     }
   })
 );
@@ -1491,7 +2368,15 @@ function getPublicWebAppUrl(req: express.Request): string {
   return `${proto}://${host}`.replace(/\/$/, '');
 }
 
-function getPublicRequestsUrl(req: express.Request): string {
+async function getPublicRequestsUrl(req: express.Request): Promise<string> {
+  const [gatewayEnabled, gatewayUrl] = await Promise.all([
+    getSetting('remote_gateway.enabled'),
+    getSetting('remote_gateway.url'),
+  ]);
+  const normalizedGatewayUrl = String(gatewayUrl ?? '').trim().replace(/\/+$/, '');
+  if (gatewayEnabled === true && normalizedGatewayUrl) {
+    return normalizedGatewayUrl;
+  }
   return `${getPublicWebAppUrl(req)}/requests`;
 }
 
@@ -1566,8 +2451,27 @@ apiRouter.delete(
   ah(async (req, res) => {
     const id = toInt(req.params.id);
     if (id == null) return res.status(400).send('id required');
-    await query(`DELETE FROM libraries WHERE id = $1`, [id]);
-    res.json({ ok: true });
+    const result = await query<{ detached_tracks: string; deleted_libraries: string }>(
+      `
+      WITH detached AS (
+        UPDATE tracks SET library_id = NULL WHERE library_id = $1
+        RETURNING 1
+      ),
+      deleted AS (
+        DELETE FROM libraries WHERE id = $1
+        RETURNING 1
+      )
+      SELECT
+        (SELECT COUNT(*) FROM detached) AS detached_tracks,
+        (SELECT COUNT(*) FROM deleted) AS deleted_libraries
+      `,
+      [id]
+    );
+    const row = result.rows[0];
+    if (!row || Number(row.deleted_libraries) === 0) {
+      return res.status(404).json({ error: 'Library not found' });
+    }
+    res.json({ ok: true, detachedTracks: Number(row.detached_tracks) });
   })
 );
 
@@ -1618,16 +2522,16 @@ apiRouter.get(
 
 const ARTIST_BROWSE_LETTER_SQL = `
   CASE
-    WHEN substring(regexp_replace(COALESCE(a.name, ''), '^[^[:alnum:]]+', '') from 1 for 1) ~ '^[A-Za-z]$'
-      THEN upper(substring(regexp_replace(COALESCE(a.name, ''), '^[^[:alnum:]]+', '') from 1 for 1))
+    WHEN substring(BTRIM(COALESCE(a.name, '')) from 1 for 1) ~ '^[A-Za-z]$'
+      THEN upper(substring(BTRIM(COALESCE(a.name, '')) from 1 for 1))
     ELSE '#'
   END
 `;
 
 const TITLE_BROWSE_LETTER_SQL = `
   CASE
-    WHEN substring(regexp_replace(COALESCE(t.title, ''), '^[^[:alnum:]]+', '') from 1 for 1) ~ '^[A-Za-z]$'
-      THEN upper(substring(regexp_replace(COALESCE(t.title, ''), '^[^[:alnum:]]+', '') from 1 for 1))
+    WHEN substring(BTRIM(COALESCE(t.title, '')) from 1 for 1) ~ '^[A-Za-z]$'
+      THEN upper(substring(BTRIM(COALESCE(t.title, '')) from 1 for 1))
     ELSE '#'
   END
 `;
@@ -1798,7 +2702,7 @@ apiRouter.get(
 
 // ---------------------------------------------------------------------------
 // GET /api/search/suggestions — fuzzy "did you mean?" suggestions
-// Returns up to 5 tracks that closely match the query using word-level search,
+// Returns up to 5 tracks that closely match the query using trigram similarity,
 // intended for use when the main search returns few/no results.
 // ---------------------------------------------------------------------------
 apiRouter.get(
@@ -1808,38 +2712,73 @@ apiRouter.get(
     if (!(await isLocalLibraryEnabled())) return res.json([]);
     const q = String(req.query.q ?? '').trim();
     if (q.length < 2) return res.json([]);
+    const normalizedQuery = q.toLowerCase();
+    const fieldFilter = parseLocalSearchField(req.query.field) ?? 'all';
+    const kindFilter =
+      req.query.kind === 'mp4' || req.query.kind === 'cdgmp3'
+        ? req.query.kind
+        : null;
+    const similarityThreshold =
+      normalizedQuery.length <= 4 ? 0.25 : normalizedQuery.length <= 8 ? 0.3 : 0.35;
 
-    // Split query into words and search for each independently, rank by match count
-    const words = q.toLowerCase().split(/\s+/).filter(w => w.length >= 2).slice(0, 5);
-    if (words.length === 0) return res.json([]);
-
-    // Build per-word LIKE conditions and a score expression
-    const params: any[] = [];
-    const wordConds: string[] = [];
-    const scoreTerms: string[] = [];
-    for (const word of words) {
-      params.push(`%${word}%`);
-      const p = `$${params.length}`;
-      wordConds.push(`(LOWER(t.title) LIKE ${p} OR LOWER(COALESCE(a.name,'')) LIKE ${p})`);
-      scoreTerms.push(`(CASE WHEN LOWER(t.title) LIKE ${p} OR LOWER(COALESCE(a.name,'')) LIKE ${p} THEN 1 ELSE 0 END)`);
-    }
-
-    try {
-      const result = await query(
-        `SELECT t.id, t.title, t.disc_id, t.kind, a.name AS artist,
-                (${scoreTerms.join(' + ')}) AS score
+    const result = await query(
+      `WITH scored AS (
+         SELECT t.id,
+                t.title,
+                t.disc_id,
+                t.kind,
+                a.name AS artist,
+                GREATEST(
+                  similarity(LOWER(COALESCE(a.name, '')), $1),
+                  word_similarity($1, LOWER(COALESCE(a.name, '')))
+                ) AS artist_score,
+                GREATEST(
+                  similarity(LOWER(COALESCE(t.title, '')), $1),
+                  word_similarity($1, LOWER(COALESCE(t.title, '')))
+                ) AS title_score,
+                GREATEST(
+                  similarity(
+                    LOWER(COALESCE(a.name, '') || ' ' || COALESCE(t.title, '')),
+                    $1
+                  ),
+                  word_similarity(
+                    $1,
+                    LOWER(COALESCE(a.name, '') || ' ' || COALESCE(t.title, ''))
+                  )
+                ) AS combined_score
            FROM tracks t
            LEFT JOIN artists a ON a.id = t.artist_id
           WHERE (t.source IS NULL OR t.source = 'local')
-            AND (${wordConds.join(' OR ')})
-          ORDER BY score DESC, LOWER(COALESCE(a.name,'')), LOWER(COALESCE(t.title,''))
-          LIMIT 5`,
-        params,
-      );
-      res.json(result.rows);
-    } catch {
-      res.json([]);
-    }
+            AND ($4::text IS NULL OR t.kind::text = $4)
+       ),
+       ranked AS (
+         SELECT id,
+                title,
+                disc_id,
+                kind,
+                artist,
+                CASE
+                  WHEN $3 = 'artist' THEN artist
+                  WHEN $3 = 'title' THEN title
+                  WHEN artist_score >= title_score AND artist_score >= combined_score THEN artist
+                  WHEN title_score >= combined_score THEN title
+                  ELSE CONCAT_WS(' — ', NULLIF(artist, ''), NULLIF(title, ''))
+                END AS matched_term,
+                CASE
+                  WHEN $3 = 'artist' THEN artist_score
+                  WHEN $3 = 'title' THEN title_score
+                  ELSE GREATEST(artist_score, title_score, combined_score)
+                END AS score
+           FROM scored
+       )
+       SELECT id, title, disc_id, kind, artist, matched_term
+         FROM ranked
+        WHERE score >= $2
+        ORDER BY score DESC, LOWER(COALESCE(artist, '')), LOWER(COALESCE(title, ''))
+        LIMIT 5`,
+      [normalizedQuery, similarityThreshold, fieldFilter, kindFilter],
+    );
+    res.json(result.rows);
   })
 );
 
@@ -1917,11 +2856,15 @@ apiRouter.get(
       kindClause = ` AND t.kind = $${params.length}`;
     }
 
-    const result = await query<{ artist: string }>(
+    const result = await query<{ artist: string; songCount: string; versionCount: string }>(
       `
-      SELECT artist
+      SELECT artist,
+             song_count AS "songCount",
+             version_count AS "versionCount"
         FROM (
-          SELECT DISTINCT a.name AS artist,
+          SELECT a.name AS artist,
+                 COUNT(DISTINCT LOWER(BTRIM(COALESCE(t.title, '')))) AS song_count,
+                 COUNT(*) AS version_count,
                  LOWER(a.name) AS sort_artist
             FROM tracks t
             LEFT JOIN artists a ON a.id = t.artist_id
@@ -1930,13 +2873,20 @@ apiRouter.get(
              AND BTRIM(a.name) <> ''
              AND ${ARTIST_BROWSE_LETTER_SQL} = $1
              ${kindClause}
+           GROUP BY a.name
         ) artists
        ORDER BY sort_artist
       `,
       params
     );
 
-    res.json({ artists: result.rows.map((row) => row.artist) });
+    res.json({
+      artists: result.rows.map((row) => ({
+        artist: row.artist,
+        songCount: Number(row.songCount),
+        versionCount: Number(row.versionCount),
+      })),
+    });
   })
 );
 
@@ -2066,7 +3016,7 @@ apiRouter.post(
       return res.status(403).json({ error: 'External library is disabled' });
     }
     
-    const { title, artist, url, requestedBy, keyAdjustment } = req.body;
+    const { title, artist, url, requestedBy, keyAdjustment, brand, discId } = req.body;
     const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
     
     if (!title || !url) {
@@ -2095,6 +3045,7 @@ apiRouter.post(
     // Upsert the external track
     const track = await upsertExternalTrack({
       artist_id: artistId,
+      disc_id: brand || discId || null,
       title,
       external_url: url,
       source: 'karaoke-nerds',
@@ -2112,10 +3063,12 @@ apiRouter.post(
 
     // Find or create singer for this request
     let kn_singerId: bigint | null = null;
+    let queueRequestedBy = requestedBy || null;
     if (requestedBy && requestedBy.trim()) {
       try {
-        const singer = await findOrCreateSinger(requestedBy, singerUuid);
+        const singer = await getAuthenticatedRequesterSinger(req, requestedBy) ?? await findOrCreateSinger(requestedBy, singerUuid);
         kn_singerId = singer.id;
+        queueRequestedBy = singer.display_name || requestedBy;
         await ensureSingerInActiveRotation(kn_singerId);
       } catch (err) {
         console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
@@ -2128,7 +3081,7 @@ apiRouter.post(
         `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
          VALUES ($1,$2,$3,'queued',$4,$5)
          RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
-        [track.id, requestedBy || null, kn_singerId, position, keyAdj]
+        [track.id, queueRequestedBy, kn_singerId, position, keyAdj]
       );
       res.json(r.rows[0]);
       await resortQueueByRotation();
@@ -2147,7 +3100,7 @@ apiRouter.post(
           `INSERT INTO queue(track_id, requested_by, singer_id, status, position)
            VALUES ($1,$2,$3,'queued',$4)
            RETURNING id, track_id, requested_by, singer_id, status, position, created_at`,
-          [track.id, requestedBy || null, kn_singerId, position]
+          [track.id, queueRequestedBy, kn_singerId, position]
         );
         res.json(r.rows[0]);
         await resortQueueByRotation();
@@ -2936,6 +3889,22 @@ apiRouter.get(
     const singerUuid = normalizeSingerUuid(req.query.singerUuid);
     if (!name) return res.status(400).json({ error: 'name is required' });
     const norm = normalizeSingerName(name);
+    const authenticatedSinger = await getAuthenticatedRequesterSinger(req, name);
+    if (authenticatedSinger) {
+      const qRes = await query(
+        `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
+                t.title, t.kind, a.name AS artist
+           FROM queue q
+           JOIN tracks t ON t.id = q.track_id
+           LEFT JOIN artists a ON a.id = t.artist_id
+          WHERE q.status != 'removed'
+            AND q.singer_id = $1
+          ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.position`,
+        [authenticatedSinger.id],
+      );
+      return res.json(qRes.rows);
+    }
+
     // Prefer singer_id-based lookup
     const singer = await resolveSingerForRequester(name, singerUuid);
     let rows: any[];
@@ -3004,17 +3973,27 @@ apiRouter.post(
     }
 
     const row = item.rows[0];
-    const singer = await resolveSingerForRequester(requesterName, singerUuid);
+    const authenticatedSinger = await getAuthenticatedRequesterSinger(req, requesterName);
+    const singer = authenticatedSinger
+      ? {
+          id: String(authenticatedSinger.id),
+          publicUuid: authenticatedSinger.public_uuid,
+          displayName: authenticatedSinger.display_name,
+          normalizedName: authenticatedSinger.normalized_name,
+        }
+      : await resolveSingerForRequester(requesterName, singerUuid);
     const requesterOwnsItem =
-      normalizeSingerName(row.requested_by ?? '') === norm ||
-      (singer && row.singer_id !== null && String(row.singer_id) === String(singer.id));
+      (authenticatedSinger
+        ? row.singer_id !== null && String(row.singer_id) === String(authenticatedSinger.id)
+        : normalizeSingerName(row.requested_by ?? '') === norm ||
+          (singer && row.singer_id !== null && String(row.singer_id) === String(singer.id)));
     if (!requesterOwnsItem) {
       return res.status(403).json({ error: 'You can only re-add your own songs' });
     }
 
     let singerId: bigint | null = row.singer_id !== null ? BigInt(row.singer_id) : null;
     try {
-      const singer = await findOrCreateSinger(requesterName, singerUuid);
+      const singer = authenticatedSinger ?? await findOrCreateSinger(requesterName, singerUuid);
       singerId = singer.id;
       await ensureSingerInActiveRotation(singerId);
     } catch (err) {
@@ -3040,7 +4019,7 @@ apiRouter.post(
       `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
        VALUES ($1,$2,$3,'queued',$4,$5)
        RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
-      [trackId, requesterName, singerId, position, keyAdjustment],
+      [trackId, (authenticatedSinger?.display_name || requesterName), singerId, position, keyAdjustment],
     );
 
     await resortQueueByRotation();
@@ -3073,12 +4052,17 @@ apiRouter.delete(
     }
     const normalizedRequester = normalizeSingerName(requesterName);
     const normalizedOwner = normalizeSingerName(item.rows[0].requested_by ?? '');
-    const singer = await resolveSingerForRequester(requesterName, singerUuid);
+    const authenticatedSinger = await getAuthenticatedRequesterSinger(req, requesterName);
+    const singer = authenticatedSinger
+      ? null
+      : await resolveSingerForRequester(requesterName, singerUuid);
     const requesterOwnsItem =
-      normalizedRequester === normalizedOwner ||
-      (singer &&
-        item.rows[0].singer_id !== null &&
-        String(item.rows[0].singer_id) === String(singer.id));
+      authenticatedSinger
+        ? item.rows[0].singer_id !== null && String(item.rows[0].singer_id) === String(authenticatedSinger.id)
+        : normalizedRequester === normalizedOwner ||
+          (singer &&
+            item.rows[0].singer_id !== null &&
+            String(item.rows[0].singer_id) === String(singer.id));
     if (!requesterOwnsItem) {
       return res.status(403).json({ error: 'You can only remove your own songs' });
     }
@@ -3106,18 +4090,34 @@ apiRouter.patch(
     const norm = normalizeSingerName(requesterName);
 
     // Resolve singer_id for this requester
-    const singer = await resolveSingerForRequester(requesterName, rawSingerUuid);
+    const authenticatedSinger = await getAuthenticatedRequesterSinger(req, requesterName);
+    const singer = authenticatedSinger
+      ? {
+          id: String(authenticatedSinger.id),
+          publicUuid: authenticatedSinger.public_uuid,
+          displayName: authenticatedSinger.display_name,
+          normalizedName: authenticatedSinger.normalized_name,
+        }
+      : await resolveSingerForRequester(requesterName, rawSingerUuid);
 
     let ownedIds: Set<number>;
     if (singer) {
       const singerId = singer.id;
-      const owned = await query<{ id: string }>(
-        `SELECT id FROM queue
-          WHERE status = 'queued'
-            AND id = ANY($2::bigint[])
-            AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $3)`,
-        [singerId, orderedQueueIds, norm],
-      );
+      const owned = authenticatedSinger
+        ? await query<{ id: string }>(
+            `SELECT id FROM queue
+              WHERE status = 'queued'
+                AND id = ANY($2::bigint[])
+                AND singer_id = $1`,
+            [singerId, orderedQueueIds],
+          )
+        : await query<{ id: string }>(
+            `SELECT id FROM queue
+              WHERE status = 'queued'
+                AND id = ANY($2::bigint[])
+                AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $3)`,
+            [singerId, orderedQueueIds, norm],
+          );
       ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
     } else {
       const owned = await query<{ id: string }>(
@@ -3137,13 +4137,21 @@ apiRouter.patch(
     let curRes: { rows: { id: string; position: number }[] };
     if (singer) {
       const singerId = singer.id;
-      curRes = await query<{ id: string; position: number }>(
-        `SELECT id, position FROM queue
-          WHERE status = 'queued'
-            AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $2)
-          ORDER BY position`,
-        [singerId, norm],
-      );
+      curRes = authenticatedSinger
+        ? await query<{ id: string; position: number }>(
+            `SELECT id, position FROM queue
+              WHERE status = 'queued'
+                AND singer_id = $1
+              ORDER BY position`,
+            [singerId],
+          )
+        : await query<{ id: string; position: number }>(
+            `SELECT id, position FROM queue
+              WHERE status = 'queued'
+                AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $2)
+              ORDER BY position`,
+            [singerId, norm],
+          );
     } else {
       curRes = await query<{ id: string; position: number }>(
         `SELECT id, position FROM queue WHERE LOWER(TRIM(requested_by)) = $1 AND status = 'queued' ORDER BY position`,
@@ -3247,10 +4255,12 @@ apiRouter.post(
 
     // Find or create singer, then ensure they are in the active rotation.
     let singerId: bigint | null = null;
+    let queueRequestedBy = requestedBy;
     if (requestedBy && requestedBy.trim()) {
       try {
-        const singer = await findOrCreateSinger(requestedBy, singerUuid);
+        const singer = await getAuthenticatedRequesterSinger(req, requestedBy) ?? await findOrCreateSinger(requestedBy, singerUuid);
         singerId = singer.id;
+        queueRequestedBy = singer.display_name || requestedBy;
         await ensureSingerInActiveRotation(singerId);
       } catch (err) {
         console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
@@ -3274,9 +4284,9 @@ apiRouter.post(
         `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
          VALUES ($1,$2,$3,'queued',$4,$5)
          RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
-        [trackId, requestedBy, singerId, position, keyAdjustment]
+        [trackId, queueRequestedBy, singerId, position, keyAdjustment]
       );
-      logger.info(`Singer request queued: "${requestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
+      logger.info(`Singer request queued: "${queueRequestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
       res.json(r.rows[0]);
     } catch (err: any) {
       // If key_adjustment column doesn't exist, fall back to insert without it
@@ -3291,9 +4301,9 @@ apiRouter.post(
           `INSERT INTO queue(track_id, requested_by, singer_id, status, position)
            VALUES ($1,$2,$3,'queued',$4)
            RETURNING id, track_id, requested_by, singer_id, status, position, created_at`,
-          [trackId, requestedBy, singerId, position]
+          [trackId, queueRequestedBy, singerId, position]
         );
-        logger.info(`Singer request queued: "${requestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
+        logger.info(`Singer request queued: "${queueRequestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
         res.json(r.rows[0]);
       } else {
         // Re-throw if it's a different error
@@ -3440,11 +4450,13 @@ apiRouter.post(
       const artist = String(external.artist ?? '').trim();
       const url = String(external.url ?? '').trim();
       const source = String(external.source ?? 'karaoke-nerds').trim() || 'karaoke-nerds';
+      const discId = String(external.discId ?? external.brand ?? '').trim();
       if (!title || !url) return res.status(400).send('external.title and external.url are required');
       const { upsertArtist, upsertExternalTrack } = await import('../db');
       const artistId = artist ? await upsertArtist(artist) : null;
       const track = await upsertExternalTrack({
         artist_id: artistId,
+        disc_id: discId || null,
         title,
         external_url: url,
         source,
@@ -3538,6 +4550,7 @@ apiRouter.get(
       `
       SELECT q.id, q.track_id, q.position, q.requested_by, q.status,
              t.title, t.kind, t.file_mp4, t.file_mp3, t.file_cdg, t.path,
+             t.duration_ms,
              t.external_url, t.source,
              a.name AS artist
         FROM queue q
@@ -3620,6 +4633,7 @@ apiRouter.post(
     }
     
     let songStarted = false;
+    let startedQueueId: number | null = null;
     if (trackToPlay) {
       const singerLabel = trackToPlay.requested_by ? ` (requested by ${trackToPlay.requested_by})` : '';
       const artistLabel = trackToPlay.artist ? ` by ${trackToPlay.artist}` : '';
@@ -3632,6 +4646,7 @@ apiRouter.post(
       if (id != null) {
         const updateResult = await query<{ id: number }>(`UPDATE queue SET status = 'playing', started_at = NOW() WHERE id = $1 RETURNING id`, [id]);
         songStarted = updateResult.rows.length > 0;
+        startedQueueId = updateResult.rows[0]?.id ?? null;
       } else {
         // play top
         const updateResult = await query<{ id: number }>(`
@@ -3640,10 +4655,14 @@ apiRouter.post(
            RETURNING id
         `);
         songStarted = updateResult.rows.length > 0;
+        startedQueueId = updateResult.rows[0]?.id ?? null;
       }
       await query('COMMIT');
     } catch (e) {
       await query('ROLLBACK'); throw e;
+    }
+    if (startedQueueId != null) {
+      await ensureQueueTrackDurationBeforePlayback(startedQueueId);
     }
     postQueueUpdate('player.play');
     if (songStarted) {
@@ -3695,12 +4714,14 @@ apiRouter.post(
       }
     }
 
-    postQueueUpdate('player.next');
     // Resume break music only when there is no next karaoke song to play
     const stillPlaying = await query<{ id: number }>(`SELECT id FROM queue WHERE status = 'playing' LIMIT 1`);
-    if (!stillPlaying.rows.length) {
+    if (stillPlaying.rows.length) {
+      await ensureQueueTrackDurationBeforePlayback(stillPlaying.rows[0].id);
+    } else {
       await autoResumeBreakMusicForKaraoke();
     }
+    postQueueUpdate('player.next');
     res.json({ ok: true });
   })
 );
@@ -3821,6 +4842,318 @@ apiRouter.get(
   })
 );
 
+apiRouter.get(
+  '/player/background/settings',
+  ah(async (_req, res) => {
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.post(
+  '/player/background/settings',
+  adminGuard,
+  ah(async (req, res) => {
+    const {
+      mode,
+      slideshowTransitionStyle,
+      slideshowIntervalSeconds,
+      slideshowTransitionDurationSeconds,
+    } = req.body ?? {};
+    if (mode !== undefined && mode !== 'default' && mode !== 'image' && mode !== 'slideshow') {
+      return res.status(400).json({ error: 'mode must be "default", "image", or "slideshow"' });
+    }
+
+    if (mode === 'image' && !(await getStoredPlayerBackgroundImageInfo())) {
+      return res.status(400).json({ error: 'Choose a background image before enabling image mode' });
+    }
+    if (mode === 'slideshow' && (await getStoredPlayerBackgroundSlideshowImages()).length === 0) {
+      return res.status(400).json({ error: 'Add slideshow images before enabling slideshow mode' });
+    }
+
+    if (mode !== undefined) {
+      await setSetting('player.backgroundMode', mode);
+    }
+    if (slideshowTransitionStyle !== undefined) {
+      if (!PLAYER_BACKGROUND_TRANSITION_STYLES.has(String(slideshowTransitionStyle))) {
+        return res.status(400).json({ error: 'slideshowTransitionStyle must be "fade", "slide", or "zoom"' });
+      }
+      await setSetting('player.backgroundSlideshowTransitionStyle', slideshowTransitionStyle);
+    }
+    if (slideshowIntervalSeconds !== undefined) {
+      const numericInterval = Number(slideshowIntervalSeconds);
+      if (
+        !Number.isFinite(numericInterval) ||
+        numericInterval < PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS ||
+        numericInterval > PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS
+      ) {
+        return res.status(400).json({
+          error: `slideshowIntervalSeconds must be between ${PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS} and ${PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS}`,
+        });
+      }
+      await setSetting('player.backgroundSlideshowIntervalSeconds', Math.round(numericInterval));
+    }
+    if (slideshowTransitionDurationSeconds !== undefined) {
+      const numericDuration = Number(slideshowTransitionDurationSeconds);
+      if (
+        !Number.isFinite(numericDuration) ||
+        numericDuration < PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS ||
+        numericDuration > PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS
+      ) {
+        return res.status(400).json({
+          error:
+            `slideshowTransitionDurationSeconds must be between ` +
+            `${PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS} and ` +
+            `${PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS}`,
+        });
+      }
+      await setSetting('player.backgroundSlideshowTransitionDurationSeconds', Math.round(numericDuration * 10) / 10);
+    }
+
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.get(
+  '/player/background/library-images',
+  adminGuard,
+  ah(async (_req, res) => {
+    const images = await listPlayerBackgroundLibraryImages();
+    res.json({
+      uploadDir: await getImageUploadsDir(),
+      images: images.map((image) => ({
+        filename: image.filename,
+        mime: image.mime,
+        size: image.size,
+        updatedAt: image.updatedAt,
+        imageUrl: getPlayerBackgroundLibraryImageUrl(image.filename, image.updatedAt),
+      })),
+    });
+  })
+);
+
+apiRouter.get(
+  '/player/background/library-images/:filename',
+  ah(async (req, res) => {
+    const image = await getPlayerBackgroundLibraryImage(req.params.filename);
+    if (!image) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const uploadDir = path.resolve(await getImageUploadsDir());
+    const filePath = path.resolve(uploadDir, image.filename);
+    const relativePath = path.relative(uploadDir, filePath);
+    if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    res.setHeader('Content-Type', image.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(await fs.readFile(filePath));
+  })
+);
+
+apiRouter.get(
+  '/player/background/image',
+  ah(async (_req, res) => {
+    const imageInfo = await getStoredPlayerBackgroundImageInfo();
+    if (!imageInfo) {
+      return res.status(404).json({ error: 'No player background image has been uploaded' });
+    }
+    const imageBuffer = await getStoredPlayerBackgroundImageBuffer(imageInfo);
+    if (!imageBuffer) {
+      return res.status(404).json({ error: 'Player background image file not found' });
+    }
+
+    res.setHeader('Content-Type', imageInfo.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(imageBuffer);
+  })
+);
+
+apiRouter.post(
+  '/player/background/image',
+  adminGuard,
+  express.raw({ type: 'image/*', limit: PLAYER_BACKGROUND_IMAGE_MAX_BYTES }),
+  ah(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Upload an image file' });
+    }
+
+    const mime = detectPlayerBackgroundImageMime(req.body);
+    if (!mime) {
+      return res.status(400).json({ error: 'Supported background formats are PNG, JPEG, WebP, and GIF' });
+    }
+
+    const image = await writePlayerBackgroundImageFile(req.body, mime, 'static');
+    await setSetting('player.backgroundImageMime', image.mime);
+    await setSetting('player.backgroundImageFilename', image.filename);
+    await setSetting('player.backgroundImageData', '');
+    await setSetting('player.backgroundImageUpdatedAt', image.updatedAt);
+    await setSetting('player.backgroundMode', 'image');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.post(
+  '/player/background/image/select',
+  adminGuard,
+  ah(async (req, res) => {
+    const image = await getPlayerBackgroundLibraryImage(req.body?.filename);
+    if (!image) {
+      return res.status(400).json({ error: 'Choose an image from the configured image directory' });
+    }
+
+    await setSetting('player.backgroundImageMime', image.mime);
+    await setSetting('player.backgroundImageFilename', image.filename);
+    await setSetting('player.backgroundImageData', '');
+    await setSetting('player.backgroundImageUpdatedAt', image.updatedAt);
+    await setSetting('player.backgroundMode', 'image');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.delete(
+  '/player/background/image',
+  adminGuard,
+  ah(async (_req, res) => {
+    await Promise.all([
+      setSetting('player.backgroundImageMime', ''),
+      setSetting('player.backgroundImageFilename', ''),
+      setSetting('player.backgroundImageData', ''),
+      setSetting('player.backgroundImageUpdatedAt', ''),
+    ]);
+    if ((await getSetting('player.backgroundMode')) === 'image') {
+      await setSetting('player.backgroundMode', 'default');
+    }
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.get(
+  '/player/background/slideshow-images/:id',
+  ah(async (req, res) => {
+    const requestedId = String(req.params.id || '');
+    const imageInfo = (await getStoredPlayerBackgroundSlideshowImages()).find((image) => image.id === requestedId);
+    if (!imageInfo) {
+      return res.status(404).json({ error: 'Slideshow image not found' });
+    }
+    const imageBuffer = await getStoredPlayerBackgroundImageBuffer(imageInfo);
+    if (!imageBuffer) {
+      return res.status(404).json({ error: 'Slideshow image file not found' });
+    }
+
+    res.setHeader('Content-Type', imageInfo.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(imageBuffer);
+  })
+);
+
+apiRouter.post(
+  '/player/background/slideshow-images/select',
+  adminGuard,
+  ah(async (req, res) => {
+    const requestedFilenames = Array.isArray(req.body?.filenames)
+      ? req.body.filenames
+      : [req.body?.filename];
+    const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
+    const existingFilenames = new Set(slideshowImages.map((image) => image.filename).filter(Boolean));
+
+    for (const requestedFilename of requestedFilenames) {
+      if (slideshowImages.length >= PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES) {
+        return res.status(400).json({ error: `A slideshow can include up to ${PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES} images` });
+      }
+      const image = await getPlayerBackgroundLibraryImage(requestedFilename);
+      if (!image) {
+        return res.status(400).json({ error: 'Choose images from the configured image directory' });
+      }
+      if (existingFilenames.has(image.filename)) {
+        continue;
+      }
+      slideshowImages.push({
+        id: crypto.randomUUID(),
+        mime: image.mime,
+        filename: image.filename,
+        updatedAt: image.updatedAt,
+      });
+      existingFilenames.add(image.filename);
+    }
+
+    if (slideshowImages.length === 0) {
+      return res.status(400).json({ error: 'Choose at least one slideshow image' });
+    }
+
+    await setSetting('player.backgroundSlideshowImages', slideshowImages);
+    await setSetting('player.backgroundMode', 'slideshow');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.post(
+  '/player/background/slideshow-images',
+  adminGuard,
+  express.raw({ type: 'image/*', limit: PLAYER_BACKGROUND_IMAGE_MAX_BYTES }),
+  ah(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Upload an image file' });
+    }
+
+    const mime = detectPlayerBackgroundImageMime(req.body);
+    if (!mime) {
+      return res.status(400).json({ error: 'Supported background formats are PNG, JPEG, WebP, and GIF' });
+    }
+
+    const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
+    if (slideshowImages.length >= PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES) {
+      return res.status(400).json({ error: `A slideshow can include up to ${PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES} images` });
+    }
+
+    slideshowImages.push(await writePlayerBackgroundImageFile(req.body, mime));
+    await setSetting('player.backgroundSlideshowImages', slideshowImages);
+    await setSetting('player.backgroundMode', 'slideshow');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.delete(
+  '/player/background/slideshow-images/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const requestedId = String(req.params.id || '');
+    const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
+    const remainingImages = slideshowImages.filter((image) => image.id !== requestedId);
+
+    if (remainingImages.length === slideshowImages.length) {
+      return res.status(404).json({ error: 'Slideshow image not found' });
+    }
+
+    await setSetting('player.backgroundSlideshowImages', remainingImages);
+    if (remainingImages.length === 0 && (await getSetting('player.backgroundMode')) === 'slideshow') {
+      await setSetting('player.backgroundMode', 'default');
+    }
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.delete(
+  '/player/background/slideshow-images',
+  adminGuard,
+  ah(async (_req, res) => {
+    await setSetting('player.backgroundSlideshowImages', []);
+    if ((await getSetting('player.backgroundMode')) === 'slideshow') {
+      await setSetting('player.backgroundMode', 'default');
+    }
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
 // Track song state for autoplay logic
 const songState = new Map<number | string, {
   hasFinished: boolean;
@@ -3875,6 +5208,62 @@ async function checkInitialAutoplayConditions(): Promise<{
     hasPlayingSong,
     hasQueuedSongs
   };
+}
+
+type QueueTrackDurationRow = {
+  id: number;
+  track_id: number;
+  key_adjustment?: number | null;
+  duration_ms: number | null;
+  kind: string;
+  file_mp4: string | null;
+  file_mp3: string | null;
+  file_cdg: string | null;
+  title: string | null;
+};
+
+async function ensureQueueTrackDurationBeforePlayback(queueId: number | string | null | undefined): Promise<number | null> {
+  if (queueId == null) return null;
+  const id = normalizeQueueId(queueId);
+  if (id == null) return null;
+
+  const result = await query<QueueTrackDurationRow>(
+    `SELECT q.id,
+            q.track_id,
+            q.key_adjustment,
+            t.duration_ms,
+            t.kind,
+            t.file_mp4,
+            t.file_mp3,
+            t.file_cdg,
+            t.title
+       FROM queue q
+       JOIN tracks t ON t.id = q.track_id
+      WHERE q.id = $1`,
+    [id],
+  );
+  if (result.rows.length === 0) return null;
+
+  const track = result.rows[0];
+  if (track.duration_ms != null && track.duration_ms > 0) {
+    return Number(track.duration_ms);
+  }
+
+  logger.info(`Track ${track.track_id}: duration missing before playback; extracting now (${track.title ?? 'untitled'})`);
+  const extractedDuration = await extractTrackDuration({
+    kind: track.kind,
+    file_mp4: track.file_mp4,
+    file_mp3: track.file_mp3,
+  });
+
+  if (extractedDuration != null && extractedDuration > 0) {
+    await query('UPDATE tracks SET duration_ms = $1 WHERE id = $2', [extractedDuration, track.track_id]);
+    logger.info(`Track ${track.track_id}: cached duration before playback: ${extractedDuration}ms (${Math.round(extractedDuration / 1000)}s)`);
+    return extractedDuration;
+  }
+
+  logger.warn(`Track ${track.track_id}: unable to extract duration before playback`);
+  return null;
 }
 
 // Periodic check for initial autoplay - starts first song if:
@@ -3944,6 +5333,7 @@ setInterval(async () => {
             if (result.rows.length > 0) {
               const { id, title, artist } = result.rows[0];
               const songLabel = [artist, title].filter(Boolean).join(' - ') || `ID: ${id}`;
+              await ensureQueueTrackDurationBeforePlayback(id);
               logger.info(`Initial autoplay: Started first song — ${songLabel}`);
               postQueueUpdate('player.play');
               await autoPauseBreakMusicForKaraoke();
@@ -4172,6 +5562,7 @@ apiRouter.post(
                 if (result.rows.length > 0) {
                   const { id, title, artist } = result.rows[0];
                   const songLabel = [artist, title].filter(Boolean).join(' - ') || `ID: ${id}`;
+                  await ensureQueueTrackDurationBeforePlayback(id);
                   logger.info(`Autoplay: Started next song — ${songLabel}`);
                   // Pause break music now that the next karaoke song is starting
                   await autoPauseBreakMusicForKaraoke();
@@ -4233,6 +5624,7 @@ apiRouter.get(
     const hideSingerQueue = await getSetting('overlay.hideSingerQueue');
     const keepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
     const showRequestsUrl = await getSetting('overlay.showRequestsUrl');
+    const showBreakMusicTrack = await getSetting('overlay.showBreakMusicTrack');
     res.json({
       visible: visible === null ? true : visible === 'true',
       height: height === null ? 90 : parseInt(height, 10),
@@ -4244,6 +5636,7 @@ apiRouter.get(
       keepRotationScrollerSingers:
         keepRotationScrollerSingers === null ? false : keepRotationScrollerSingers === 'true',
       showRequestsUrl: showRequestsUrl === null ? true : showRequestsUrl === 'true',
+      showBreakMusicTrack: showBreakMusicTrack === null ? false : showBreakMusicTrack === 'true',
     });
   })
 );
@@ -4263,6 +5656,7 @@ apiRouter.post(
       hideSingerQueue,
       keepRotationScrollerSingers,
       showRequestsUrl,
+      showBreakMusicTrack,
     } = req.body;
     
     if (typeof visible === 'boolean') {
@@ -4294,6 +5688,9 @@ apiRouter.post(
     if (typeof showRequestsUrl === 'boolean') {
       await setSetting('overlay.showRequestsUrl', String(showRequestsUrl));
     }
+    if (typeof showBreakMusicTrack === 'boolean') {
+      await setSetting('overlay.showBreakMusicTrack', String(showBreakMusicTrack));
+    }
     
     // Broadcast settings update to all clients
     const currentVisible = await getSetting('overlay.visible');
@@ -4305,6 +5702,7 @@ apiRouter.post(
     const currentHideSingerQueue = await getSetting('overlay.hideSingerQueue');
     const currentKeepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
     const currentShowRequestsUrl = await getSetting('overlay.showRequestsUrl');
+    const currentShowBreakMusicTrack = await getSetting('overlay.showBreakMusicTrack');
     
     postQueueUpdate('overlay.settings', {
       visible: currentVisible === null ? true : currentVisible === 'true',
@@ -4317,6 +5715,7 @@ apiRouter.post(
       keepRotationScrollerSingers:
         currentKeepRotationScrollerSingers === null ? false : currentKeepRotationScrollerSingers === 'true',
       showRequestsUrl: currentShowRequestsUrl === null ? true : currentShowRequestsUrl === 'true',
+      showBreakMusicTrack: currentShowBreakMusicTrack === null ? false : currentShowBreakMusicTrack === 'true',
     });
     
     res.json({ ok: true });
@@ -4577,7 +5976,7 @@ apiRouter.get(
       'libraries.external_enabled': settings['libraries.external_enabled'] ?? true,
       'requests.acceptance': settings['requests.acceptance'] ?? 'local',
       'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true,
-      'requests.url': getPublicRequestsUrl(req),
+      'requests.url': await getPublicRequestsUrl(req),
     };
     
     res.json(completeSettings);
@@ -4594,7 +5993,32 @@ apiRouter.get(
     for (const row of result.rows) {
       settings[row.key] = row.value;
     }
+    settings['station.mode'] = process.env.STATION_MODE === 'true';
+    settings['images.upload_dir'] = settings['images.upload_dir'] || DEFAULT_IMAGE_UPLOADS_DIR;
     res.json(settings);
+  })
+);
+
+apiRouter.post(
+  '/admin/remote-gateway/test',
+  adminGuard,
+  ah(async (_req, res) => {
+    const config = await getRemoteGatewayConfig();
+    await pushRemoteGatewaySettings(config);
+    const status = await getRemoteGatewayStatus(config);
+    res.json({
+      ok: true,
+      gatewayUrl: config.url,
+      status,
+    });
+  })
+);
+
+apiRouter.post(
+  '/admin/remote-gateway/sync',
+  adminGuard,
+  ah(async (_req, res) => {
+    res.json(await runRemoteGatewaySync({ includeCatalog: true }));
   })
 );
 
@@ -4631,6 +6055,19 @@ apiRouter.put(
 
     if (key === 'admin.background_break_music_scan_enabled') {
       await syncBreakMusicScanTaskState({ runImmediately: value !== false });
+    }
+
+    if (
+      key === 'remote_gateway.url' ||
+      key === 'remote_gateway.enabled' ||
+      key === 'remote_gateway.api_token' ||
+      key === 'remote_gateway.poll_interval_seconds' ||
+      key === 'libraries.local_enabled' ||
+      key === 'libraries.external_enabled' ||
+      key === 'requests.acceptance' ||
+      key === 'requests.local_browse_enabled'
+    ) {
+      await syncRemoteGatewayTaskState({ runImmediately: true });
     }
 
     res.json({ ok: true });

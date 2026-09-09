@@ -43,6 +43,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       MEDIA_ROOT: ${MEDIA_ROOT}
+      IMAGE_UPLOADS_DIR: /media/images
       ORIGIN: ${ORIGIN}
       WEB_APP_URL: ${WEB_APP_URL}
       TRUST_PROXY: ${TRUST_PROXY:-1}
@@ -53,6 +54,7 @@ services:
       - "${KARAOKE_PATH}:/media/karaoke:ro"
       - "${DOWNLOADS_PATH}:/media/downloads"
       - "${BREAKMUSIC_PATH}:/media/breakmusic:ro"
+      - "${IMAGES_PATH}:/media/images"
     restart: always
     ports:
       - "${APP_PORT:-5173}:5173"

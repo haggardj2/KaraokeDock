@@ -47,6 +47,27 @@ type RotationScrollerSinger = {
   hasQueuedSong: boolean;
 };
 
+type PlayerBackgroundMode = "default" | "image" | "slideshow";
+type PlayerBackgroundTransitionStyle = "fade" | "slide" | "zoom";
+
+type PlayerBackgroundSlideshowImage = {
+  id: string;
+  filename?: string | null;
+  imageUrl: string;
+  updatedAt: string;
+};
+
+type PlayerBackgroundSettings = {
+  mode: PlayerBackgroundMode;
+  imageUrl: string | null;
+  imageFilename?: string | null;
+  updatedAt: string | null;
+  slideshowImages: PlayerBackgroundSlideshowImage[];
+  slideshowTransitionStyle: PlayerBackgroundTransitionStyle;
+  slideshowIntervalSeconds: number;
+  slideshowTransitionDurationSeconds: number;
+};
+
 function getDefaultRequestsUrl(): string {
   if (typeof window === "undefined" || !window.location?.origin) {
     return "/requests";
@@ -111,11 +132,30 @@ function getYouTubeVideoId(url: string): string | null {
         return normalizeVideoId(segments[1]);
       }
     }
+
   } catch {
     return null;
   }
 
   return null;
+}
+
+function describeYouTubeIframeError(code: unknown): string {
+  switch (Number(code)) {
+    case 2:
+      return "The YouTube video id or request parameters are invalid.";
+    case 5:
+      return "The video cannot be played by the HTML5 YouTube player.";
+    case 100:
+      return "The YouTube video was not found or is private.";
+    case 101:
+    case 150:
+      return "The video owner does not allow embedded playback.";
+    case 153:
+      return "YouTube rejected the embedded player configuration, usually because the request did not include an acceptable HTTP Referer.";
+    default:
+      return "The YouTube iframe player reported an unknown playback error.";
+  }
 }
 
 // Helper function to validate duration values
@@ -151,6 +191,18 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   hideSingerQueue: false,
   keepRotationScrollerSingers: false,
   showRequestsUrl: true,
+  showBreakMusicTrack: false,
+};
+
+const DEFAULT_PLAYER_BACKGROUND_SETTINGS: PlayerBackgroundSettings = {
+  mode: "default",
+  imageUrl: null,
+  imageFilename: null,
+  updatedAt: null,
+  slideshowImages: [],
+  slideshowTransitionStyle: "fade",
+  slideshowIntervalSeconds: 10,
+  slideshowTransitionDurationSeconds: 3,
 };
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
@@ -201,7 +253,101 @@ function normalizeOverlaySettings(value: unknown): OverlaySettings {
       settings.showRequestsUrl,
       DEFAULT_OVERLAY_SETTINGS.showRequestsUrl,
     ),
+    showBreakMusicTrack: parseBoolean(
+      settings.showBreakMusicTrack,
+      DEFAULT_OVERLAY_SETTINGS.showBreakMusicTrack,
+    ),
   };
+}
+
+function normalizePlayerBackgroundSettings(
+  value: unknown,
+): PlayerBackgroundSettings {
+  if (!value || typeof value !== "object") {
+    return DEFAULT_PLAYER_BACKGROUND_SETTINGS;
+  }
+  const settings = value as Partial<PlayerBackgroundSettings>;
+  const imageUrl =
+    typeof settings.imageUrl === "string" && settings.imageUrl.trim()
+      ? settings.imageUrl
+      : null;
+  const slideshowImages = Array.isArray(settings.slideshowImages)
+    ? settings.slideshowImages.filter(
+        (image): image is PlayerBackgroundSlideshowImage =>
+          !!image &&
+          typeof image.id === "string" &&
+          (image.filename == null || typeof image.filename === "string") &&
+          typeof image.imageUrl === "string" &&
+          typeof image.updatedAt === "string",
+      )
+    : [];
+  const mode =
+    settings.mode === "image" && imageUrl
+      ? "image"
+      : settings.mode === "slideshow" && slideshowImages.length > 0
+        ? "slideshow"
+        : "default";
+  const interval = Number(settings.slideshowIntervalSeconds);
+  const transitionDuration = Number(settings.slideshowTransitionDurationSeconds);
+  return {
+    mode,
+    imageUrl,
+    imageFilename:
+      typeof settings.imageFilename === "string" && settings.imageFilename.trim()
+        ? settings.imageFilename
+        : null,
+    updatedAt:
+      typeof settings.updatedAt === "string" && settings.updatedAt.trim()
+        ? settings.updatedAt
+        : null,
+    slideshowImages,
+    slideshowTransitionStyle:
+      settings.slideshowTransitionStyle === "slide" ||
+      settings.slideshowTransitionStyle === "zoom"
+        ? settings.slideshowTransitionStyle
+        : "fade",
+    slideshowIntervalSeconds: Number.isFinite(interval)
+      ? Math.max(3, Math.min(300, Math.round(interval)))
+      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowIntervalSeconds,
+    slideshowTransitionDurationSeconds: Number.isFinite(transitionDuration)
+      ? Math.max(0.5, Math.min(10, Math.round(transitionDuration * 10) / 10))
+      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowTransitionDurationSeconds,
+  };
+}
+
+function getApiAssetUrl(pathOrUrl: string | null): string | null {
+  if (!pathOrUrl) return null;
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  return `${API_BASE}${pathOrUrl}`;
+}
+
+function getBackgroundImageCss(url: string): string {
+  const escapedUrl = url.replace(/["\\]/g, "\\$&");
+  return `linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), url("${escapedUrl}")`;
+}
+
+function renderTickerText(text: string, highlightedText: string) {
+  if (!highlightedText || !text.includes(highlightedText)) {
+    return text;
+  }
+
+  return text.split(highlightedText).map((part, index) => (
+    <React.Fragment key={`${index}-${part.length}`}>
+      {index > 0 && (
+        <span
+          style={{
+            color: "#facc15",
+            fontWeight: 800,
+            textShadow:
+              "0 0 12px rgba(250, 204, 21, 0.65), 2px 2px 4px rgba(0,0,0,0.95)",
+          }}
+        >
+          {highlightedText}
+        </span>
+      )}
+      {part}
+    </React.Fragment>
+  ));
 }
 
 export default function Player() {
@@ -216,6 +362,10 @@ export default function Player() {
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>(
     DEFAULT_OVERLAY_SETTINGS,
   );
+  const [playerBackgroundSettings, setPlayerBackgroundSettings] =
+    useState<PlayerBackgroundSettings>(DEFAULT_PLAYER_BACKGROUND_SETTINGS);
+  const [playerBackgroundSlideIndex, setPlayerBackgroundSlideIndex] =
+    useState(0);
   const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
   const [rotationScrollerSingers, setRotationScrollerSingers] = useState<
     RotationScrollerSinger[]
@@ -255,6 +405,52 @@ export default function Player() {
     () => formatRequestsUrlForDisplay(requestsUrl),
     [requestsUrl],
   );
+  const playerBackgroundStyle = useMemo<React.CSSProperties>(() => {
+    const imageUrl = getApiAssetUrl(playerBackgroundSettings.imageUrl);
+    if (playerBackgroundSettings.mode !== "image" || !imageUrl) {
+      return { background: "#000" };
+    }
+    return {
+      backgroundColor: "#000",
+      backgroundImage: getBackgroundImageCss(imageUrl),
+      backgroundPosition: "center",
+      backgroundRepeat: "no-repeat",
+      backgroundSize: "cover",
+    };
+  }, [playerBackgroundSettings]);
+  const isCustomPlayerBackground =
+    (playerBackgroundSettings.mode === "image" &&
+      !!playerBackgroundSettings.imageUrl) ||
+    (playerBackgroundSettings.mode === "slideshow" &&
+      playerBackgroundSettings.slideshowImages.length > 0);
+
+  useEffect(() => {
+    setPlayerBackgroundSlideIndex(0);
+  }, [
+    playerBackgroundSettings.mode,
+    playerBackgroundSettings.slideshowImages,
+  ]);
+
+  useEffect(() => {
+    if (
+      playerBackgroundSettings.mode !== "slideshow" ||
+      playerBackgroundSettings.slideshowImages.length <= 1
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setPlayerBackgroundSlideIndex((current) =>
+        (current + 1) % playerBackgroundSettings.slideshowImages.length,
+      );
+    }, playerBackgroundSettings.slideshowIntervalSeconds * 1000);
+
+    return () => window.clearInterval(timer);
+  }, [
+    playerBackgroundSettings.mode,
+    playerBackgroundSettings.slideshowImages.length,
+    playerBackgroundSettings.slideshowIntervalSeconds,
+  ]);
 
   // Force dark theme
   useEffect(() => {
@@ -272,7 +468,6 @@ export default function Player() {
     ) as HTMLElement[];
     els.forEach((e) => (e.style.display = "none"));
 
-    // Load YouTube IFrame API
     if (!(window as any).YT) {
       const tag = document.createElement("script");
       tag.src = "https://www.youtube.com/iframe_api";
@@ -355,6 +550,67 @@ export default function Player() {
     }
   };
 
+  const renderPlayerBackground = () => {
+    if (playerBackgroundSettings.mode !== "slideshow") {
+      return null;
+    }
+
+    const images = playerBackgroundSettings.slideshowImages;
+    if (images.length === 0) {
+      return null;
+    }
+
+    const transitionDurationMs = Math.round(
+      playerBackgroundSettings.slideshowTransitionDurationSeconds * 1000,
+    );
+    const transition = `opacity ${transitionDurationMs}ms ease-in-out, transform ${transitionDurationMs}ms ease-in-out`;
+    const getTransform = (active: boolean) => {
+      if (playerBackgroundSettings.slideshowTransitionStyle === "slide") {
+        return active ? "translateX(0)" : "translateX(4%)";
+      }
+      if (playerBackgroundSettings.slideshowTransitionStyle === "zoom") {
+        return active ? "scale(1)" : "scale(1.06)";
+      }
+      return "scale(1)";
+    };
+
+    return (
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          overflow: "hidden",
+          zIndex: 0,
+          background: "#000",
+        }}
+      >
+        {images.map((image, index) => {
+          const imageUrl = getApiAssetUrl(image.imageUrl);
+          if (!imageUrl) return null;
+          const active = index === playerBackgroundSlideIndex % images.length;
+          return (
+            <div
+              key={image.id}
+              style={{
+                position: "absolute",
+                inset: 0,
+                backgroundColor: "#000",
+                backgroundImage: getBackgroundImageCss(imageUrl),
+                backgroundPosition: "center",
+                backgroundRepeat: "no-repeat",
+                backgroundSize: "cover",
+                opacity: active ? 1 : 0,
+                transform: getTransform(active),
+                transition,
+              }}
+            />
+          );
+        })}
+      </div>
+    );
+  };
+
   // Fetch queue + determine current
   const refresh = useCallback(async () => {
     const [q, rotationSingers] = await Promise.all([
@@ -426,6 +682,16 @@ export default function Player() {
       })
       .catch(() => {
         // Use defaults on error
+      });
+  }, []);
+
+  useEffect(() => {
+    api("/api/player/background/settings")
+      .then((settings: PlayerBackgroundSettings) => {
+        setPlayerBackgroundSettings(normalizePlayerBackgroundSettings(settings));
+      })
+      .catch(() => {
+        // Use the default splash on error
       });
   }, []);
 
@@ -516,6 +782,11 @@ export default function Player() {
                 });
               }
             }
+            if (msg.type === "player.background.settings") {
+              setPlayerBackgroundSettings(
+                normalizePlayerBackgroundSettings(msg),
+              );
+            }
           } catch {
             /* ignore */
           }
@@ -564,12 +835,10 @@ export default function Player() {
     };
   }, [refresh, refreshBreakMusicState]);
 
-  // Determine YouTube state based on current song (moved out of useMemo to avoid side effects)
   useEffect(() => {
     if (!now) {
       setIsYouTube(false);
       setYoutubeVideoId(null);
-      // Clean up YouTube player when song ends
       if (youtubePlayerRef.current) {
         try {
           youtubePlayerRef.current.stopVideo();
@@ -585,20 +854,9 @@ export default function Player() {
       return;
     }
 
-    // Handle external URLs (e.g., from Karaoke Nerds)
-    if (now.external_url) {
-      const videoId = getYouTubeVideoId(now.external_url);
-      if (videoId) {
-        setIsYouTube(true);
-        setYoutubeVideoId(videoId);
-      } else {
-        setIsYouTube(false);
-        setYoutubeVideoId(null);
-      }
-    } else {
-      setIsYouTube(false);
-      setYoutubeVideoId(null);
-    }
+    const videoId = now.external_url ? getYouTubeVideoId(now.external_url) : null;
+    setIsYouTube(Boolean(videoId));
+    setYoutubeVideoId(videoId);
   }, [now?.id, now?.external_url]);
 
   // Build the media URL - pure computation, no side effects
@@ -608,7 +866,6 @@ export default function Player() {
 
     // Handle external URLs (e.g., from Karaoke Nerds)
     if (now.external_url) {
-      // Check if it's a YouTube URL - return empty string as we'll use iframe instead
       const videoId = getYouTubeVideoId(now.external_url);
       if (videoId) {
         return "";
@@ -673,9 +930,7 @@ export default function Player() {
     setNeedsUserInteraction(false);
     setIsPlaying(false);
 
-    // Handle YouTube videos
     if (isYouTube && youtubeVideoId) {
-      // YouTube iframe will autoplay via URL parameter
       setIsPlaying(true);
       return;
     }
@@ -861,11 +1116,10 @@ export default function Player() {
     };
   }, [now, sendTimingUpdate]);
 
-  // Report timing updates to server for Host page (regular videos only)
+  // Report timing updates to server for Host page
   useEffect(() => {
     if (!now) return;
 
-    // YouTube timing is handled separately via YouTube IFrame API
     if (isYouTube) return;
 
     const v = videoRef.current;
@@ -916,121 +1170,105 @@ export default function Player() {
     return () => clearInterval(intervalId);
   }, [now, isYouTube, sendTimingUpdate]);
 
-  // Report YouTube timing updates using IFrame API
+  // Report YouTube timing updates using the IFrame API. YouTube is attempted
+  // through the iframe first; fallback download only starts after an iframe API
+  // error such as embedding disabled (101/150).
   useEffect(() => {
     if (!now || !isYouTube || !youtubeVideoId) return;
 
-    // Create a unique player container ID
     const playerId = "youtube-player-" + youtubeVideoId;
-    const IFRAME_READY_TIMEOUT = 100;
-    const INIT_DELAY = 500;
-
-    // Initialize YouTube player when API is ready
     const initPlayer = () => {
       const YT = (window as any).YT;
-      if (!YT || !YT.Player) {
-        setTimeout(initPlayer, IFRAME_READY_TIMEOUT);
+      if (!YT?.Player) {
+        setTimeout(initPlayer, 100);
         return;
       }
 
-      // Clean up existing timer
       if (youtubeTimerRef.current) {
         clearInterval(youtubeTimerRef.current);
       }
 
-      // Create player instance (reusing existing iframe if possible)
       try {
         youtubePlayerRef.current = new YT.Player(playerId, {
           events: {
             onReady: (event: any) => {
-              console.log("YouTube player ready");
-
-              // Unmute the player after it's ready (video starts muted for autoplay to work)
               try {
+                event.target.playVideo();
                 event.target.unMute();
                 event.target.setVolume(100);
-                console.log("YouTube player unmuted");
               } catch (err) {
-                console.error("Error unmuting YouTube player:", err);
+                console.error("Error starting YouTube iframe playback:", err);
               }
 
-              // Start timing updates
               youtubeTimerRef.current = setInterval(() => {
                 try {
                   const currentTime = event.target.getCurrentTime();
                   const duration = event.target.getDuration();
-
-                  if (duration && currentTime !== undefined) {
-                    // Send timing to server using helper function
-                    sendTimingUpdate(currentTime, duration, now.id);
+                  if (isValidDuration(duration)) {
+                    sendTimingUpdate(currentTime || 0, duration, now.id);
                   }
                 } catch (err) {
-                  console.error("Error getting YouTube timing:", err);
+                  console.error("Error getting YouTube iframe timing:", err);
                 }
               }, 1000);
             },
             onStateChange: (event: any) => {
-              // YT.PlayerState.PLAYING = 1
               if (event.data === 1) {
-                // Ensure video is unmuted when playing starts
                 try {
                   if (event.target.isMuted()) {
                     event.target.unMute();
                     event.target.setVolume(100);
-                    console.log("YouTube player unmuted on play");
                   }
                 } catch (err) {
-                  console.error("Error unmuting YouTube player on play:", err);
+                  console.error("Error unmuting YouTube iframe:", err);
                 }
               }
-              // YT.PlayerState.ENDED = 0
               if (event.data === 0) {
-                console.log("YouTube video ended, sending final timing update");
-                // Guard against stale closure — verify the current song is still this one
-                if (!now) return;
                 try {
                   const duration = event.target.getDuration();
-                  if (isValidDuration(duration)) {
-                    // Send final timing update with currentTime = duration
-                    sendTimingUpdate(duration, duration, now.id);
-                  } else {
-                    // No valid duration from YouTube — send sentinel to force completion
-                    console.warn(
-                      "YouTube ended but no valid duration; sending sentinel timing update",
-                    );
-                    sendTimingUpdate(1, 1, now.id);
-                  }
+                  sendTimingUpdate(
+                    isValidDuration(duration) ? duration : 1,
+                    isValidDuration(duration) ? duration : 1,
+                    now.id,
+                  );
                 } catch (err) {
-                  console.error("Error sending final YouTube timing:", err);
-                  // If we can't get the duration after the video ends, still advance
-                  // to the next song so the session doesn't stall.
+                  console.error("Error sending final YouTube iframe timing:", err);
                   sendTimingUpdate(1, 1, now.id);
                 }
               }
             },
             onError: (event: any) => {
-              console.error("YouTube player error:", event.data);
+              console.error("YouTube iframe error:", {
+                code: event.data,
+                message: describeYouTubeIframeError(event.data),
+                videoId: youtubeVideoId,
+                url: now.external_url,
+                origin: window.location.origin,
+                referrer: document.referrer,
+                userAgent: navigator.userAgent,
+              });
               void fallbackYouTubeToDownloadedTrack(event.data);
             },
           },
         });
       } catch (err) {
-        console.error("Failed to initialize YouTube player:", err);
+        console.error("Failed to initialize YouTube iframe player:", err);
       }
     };
 
-    // Wait for iframe to be rendered in the DOM
-    setTimeout(initPlayer, INIT_DELAY);
+    const initTimer = setTimeout(initPlayer, 500);
 
     return () => {
+      clearTimeout(initTimer);
       if (youtubeTimerRef.current) {
         clearInterval(youtubeTimerRef.current);
+        youtubeTimerRef.current = null;
       }
       if (youtubePlayerRef.current) {
         try {
           youtubePlayerRef.current.stopVideo();
         } catch (err) {
-          console.warn("Failed to stop YouTube player in cleanup:", err);
+          console.warn("Failed to stop YouTube iframe player:", err);
         }
         youtubePlayerRef.current = null;
       }
@@ -1200,6 +1438,17 @@ export default function Player() {
     // But this won't affect an already-running countdown since we capture the value in a local variable
   }, [now, autoPlay, queuedCount, autoPlayDelay, manualStop]);
 
+  const breakMusicTrackText =
+    overlaySettings.showBreakMusicTrack &&
+    !now &&
+    !breakMusicState.paused &&
+    breakMusicState.currentTrack
+      ? `${breakMusicState.currentTrack.artist || "Unknown Artist"} — ${breakMusicState.currentTrack.title}`
+      : "";
+  const breakMusicTickerText = breakMusicTrackText
+    ? `Now Playing: ${breakMusicTrackText}`
+    : "";
+
   // Build ticker text with current singer and queue
   const tickerText = useMemo(() => {
     const rotationText = rotationScrollerSingers
@@ -1210,10 +1459,20 @@ export default function Player() {
           : `${idx + 1}. ${singer.displayName} (waiting)`,
       )
       .join(" • ");
-
     // If nothing is playing
     if (!now) {
       if (upNext.length === 0 && !rotationText) {
+        if (breakMusicTickerText) {
+          const fullText = overlaySettings.customMessage
+            ? `${breakMusicTickerText} 📢 ${overlaySettings.customMessage}`
+            : breakMusicTickerText;
+          return `${fullText}     🎵     ${fullText}     🎵     `;
+        }
+        if (isCustomPlayerBackground) {
+          return overlaySettings.customMessage
+            ? `📢 ${overlaySettings.customMessage}     🎵     📢 ${overlaySettings.customMessage}     🎵     `
+            : "";
+        }
         // Show custom message at end if set, otherwise waiting message
         if (overlaySettings.customMessage) {
           return `🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     `;
@@ -1240,9 +1499,12 @@ export default function Player() {
           : "";
 
       // Add custom message at the end if set
+      const idleNowPlaying = breakMusicTickerText
+        ? `${breakMusicTickerText} • `
+        : "";
       const fullText = overlaySettings.customMessage
-        ? `${countdownInfo}🎤 QUEUE: ${queueText} 📢 ${overlaySettings.customMessage}`
-        : `${countdownInfo}🎤 QUEUE: ${queueText}`;
+        ? `${countdownInfo}${idleNowPlaying}🎤 QUEUE: ${queueText} 📢 ${overlaySettings.customMessage}`
+        : `${countdownInfo}${idleNowPlaying}🎤 QUEUE: ${queueText}`;
       return `${fullText}     🎵     ${fullText}     🎵     `;
     }
 
@@ -1287,6 +1549,8 @@ export default function Player() {
     autoPlay,
     countdown,
     manualStop,
+    isCustomPlayerBackground,
+    breakMusicTickerText,
   ]);
 
   // Render the overlay (shown always, unless visibility is false)
@@ -1393,7 +1657,7 @@ export default function Player() {
                   letterSpacing: "0.5px",
                 }}
               >
-                {tickerText}
+                {renderTickerText(tickerText, breakMusicTrackText)}
               </div>
             </div>
           )}
@@ -1460,7 +1724,7 @@ export default function Player() {
             position: "relative",
             height: "100vh",
             width: "100vw",
-            background: "#000",
+            ...playerBackgroundStyle,
             color: "#e5e7eb",
             display: "grid",
             placeItems: "center",
@@ -1473,10 +1737,13 @@ export default function Player() {
             preload="auto"
             style={{ display: "none" }}
           />
+          {renderPlayerBackground()}
           {/* Show waiting screen - queue is displayed in the roller overlay */}
           {upNext.length > 0 ? (
             <div
               style={{
+                position: "relative",
+                zIndex: 1,
                 textAlign: "center",
                 padding: "20px",
                 display: "flex",
@@ -1544,9 +1811,14 @@ export default function Player() {
                 )}
               </div>
             </div>
-          ) : (
+          ) : isCustomPlayerBackground ? null : (
             <div
-              style={{ textAlign: "center", animation: "fadeInUp 0.6s ease" }}
+              style={{
+                position: "relative",
+                zIndex: 1,
+                textAlign: "center",
+                animation: "fadeInUp 0.6s ease",
+              }}
             >
               <h1
                 style={{
@@ -1682,22 +1954,22 @@ export default function Player() {
           position: "relative",
           height: "100vh",
           width: "100vw",
-          background: "#000",
+          ...playerBackgroundStyle,
           color: "#e5e7eb",
           overflow: "hidden",
           cursor: showControls ? "default" : "none",
         }}
       >
         <audio ref={breakAudioRef} preload="auto" style={{ display: "none" }} />
-        {/* YouTube iframe for YouTube videos */}
+        {renderPlayerBackground()}
         {isYouTube && youtubeVideoId ? (
           <iframe
             key={youtubeVideoId}
             id={`youtube-player-${youtubeVideoId}`}
             ref={iframeRef}
-            src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=1&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`}
+            src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=1&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&widget_referrer=${encodeURIComponent(window.location.href)}`}
             referrerPolicy="strict-origin-when-cross-origin"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
             allowFullScreen
             style={{
               position: "absolute",
@@ -1710,11 +1982,15 @@ export default function Player() {
             }}
           />
         ) : (
-          // Video element for local and non-YouTube videos
           <video
             ref={videoRef}
             autoPlay
             playsInline
+            onError={() => {
+              if (now?.external_url && getYouTubeVideoId(now.external_url)) {
+                void fallbackYouTubeToDownloadedTrack("stream");
+              }
+            }}
             style={{
               position: "absolute",
               top: 0,
@@ -1728,7 +2004,7 @@ export default function Player() {
         )}
 
         {/* Play button overlay when autoplay is blocked (only for video element) */}
-        {!isYouTube && needsUserInteraction && !isPlaying && (
+        {needsUserInteraction && !isPlaying && (
           <div className="play-button-overlay" onClick={handlePlayClick}>
             <div className="play-icon" />
           </div>

@@ -38,6 +38,7 @@ type QueueSong = {
 
 type QueueSinger = {
   singerId: string
+  publicUuid?: string | null
   displayName: string
   status: string
   rotationPosition: number | null
@@ -120,6 +121,52 @@ type OidcPublicConfig = {
   buttonText: string
   buttonColor: string
   passwordLoginEnabled: boolean
+}
+
+type PlayerBackgroundMode = 'default' | 'image' | 'slideshow'
+type PlayerBackgroundTransitionStyle = 'fade' | 'slide' | 'zoom'
+
+type PlayerBackgroundSlideshowImage = {
+  id: string
+  filename?: string | null
+  imageUrl: string
+  updatedAt: string
+}
+
+type PlayerBackgroundLibraryImage = {
+  filename: string
+  imageUrl: string
+  updatedAt: string
+  size: number
+}
+
+type PlayerBackgroundSettings = {
+  mode: PlayerBackgroundMode
+  imageUrl: string | null
+  imageFilename: string | null
+  updatedAt: string | null
+  slideshowImages: PlayerBackgroundSlideshowImage[]
+  slideshowTransitionStyle: PlayerBackgroundTransitionStyle
+  slideshowIntervalSeconds: number
+  slideshowTransitionDurationSeconds: number
+}
+
+const PLAYER_BACKGROUND_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+const PLAYER_BACKGROUND_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS = 3
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS = 300
+const PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS = 0.5
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS = 10
+
+const DEFAULT_PLAYER_BACKGROUND_SETTINGS: PlayerBackgroundSettings = {
+  mode: 'default',
+  imageUrl: null,
+  imageFilename: null,
+  updatedAt: null,
+  slideshowImages: [],
+  slideshowTransitionStyle: 'fade',
+  slideshowIntervalSeconds: 10,
+  slideshowTransitionDurationSeconds: 3,
 }
 
 function MaterialIcon({
@@ -259,6 +306,80 @@ function getInitialHostTopCollapsed(): boolean {
   return window.localStorage.getItem(HOST_TOP_COLLAPSED_STORAGE_KEY) === 'true'
 }
 
+function normalizePlayerBackgroundSettings(value: unknown): PlayerBackgroundSettings {
+  if (!value || typeof value !== 'object') {
+    return DEFAULT_PLAYER_BACKGROUND_SETTINGS
+  }
+  const settings = value as Partial<PlayerBackgroundSettings>
+  const imageUrl = typeof settings.imageUrl === 'string' && settings.imageUrl.trim()
+    ? settings.imageUrl
+    : null
+  const slideshowImages = Array.isArray(settings.slideshowImages)
+    ? settings.slideshowImages.filter((image): image is PlayerBackgroundSlideshowImage => (
+      !!image &&
+      typeof image.id === 'string' &&
+      (image.filename == null || typeof image.filename === 'string') &&
+      typeof image.imageUrl === 'string' &&
+      typeof image.updatedAt === 'string'
+    ))
+    : []
+  const mode =
+    settings.mode === 'image' && imageUrl
+      ? 'image'
+      : settings.mode === 'slideshow' && slideshowImages.length > 0
+        ? 'slideshow'
+        : 'default'
+  const interval = Number(settings.slideshowIntervalSeconds)
+  const transitionDuration = Number(settings.slideshowTransitionDurationSeconds)
+  return {
+    mode,
+    imageUrl,
+    imageFilename: typeof settings.imageFilename === 'string' && settings.imageFilename.trim()
+      ? settings.imageFilename
+      : null,
+    updatedAt: typeof settings.updatedAt === 'string' && settings.updatedAt.trim()
+      ? settings.updatedAt
+      : null,
+    slideshowImages,
+    slideshowTransitionStyle:
+      settings.slideshowTransitionStyle === 'slide' || settings.slideshowTransitionStyle === 'zoom'
+        ? settings.slideshowTransitionStyle
+        : 'fade',
+    slideshowIntervalSeconds: Number.isFinite(interval)
+      ? Math.max(
+        PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS,
+        Math.min(PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS, Math.round(interval)),
+      )
+      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowIntervalSeconds,
+    slideshowTransitionDurationSeconds: Number.isFinite(transitionDuration)
+      ? Math.max(
+        PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS,
+        Math.min(
+          PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS,
+          Math.round(transitionDuration * 10) / 10,
+        ),
+      )
+      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowTransitionDurationSeconds,
+  }
+}
+
+function getApiAssetUrl(pathOrUrl: string | null): string | null {
+  if (!pathOrUrl) return null
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl
+  return `${API_BASE}${pathOrUrl}`
+}
+
+function isPlayerBackgroundLibraryImage(value: unknown): value is PlayerBackgroundLibraryImage {
+  if (!value || typeof value !== 'object') return false
+  const image = value as Partial<PlayerBackgroundLibraryImage>
+  return (
+    typeof image.filename === 'string' &&
+    typeof image.imageUrl === 'string' &&
+    typeof image.updatedAt === 'string' &&
+    typeof image.size === 'number'
+  )
+}
+
 export default function Host() {
   const auth = useAuth()
   const [queue, setQueue] = useState<Row[]>([])
@@ -291,6 +412,20 @@ export default function Host() {
   const [hideSingerQueue, setHideSingerQueue] = useState(false)
   const [keepRotationScrollerSingers, setKeepRotationScrollerSingers] = useState(false)
   const [showRequestsUrl, setShowRequestsUrl] = useState(true)
+  const [showBreakMusicTrack, setShowBreakMusicTrack] = useState(false)
+  const [playerBackgroundMode, setPlayerBackgroundMode] = useState<PlayerBackgroundMode>('default')
+  const [playerBackgroundImageUrl, setPlayerBackgroundImageUrl] = useState<string | null>(null)
+  const [playerBackgroundImageFilename, setPlayerBackgroundImageFilename] = useState<string | null>(null)
+  const [playerBackgroundUpdatedAt, setPlayerBackgroundUpdatedAt] = useState<string | null>(null)
+  const [playerBackgroundLibraryImages, setPlayerBackgroundLibraryImages] = useState<PlayerBackgroundLibraryImage[]>([])
+  const [playerBackgroundImageUploadDir, setPlayerBackgroundImageUploadDir] = useState('/media/images')
+  const [playerBackgroundLibraryLoading, setPlayerBackgroundLibraryLoading] = useState(false)
+  const [playerBackgroundSlideshowImages, setPlayerBackgroundSlideshowImages] = useState<PlayerBackgroundSlideshowImage[]>([])
+  const [playerBackgroundSlideshowTransitionStyle, setPlayerBackgroundSlideshowTransitionStyle] = useState<PlayerBackgroundTransitionStyle>('fade')
+  const [playerBackgroundSlideshowIntervalSeconds, setPlayerBackgroundSlideshowIntervalSeconds] = useState(10)
+  const [playerBackgroundSlideshowTransitionDurationSeconds, setPlayerBackgroundSlideshowTransitionDurationSeconds] = useState(3)
+  const [playerBackgroundUploading, setPlayerBackgroundUploading] = useState(false)
+  const [playerBackgroundError, setPlayerBackgroundError] = useState('')
   const [showPlayerWindowControl, setShowPlayerWindowControl] = useState(false)
   const [showAccountManagement, setShowAccountManagement] = useState(false)
   const [hostTopCollapsed, setHostTopCollapsed] = useState(() => getInitialHostTopCollapsed())
@@ -403,15 +538,31 @@ export default function Host() {
   const breakPlaylistSyncRequestRef = useRef(0)
   const breakVolumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hostHistoryImportInputRef = useRef<HTMLInputElement | null>(null)
+  const playerBackgroundImageInputRef = useRef<HTMLInputElement | null>(null)
+  const playerBackgroundSlideshowLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const headers = useMemo(() => ({ 'x-session-token': auth.sessionToken, 'Content-Type': 'application/json' }), [auth.sessionToken])
+  const playerBackgroundPreviewUrl = useMemo(() => getApiAssetUrl(playerBackgroundImageUrl), [playerBackgroundImageUrl])
+  const playerBackgroundLibraryPreviewUrls = useMemo(
+    () => playerBackgroundLibraryImages.map((image) => ({ ...image, imageUrl: getApiAssetUrl(image.imageUrl) || image.imageUrl })),
+    [playerBackgroundLibraryImages],
+  )
+  const playerBackgroundSlideshowPreviewUrls = useMemo(
+    () => playerBackgroundSlideshowImages.map((image) => ({ ...image, imageUrl: getApiAssetUrl(image.imageUrl) || image.imageUrl })),
+    [playerBackgroundSlideshowImages],
+  )
   const manualSingerSuggestions = useMemo(() => {
     const normalizedQuery = manualRequestName.trim().toLocaleLowerCase()
     const seen = new Set<string>()
 
     return (queueState?.queueOrder ?? [])
-      .map((singer) => singer.displayName.trim())
-      .filter((name) => {
+      .map((singer) => ({
+        singerId: singer.singerId,
+        publicUuid: singer.publicUuid ?? null,
+        displayName: singer.displayName.trim(),
+      }))
+      .filter((singer) => {
+        const name = singer.displayName
         if (!name) return false
         const normalizedName = name.toLocaleLowerCase()
         if (seen.has(normalizedName)) return false
@@ -419,10 +570,10 @@ export default function Host() {
         return !normalizedQuery || normalizedName.includes(normalizedQuery)
       })
       .sort((a, b) => {
-        const aStarts = a.toLocaleLowerCase().startsWith(normalizedQuery)
-        const bStarts = b.toLocaleLowerCase().startsWith(normalizedQuery)
+        const aStarts = a.displayName.toLocaleLowerCase().startsWith(normalizedQuery)
+        const bStarts = b.displayName.toLocaleLowerCase().startsWith(normalizedQuery)
         if (aStarts !== bStarts) return aStarts ? -1 : 1
-        return a.localeCompare(b)
+        return a.displayName.localeCompare(b.displayName)
       })
       .slice(0, 8)
   }, [manualRequestName, queueState])
@@ -1480,7 +1631,9 @@ export default function Host() {
     if (!sourceName) { setMergeSingerError('Enter a singer name to merge'); return }
     // Find singer id by name
     const allSingers = queueState?.queueOrder ?? []
-    const matchedSinger = allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase())
+    const matchedSinger =
+      allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase() && s.singerId !== selectedSingerId) ??
+      allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase())
     if (!matchedSinger) { setMergeSingerError(`Singer "${sourceName}" not found`); return }
     if (matchedSinger.singerId === selectedSingerId) { setMergeSingerError('Cannot merge a singer with themselves'); return }
     setMergingSinger(true)
@@ -1721,7 +1874,7 @@ export default function Host() {
   // Fetch initial overlay settings
   useEffect(() => {
     api('/api/overlay/settings')
-      .then((settings: { visible: boolean; height: number; qrSize: number; customMessage: string; showRoller: boolean; showQrCode: boolean; hideSingerQueue: boolean; keepRotationScrollerSingers: boolean; showRequestsUrl: boolean }) => {
+      .then((settings: { visible: boolean; height: number; qrSize: number; customMessage: string; showRoller: boolean; showQrCode: boolean; hideSingerQueue: boolean; keepRotationScrollerSingers: boolean; showRequestsUrl: boolean; showBreakMusicTrack: boolean }) => {
         setOverlayVisible(settings.visible)
         setOverlayHeight(settings.height)
         setQrSize(settings.qrSize)
@@ -1731,9 +1884,22 @@ export default function Host() {
         setHideSingerQueue(settings.hideSingerQueue ?? false)
         setKeepRotationScrollerSingers(settings.keepRotationScrollerSingers ?? false)
         setShowRequestsUrl(settings.showRequestsUrl ?? true)
+        setShowBreakMusicTrack(settings.showBreakMusicTrack ?? false)
       })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    api('/api/player/background/settings')
+      .then(applyPlayerBackgroundSettings)
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    loadPlayerBackgroundLibraryImages()
+  }, [auth.sessionToken, auth.isLoggedIn])
+
+  useEffect(() => () => clearPlayerBackgroundSlideshowLongPressTimer(), [])
 
   async function updateOverlaySettings(
     visible: boolean,
@@ -1745,6 +1911,7 @@ export default function Host() {
     hideSingerQueueVal?: boolean,
     keepRotationScrollerSingersVal?: boolean,
     showRequestsUrlVal?: boolean,
+    showBreakMusicTrackVal?: boolean,
   ) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     try {
@@ -1761,10 +1928,269 @@ export default function Host() {
           hideSingerQueue: hideSingerQueueVal ?? hideSingerQueue,
           keepRotationScrollerSingers: keepRotationScrollerSingersVal ?? keepRotationScrollerSingers,
           showRequestsUrl: showRequestsUrlVal ?? showRequestsUrl,
+          showBreakMusicTrack: showBreakMusicTrackVal ?? showBreakMusicTrack,
         })
       })
     } catch (err) {
       console.error('Failed to update overlay settings:', err)
+    }
+  }
+
+  function applyPlayerBackgroundSettings(settings: unknown) {
+    const normalized = normalizePlayerBackgroundSettings(settings)
+    setPlayerBackgroundMode(normalized.mode)
+    setPlayerBackgroundImageUrl(normalized.imageUrl)
+    setPlayerBackgroundImageFilename(normalized.imageFilename)
+    setPlayerBackgroundUpdatedAt(normalized.updatedAt)
+    setPlayerBackgroundSlideshowImages(normalized.slideshowImages)
+    setPlayerBackgroundSlideshowTransitionStyle(normalized.slideshowTransitionStyle)
+    setPlayerBackgroundSlideshowIntervalSeconds(normalized.slideshowIntervalSeconds)
+    setPlayerBackgroundSlideshowTransitionDurationSeconds(normalized.slideshowTransitionDurationSeconds)
+  }
+
+  async function loadPlayerBackgroundLibraryImages() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setPlayerBackgroundLibraryLoading(true)
+    try {
+      const result = await api('/api/player/background/library-images', { headers })
+      const images = Array.isArray(result?.images)
+        ? result.images.filter(isPlayerBackgroundLibraryImage)
+        : []
+      setPlayerBackgroundLibraryImages(images)
+      if (typeof result?.uploadDir === 'string' && result.uploadDir.trim()) {
+        setPlayerBackgroundImageUploadDir(result.uploadDir)
+      }
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to load image directory')
+    } finally {
+      setPlayerBackgroundLibraryLoading(false)
+    }
+  }
+
+  async function updatePlayerBackgroundSettings(updates: {
+    mode?: PlayerBackgroundMode
+    slideshowTransitionStyle?: PlayerBackgroundTransitionStyle
+    slideshowIntervalSeconds?: number
+    slideshowTransitionDurationSeconds?: number
+  }) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    const previous = {
+      mode: playerBackgroundMode,
+      slideshowTransitionStyle: playerBackgroundSlideshowTransitionStyle,
+      slideshowIntervalSeconds: playerBackgroundSlideshowIntervalSeconds,
+      slideshowTransitionDurationSeconds: playerBackgroundSlideshowTransitionDurationSeconds,
+    }
+    if (updates.mode) setPlayerBackgroundMode(updates.mode)
+    if (updates.slideshowTransitionStyle) setPlayerBackgroundSlideshowTransitionStyle(updates.slideshowTransitionStyle)
+    if (typeof updates.slideshowIntervalSeconds === 'number') {
+      setPlayerBackgroundSlideshowIntervalSeconds(updates.slideshowIntervalSeconds)
+    }
+    if (typeof updates.slideshowTransitionDurationSeconds === 'number') {
+      setPlayerBackgroundSlideshowTransitionDurationSeconds(updates.slideshowTransitionDurationSeconds)
+    }
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api('/api/player/background/settings', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          mode: updates.mode,
+          slideshowTransitionStyle: updates.slideshowTransitionStyle,
+          slideshowIntervalSeconds: updates.slideshowIntervalSeconds,
+          slideshowTransitionDurationSeconds: updates.slideshowTransitionDurationSeconds,
+        }),
+      })
+      applyPlayerBackgroundSettings(settings)
+    } catch (err: any) {
+      setPlayerBackgroundMode(previous.mode)
+      setPlayerBackgroundSlideshowTransitionStyle(previous.slideshowTransitionStyle)
+      setPlayerBackgroundSlideshowIntervalSeconds(previous.slideshowIntervalSeconds)
+      setPlayerBackgroundSlideshowTransitionDurationSeconds(previous.slideshowTransitionDurationSeconds)
+      setPlayerBackgroundError(err?.message || 'Failed to update player background')
+    }
+  }
+
+  function choosePlayerBackgroundMode(mode: PlayerBackgroundMode) {
+    if (
+      (mode === 'image' && !playerBackgroundImageUrl) ||
+      (mode === 'slideshow' && playerBackgroundSlideshowImages.length === 0)
+    ) {
+      setPlayerBackgroundMode(mode)
+      setPlayerBackgroundError('')
+      return
+    }
+    updatePlayerBackgroundSettings({ mode })
+  }
+
+  async function uploadPlayerBackgroundImage(file: File) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!PLAYER_BACKGROUND_IMAGE_TYPES.has(file.type)) {
+      setPlayerBackgroundError('Choose a PNG, JPEG, WebP, or GIF image.')
+      return
+    }
+    if (file.size > PLAYER_BACKGROUND_IMAGE_MAX_BYTES) {
+      setPlayerBackgroundError('Choose an image smaller than 8 MB.')
+      return
+    }
+
+    setPlayerBackgroundUploading(true)
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api('/api/player/background/image', {
+        method: 'POST',
+        headers: {
+          'x-session-token': auth.sessionToken,
+          'Content-Type': file.type,
+        },
+        body: file,
+      })
+      applyPlayerBackgroundSettings(settings)
+      await loadPlayerBackgroundLibraryImages()
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to upload player background image')
+    } finally {
+      setPlayerBackgroundUploading(false)
+    }
+  }
+
+  async function uploadPlayerBackgroundSlideshowImages(files: File[]) {
+    if (!auth.sessionToken || !auth.isLoggedIn || files.length === 0) return
+    const invalidFile = files.find((file) => !PLAYER_BACKGROUND_IMAGE_TYPES.has(file.type))
+    if (invalidFile) {
+      setPlayerBackgroundError(`${invalidFile.name} is not a PNG, JPEG, WebP, or GIF image.`)
+      return
+    }
+    const oversizedFile = files.find((file) => file.size > PLAYER_BACKGROUND_IMAGE_MAX_BYTES)
+    if (oversizedFile) {
+      setPlayerBackgroundError(`${oversizedFile.name} is larger than 8 MB.`)
+      return
+    }
+
+    setPlayerBackgroundUploading(true)
+    setPlayerBackgroundError('')
+    try {
+      let latestSettings: unknown = null
+      for (const file of files) {
+        latestSettings = await api('/api/player/background/slideshow-images', {
+          method: 'POST',
+          headers: {
+            'x-session-token': auth.sessionToken,
+            'Content-Type': file.type,
+          },
+          body: file,
+        })
+      }
+      if (latestSettings) {
+        applyPlayerBackgroundSettings(latestSettings)
+      }
+      await loadPlayerBackgroundLibraryImages()
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to upload slideshow images')
+    } finally {
+      setPlayerBackgroundUploading(false)
+    }
+  }
+
+  async function clearPlayerBackgroundImage() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api('/api/player/background/image', {
+        method: 'DELETE',
+        headers,
+      })
+      applyPlayerBackgroundSettings(settings)
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to remove player background image')
+    }
+  }
+
+  async function clearPlayerBackgroundSlideshowImages() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api('/api/player/background/slideshow-images', {
+        method: 'DELETE',
+        headers,
+      })
+      applyPlayerBackgroundSettings(settings)
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to clear slideshow images')
+    }
+  }
+
+  function clearPlayerBackgroundSlideshowLongPressTimer() {
+    if (playerBackgroundSlideshowLongPressTimerRef.current) {
+      clearTimeout(playerBackgroundSlideshowLongPressTimerRef.current)
+      playerBackgroundSlideshowLongPressTimerRef.current = null
+    }
+  }
+
+  function confirmRemovePlayerBackgroundSlideshowImage(imageId: string) {
+    if (window.confirm('Remove this slideshow image?')) {
+      removePlayerBackgroundSlideshowImage(imageId)
+    }
+  }
+
+  function startPlayerBackgroundSlideshowImageLongPress(imageId: string) {
+    clearPlayerBackgroundSlideshowLongPressTimer()
+    playerBackgroundSlideshowLongPressTimerRef.current = setTimeout(() => {
+      playerBackgroundSlideshowLongPressTimerRef.current = null
+      confirmRemovePlayerBackgroundSlideshowImage(imageId)
+    }, 650)
+  }
+
+  function startPlayerBackgroundStaticImageLongPress() {
+    clearPlayerBackgroundSlideshowLongPressTimer()
+    playerBackgroundSlideshowLongPressTimerRef.current = setTimeout(() => {
+      playerBackgroundSlideshowLongPressTimerRef.current = null
+      if (window.confirm('Remove this static background image?')) {
+        clearPlayerBackgroundImage()
+      }
+    }, 650)
+  }
+
+  async function removePlayerBackgroundSlideshowImage(imageId: string) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api(`/api/player/background/slideshow-images/${encodeURIComponent(imageId)}`, {
+        method: 'DELETE',
+        headers,
+      })
+      applyPlayerBackgroundSettings(settings)
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to remove slideshow image')
+    }
+  }
+
+  async function selectPlayerBackgroundLibraryImage(filename: string) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api('/api/player/background/image/select', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ filename }),
+      })
+      applyPlayerBackgroundSettings(settings)
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to select background image')
+    }
+  }
+
+  async function addPlayerBackgroundLibraryImageToSlideshow(filename: string) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setPlayerBackgroundError('')
+    try {
+      const settings = await api('/api/player/background/slideshow-images/select', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ filename }),
+      })
+      applyPlayerBackgroundSettings(settings)
+    } catch (err: any) {
+      setPlayerBackgroundError(err?.message || 'Failed to add image to slideshow')
     }
   }
 
@@ -1884,6 +2310,8 @@ export default function Host() {
               if (typeof msg.delay === 'number') {
                 setAutoPlayDelay(msg.delay)
               }
+            } else if (msg.type === 'player.background.settings') {
+              applyPlayerBackgroundSettings(msg)
             }
           } catch {}
         }
@@ -2066,7 +2494,7 @@ export default function Host() {
     }
   }
 
-  async function replaceSongWithKaraokeNerds(queueId: number, track: { title: string; artist: string; url: string }) {
+  async function replaceSongWithKaraokeNerds(queueId: number, track: { title: string; artist: string; url: string; brand?: string }) {
     if (! auth.sessionToken || !auth.isLoggedIn) return
 
     setBusy(true)
@@ -2081,6 +2509,7 @@ export default function Host() {
             artist: track.artist,
             url: track.url,
             source: 'karaoke-nerds',
+            brand: track.brand || null,
           },
         })
       })
@@ -2156,10 +2585,25 @@ export default function Host() {
     setManualRequestForSingerId(null)
   }
 
-  function selectManualRequestSinger(name: string) {
-    setManualRequestName(name)
+  function selectManualRequestSinger(singer: { displayName: string }) {
+    setManualRequestName(singer.displayName)
     setShowManualSingerSuggestions(false)
     setManualSingerHighlightIndex(0)
+  }
+
+  function getManualRequestSingerUuid(): string | null {
+    const normalizedName = manualRequestName.trim().toLocaleLowerCase()
+    if (!normalizedName) return null
+
+    const selectedById = manualRequestForSingerId
+      ? (queueState?.queueOrder ?? []).find((singer) => singer.singerId === manualRequestForSingerId)
+      : null
+    if (selectedById?.publicUuid) return selectedById.publicUuid
+
+    const selectedByName = (queueState?.queueOrder ?? []).find(
+      (singer) => singer.displayName.trim().toLocaleLowerCase() === normalizedName && singer.publicUuid,
+    )
+    return selectedByName?.publicUuid ?? null
   }
 
   // Add manual request to queue - Local track
@@ -2173,7 +2617,8 @@ export default function Host() {
         headers,
         body: JSON.stringify({
           trackId,
-          requestedBy: manualRequestName || null
+          requestedBy: manualRequestName || null,
+          singerUuid: getManualRequestSingerUuid(),
         })
       })
 
@@ -2185,7 +2630,7 @@ export default function Host() {
   }
 
   // Add manual request to queue - External (Karaoke Nerds) track
-  async function addManualRequestExternal(track: { title: string; artist: string; url: string }) {
+  async function addManualRequestExternal(track: { title: string; artist: string; url: string; brand?: string }) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
 
     setBusy(true)
@@ -2197,7 +2642,9 @@ export default function Host() {
           title: track.title,
           artist: track.artist,
           url: track.url,
-          requestedBy: manualRequestName || null
+          brand: track.brand || null,
+          requestedBy: manualRequestName || null,
+          singerUuid: getManualRequestSingerUuid(),
         })
       })
 
@@ -2261,7 +2708,9 @@ export default function Host() {
           title: manualRequestTitle || 'Video',
           artist: manualRequestArtist || 'Unknown',
           url: manualRequestUrl,
-          requestedBy: manualRequestName || null
+          requestedBy: manualRequestName || null,
+          discId: manualRequestDiscId || null,
+          singerUuid: getManualRequestSingerUuid(),
         })
       })
 
@@ -2952,6 +3401,35 @@ function closeDetails(e: React.SyntheticEvent) {
           flex-direction: column;
         }
 
+        @media (min-width: 769px) {
+          .player-settings-scroll {
+            margin-right: -8px;
+            padding-right: 12px;
+            scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+            scrollbar-width: thin;
+          }
+
+          .player-settings-scroll::-webkit-scrollbar {
+            width: 9px;
+          }
+
+          .player-settings-scroll::-webkit-scrollbar-track {
+            background: transparent;
+          }
+
+          .player-settings-scroll::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.45);
+            background-clip: content-box;
+            border: 2px solid transparent;
+            border-radius: 999px;
+          }
+
+          .player-settings-scroll::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.72);
+            background-clip: content-box;
+          }
+        }
+
         .break-manager-modal {
           width: min(96vw, 1180px);
           max-width: 1180px;
@@ -3281,6 +3759,17 @@ function closeDetails(e: React.SyntheticEvent) {
           font-weight: 600;
           margin-bottom: 16px;
           color: var(--color-text-primary);
+        }
+
+        .slideshow-thumb-remove {
+          opacity: 0;
+          pointer-events: none;
+        }
+
+        .slideshow-thumb:hover .slideshow-thumb-remove,
+        .slideshow-thumb:focus-within .slideshow-thumb-remove {
+          opacity: 1;
+          pointer-events: auto;
         }
 
         .slider-control {
@@ -4782,7 +5271,7 @@ function closeDetails(e: React.SyntheticEvent) {
                     </button>
                   </div>
 
-                  <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+                  <div className="player-settings-scroll" style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
                   {/* Auto-play Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Auto-play Settings</div>
@@ -5013,6 +5502,491 @@ function closeDetails(e: React.SyntheticEvent) {
                           {breakMusicResumeDelay}s
                         </span>
                       </div>
+                    </div>
+                  </div>
+
+                  <div className="settings-section">
+                    <div className="settings-title">Player Background</div>
+                    <div style={{
+                      padding: '16px',
+                      background: 'var(--color-bg-secondary)',
+                      borderRadius: '12px',
+                      border: '1px solid var(--color-border)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '14px'
+                    }}>
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                        gap: '10px'
+                      }}>
+                        {([
+                          ['default', 'Default splash', 'Use the built-in player splash.'],
+                          ['image', 'Static image', 'Show one selected image.'],
+                          ['slideshow', 'Slideshow', 'Rotate through selected images.'],
+                        ] as const).map(([mode, label, description]) => (
+                          <label
+                            key={mode}
+                            style={{
+                              display: 'flex',
+                              gap: '10px',
+                              alignItems: 'flex-start',
+                              cursor: 'pointer',
+                              padding: '12px',
+                              borderRadius: '10px',
+                              border: playerBackgroundMode === mode
+                                ? '2px solid var(--color-accent)'
+                                : '1px solid var(--color-border)',
+                              background: 'var(--color-bg-primary)'
+                            }}
+                          >
+                            <input
+                              type="radio"
+                              name="player-background"
+                              checked={playerBackgroundMode === mode}
+                              onChange={() => choosePlayerBackgroundMode(mode)}
+                              style={{ marginTop: '3px' }}
+                            />
+                            <span>
+                              <span style={{ display: 'block', fontSize: '14px', fontWeight: 600 }}>{label}</span>
+                              <span style={{ display: 'block', fontSize: '12px', color: 'var(--color-text-secondary)', marginTop: '3px' }}>
+                                {description}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+
+                      {playerBackgroundMode !== 'default' && (
+                        <>
+                          <input
+                            ref={playerBackgroundImageInputRef}
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp,image/gif"
+                            multiple={playerBackgroundMode === 'slideshow'}
+                            onChange={e => {
+                              const files = Array.from(e.target.files ?? [])
+                              if (playerBackgroundMode === 'slideshow') {
+                                uploadPlayerBackgroundSlideshowImages(files)
+                              } else if (files[0]) {
+                                uploadPlayerBackgroundImage(files[0])
+                              }
+                              e.currentTarget.value = ''
+                            }}
+                            style={{ display: 'none' }}
+                          />
+
+                          <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            gap: '10px',
+                            alignItems: 'center',
+                            flexWrap: 'wrap'
+                          }}>
+                            <div>
+                              <div style={{ fontSize: '14px', fontWeight: 600 }}>
+                                {playerBackgroundMode === 'image' ? 'Choose one image' : 'Choose slideshow images'}
+                              </div>
+                              <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginTop: '3px' }}>
+                                Select from the mapped directory or upload {playerBackgroundMode === 'image' ? 'an image' : 'more images'}.
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="control-btn primary"
+                              disabled={playerBackgroundUploading}
+                              onClick={() => playerBackgroundImageInputRef.current?.click()}
+                              style={{ padding: '9px 13px', fontSize: '13px' }}
+                            >
+                              <MaterialIcon name={playerBackgroundMode === 'image' ? 'image' : 'photo_library'} style={{ fontSize: 18 }} />
+                              {playerBackgroundUploading
+                                ? 'Uploading…'
+                                : playerBackgroundMode === 'image'
+                                  ? 'Upload Image'
+                                  : 'Upload Images'}
+                            </button>
+                          </div>
+
+                          {playerBackgroundMode === 'image' && playerBackgroundPreviewUrl && (
+                            <div
+                              className="slideshow-thumb"
+                              onTouchStart={startPlayerBackgroundStaticImageLongPress}
+                              onTouchEnd={clearPlayerBackgroundSlideshowLongPressTimer}
+                              onTouchCancel={clearPlayerBackgroundSlideshowLongPressTimer}
+                              onTouchMove={clearPlayerBackgroundSlideshowLongPressTimer}
+                              onContextMenu={e => e.preventDefault()}
+                              style={{
+                              position: 'relative',
+                              borderRadius: '10px',
+                              border: '2px solid var(--color-accent)',
+                              overflow: 'hidden',
+                              background: 'var(--color-bg-primary)'
+                              }}
+                            >
+                              <img
+                                key={playerBackgroundUpdatedAt || playerBackgroundPreviewUrl}
+                                src={playerBackgroundPreviewUrl}
+                                alt="Current player background"
+                                style={{ display: 'block', width: '100%', maxHeight: '180px', objectFit: 'cover' }}
+                              />
+                              <button
+                                type="button"
+                                className="slideshow-thumb-remove"
+                                title="Remove static background image"
+                                aria-label="Remove static background image"
+                                onClick={clearPlayerBackgroundImage}
+                                style={{
+                                  position: 'absolute',
+                                  top: '8px',
+                                  right: '8px',
+                                  width: '30px',
+                                  height: '30px',
+                                  borderRadius: '999px',
+                                  border: '1px solid rgba(255,255,255,0.55)',
+                                  background: 'rgba(15, 23, 42, 0.88)',
+                                  color: '#fff',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  cursor: 'pointer',
+                                  fontSize: '19px',
+                                  fontWeight: 700,
+                                  lineHeight: 1
+                                }}
+                              >
+                                ×
+                              </button>
+                              <div style={{
+                                position: 'absolute',
+                                left: '8px',
+                                bottom: '8px',
+                                maxWidth: 'calc(100% - 16px)',
+                                padding: '4px 8px',
+                                borderRadius: '6px',
+                                background: 'rgba(15, 23, 42, 0.82)',
+                                color: '#fff',
+                                fontSize: '12px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap'
+                              }}>
+                                {playerBackgroundImageFilename || 'Legacy uploaded image'}
+                              </div>
+                            </div>
+                          )}
+
+                          {playerBackgroundMode === 'slideshow' && playerBackgroundSlideshowPreviewUrls.length > 0 && (
+                            <div style={{
+                              padding: '12px',
+                              background: 'var(--color-bg-primary)',
+                              borderRadius: '10px',
+                              border: '1px solid var(--color-border)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '10px'
+                            }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
+                                <span style={{ fontSize: '13px', fontWeight: 600 }}>
+                                  {playerBackgroundSlideshowImages.length} selected image{playerBackgroundSlideshowImages.length === 1 ? '' : 's'}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="control-btn"
+                                  onClick={clearPlayerBackgroundSlideshowImages}
+                                  style={{ padding: '7px 10px', fontSize: '12px' }}
+                                >
+                                  Clear All
+                                </button>
+                              </div>
+                              <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))',
+                                gap: '8px'
+                              }}>
+                                {playerBackgroundSlideshowPreviewUrls.map((image, index) => (
+                                  <div
+                                    key={image.id}
+                                    className="slideshow-thumb"
+                                    onTouchStart={() => startPlayerBackgroundSlideshowImageLongPress(image.id)}
+                                    onTouchEnd={clearPlayerBackgroundSlideshowLongPressTimer}
+                                    onTouchCancel={clearPlayerBackgroundSlideshowLongPressTimer}
+                                    onTouchMove={clearPlayerBackgroundSlideshowLongPressTimer}
+                                    onContextMenu={e => e.preventDefault()}
+                                    style={{
+                                      position: 'relative',
+                                      aspectRatio: '16 / 9',
+                                      borderRadius: '8px',
+                                      overflow: 'hidden',
+                                      border: '1px solid var(--color-border)',
+                                      background: 'var(--color-bg-secondary)'
+                                    }}
+                                  >
+                                    <img
+                                      src={image.imageUrl}
+                                      alt={image.filename || `Slideshow image ${index + 1}`}
+                                      title={image.filename || `Slideshow image ${index + 1}`}
+                                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                                    />
+                                    <button
+                                      type="button"
+                                      className="slideshow-thumb-remove"
+                                      title="Remove slideshow image"
+                                      aria-label={`Remove slideshow image ${index + 1}`}
+                                      onClick={e => {
+                                        e.stopPropagation()
+                                        removePlayerBackgroundSlideshowImage(image.id)
+                                      }}
+                                      style={{
+                                        position: 'absolute',
+                                        top: '5px',
+                                        right: '5px',
+                                        width: '26px',
+                                        height: '26px',
+                                        borderRadius: '999px',
+                                        border: '1px solid rgba(255,255,255,0.55)',
+                                        background: 'rgba(15, 23, 42, 0.88)',
+                                        color: '#fff',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        cursor: 'pointer',
+                                        fontSize: '16px',
+                                        fontWeight: 700,
+                                        lineHeight: 1
+                                      }}
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                              <span style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                                Hover over an image to remove it, or press and hold on mobile.
+                              </span>
+                            </div>
+                          )}
+
+                          <div style={{
+                            padding: '14px',
+                            background: 'var(--color-bg-primary)',
+                            borderRadius: '10px',
+                            border: '1px solid var(--color-border)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '12px'
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                              <div>
+                                <div style={{ fontSize: '14px', fontWeight: 600 }}>Image Directory</div>
+                                <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginTop: '3px', wordBreak: 'break-word' }}>
+                                  {playerBackgroundImageUploadDir}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                className="control-btn"
+                                disabled={playerBackgroundLibraryLoading}
+                                onClick={loadPlayerBackgroundLibraryImages}
+                                style={{ padding: '8px 12px', fontSize: '12px' }}
+                              >
+                                <MaterialIcon name="refresh" style={{ fontSize: 16 }} />
+                                {playerBackgroundLibraryLoading ? 'Loading…' : 'Refresh'}
+                              </button>
+                            </div>
+
+                            {playerBackgroundLibraryPreviewUrls.length > 0 ? (
+                              <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))',
+                                gap: '10px'
+                              }}>
+                                {playerBackgroundLibraryPreviewUrls.map((image) => {
+                                  const selectedSlide = playerBackgroundSlideshowImages.find(
+                                    (slide) => slide.filename === image.filename,
+                                  )
+                                  const selected = playerBackgroundMode === 'image'
+                                    ? playerBackgroundImageFilename === image.filename
+                                    : !!selectedSlide
+                                  return (
+                                    <button
+                                      key={image.filename}
+                                      type="button"
+                                      onClick={() => {
+                                        if (playerBackgroundMode === 'image') {
+                                          if (selected) clearPlayerBackgroundImage()
+                                          else selectPlayerBackgroundLibraryImage(image.filename)
+                                        } else if (selectedSlide) {
+                                          removePlayerBackgroundSlideshowImage(selectedSlide.id)
+                                        } else {
+                                          addPlayerBackgroundLibraryImageToSlideshow(image.filename)
+                                        }
+                                      }}
+                                      style={{
+                                        position: 'relative',
+                                        padding: 0,
+                                        textAlign: 'left',
+                                        borderRadius: '10px',
+                                        border: selected
+                                          ? '2px solid var(--color-accent)'
+                                          : '1px solid var(--color-border)',
+                                        background: 'var(--color-bg-secondary)',
+                                        color: 'inherit',
+                                        overflow: 'hidden',
+                                        cursor: 'pointer'
+                                      }}
+                                    >
+                                      <img
+                                        src={image.imageUrl}
+                                        alt={image.filename}
+                                        title={image.filename}
+                                        style={{ display: 'block', width: '100%', aspectRatio: '16 / 9', objectFit: 'cover' }}
+                                      />
+                                      <div style={{
+                                        padding: '8px',
+                                        fontSize: '12px',
+                                        color: 'var(--color-text-secondary)',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap'
+                                      }}>
+                                        {image.filename}
+                                      </div>
+                                      {selected && (
+                                        <span style={{
+                                          position: 'absolute',
+                                          top: '6px',
+                                          right: '6px',
+                                          width: '25px',
+                                          height: '25px',
+                                          borderRadius: '999px',
+                                          background: 'rgba(15, 23, 42, 0.88)',
+                                          border: '1px solid rgba(255,255,255,0.55)',
+                                          color: '#fff',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          fontSize: '16px',
+                                          fontWeight: 700
+                                        }}>
+                                          ×
+                                        </span>
+                                      )}
+                                    </button>
+                                  )
+                                })}
+                              </div>
+                            ) : (
+                              <div style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>
+                                No images found. Upload an image or add files to the mapped directory.
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                      {playerBackgroundMode === 'slideshow' && (
+                        <div style={{
+                          padding: '14px',
+                          background: 'var(--color-bg-primary)',
+                          borderRadius: '10px',
+                          border: '1px solid var(--color-border)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '14px'
+                        }}>
+                          <div>
+                            <label className="form-label">Transition style</label>
+                            <select
+                              className="form-input"
+                              value={playerBackgroundSlideshowTransitionStyle}
+                              onChange={e => {
+                                const nextStyle = e.target.value as PlayerBackgroundTransitionStyle
+                                setPlayerBackgroundSlideshowTransitionStyle(nextStyle)
+                                updatePlayerBackgroundSettings({ slideshowTransitionStyle: nextStyle })
+                              }}
+                              style={{ marginBottom: 0 }}
+                            >
+                              <option value="fade">Fade</option>
+                              <option value="slide">Slide + fade</option>
+                              <option value="zoom">Zoom + fade</option>
+                            </select>
+                          </div>
+
+                          <div>
+                            <label className="form-label" style={{ marginBottom: '12px' }}>
+                              Fade duration: <strong>{playerBackgroundSlideshowTransitionDurationSeconds.toFixed(1)}</strong> seconds
+                            </label>
+                            <div className="slider-control">
+                              <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>0.5s</span>
+                              <input
+                                type="range"
+                                className="slider"
+                                value={playerBackgroundSlideshowTransitionDurationSeconds}
+                                min={PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS}
+                                max={PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS}
+                                step="0.5"
+                                onChange={e => setPlayerBackgroundSlideshowTransitionDurationSeconds(parseFloat(e.target.value))}
+                                onMouseUp={() => updatePlayerBackgroundSettings({ slideshowTransitionDurationSeconds: playerBackgroundSlideshowTransitionDurationSeconds })}
+                                onTouchEnd={() => updatePlayerBackgroundSettings({ slideshowTransitionDurationSeconds: playerBackgroundSlideshowTransitionDurationSeconds })}
+                                style={{ margin: '0 12px', flex: 1 }}
+                              />
+                              <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>10s</span>
+                              <span style={{
+                                minWidth: '50px',
+                                textAlign: 'center',
+                                padding: '4px 8px',
+                                background: 'var(--color-bg-secondary)',
+                                borderRadius: '6px',
+                                fontSize: '13px',
+                                fontWeight: '600',
+                                marginLeft: '12px'
+                              }}>
+                                {playerBackgroundSlideshowTransitionDurationSeconds.toFixed(1)}s
+                              </span>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="form-label" style={{ marginBottom: '12px' }}>
+                              Time between pictures: <strong>{playerBackgroundSlideshowIntervalSeconds}</strong> seconds
+                            </label>
+                            <div className="slider-control">
+                              <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>3s</span>
+                              <input
+                                type="range"
+                                className="slider"
+                                value={playerBackgroundSlideshowIntervalSeconds}
+                                min={PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS}
+                                max={PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS}
+                                onChange={e => setPlayerBackgroundSlideshowIntervalSeconds(parseInt(e.target.value, 10))}
+                                onMouseUp={() => updatePlayerBackgroundSettings({ slideshowIntervalSeconds: playerBackgroundSlideshowIntervalSeconds })}
+                                onTouchEnd={() => updatePlayerBackgroundSettings({ slideshowIntervalSeconds: playerBackgroundSlideshowIntervalSeconds })}
+                                style={{ margin: '0 12px', flex: 1 }}
+                              />
+                              <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>300s</span>
+                              <span style={{
+                                minWidth: '50px',
+                                textAlign: 'center',
+                                padding: '4px 8px',
+                                background: 'var(--color-bg-secondary)',
+                                borderRadius: '6px',
+                                fontSize: '13px',
+                                fontWeight: '600',
+                                marginLeft: '12px'
+                              }}>
+                                {playerBackgroundSlideshowIntervalSeconds}s
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {playerBackgroundError && (
+                        <div style={{ fontSize: '13px', color: '#fca5a5' }}>
+                          {playerBackgroundError}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -5267,6 +6241,57 @@ function closeDetails(e: React.SyntheticEvent) {
                                 fontSize: '14px', fontWeight: '500', minWidth: '60px'
                               }}>
                                 {showRequestsUrl ? 'Visible' : 'Hidden'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+                            <div>
+                              <span style={{ fontSize: '14px', fontWeight: '500' }}>Show Break Music Track</span>
+                              <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginTop: '2px' }}>
+                                Show the current break track in the scroller while no singer is performing.
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
+                              <label style={{ position: 'relative', display: 'inline-block', width: '48px', height: '24px' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={showBreakMusicTrack}
+                                  onChange={e => {
+                                    const val = e.target.checked
+                                    setShowBreakMusicTrack(val)
+                                    updateOverlaySettings(
+                                      overlayVisible,
+                                      overlayHeight,
+                                      qrSize,
+                                      undefined,
+                                      showRoller,
+                                      showQrCode,
+                                      hideSingerQueue,
+                                      keepRotationScrollerSingers,
+                                      showRequestsUrl,
+                                      val,
+                                    )
+                                  }}
+                                  style={{ opacity: 0, width: 0, height: 0 }}
+                                />
+                                <span style={{
+                                  position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
+                                  backgroundColor: showBreakMusicTrack ? '#10b981' : '#374151',
+                                  transition: '.4s', borderRadius: '34px'
+                                }}>
+                                  <span style={{
+                                    position: 'absolute', height: '16px', width: '16px',
+                                    left: showBreakMusicTrack ? '28px' : '4px', bottom: '4px',
+                                    backgroundColor: 'white', transition: '.4s', borderRadius: '50%'
+                                  }}></span>
+                                </span>
+                              </label>
+                              <span style={{
+                                color: showBreakMusicTrack ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                                fontSize: '14px', fontWeight: '500', minWidth: '60px'
+                              }}>
+                                {showBreakMusicTrack ? 'Visible' : 'Hidden'}
                               </span>
                             </div>
                           </div>
@@ -6297,17 +7322,17 @@ function closeDetails(e: React.SyntheticEvent) {
                     />
                     {showManualSingerSuggestions && manualSingerSuggestions.length > 0 && (
                       <div className="manual-singer-suggestions">
-                        {manualSingerSuggestions.map((name, index) => (
+                        {manualSingerSuggestions.map((singer, index) => (
                           <button
-                            key={name}
+                            key={singer.publicUuid || singer.singerId || singer.displayName}
                             type="button"
                             className={`manual-singer-suggestion${index === manualSingerHighlightIndex ? ' active' : ''}`}
                             onMouseDown={(e) => {
                               e.preventDefault()
-                              selectManualRequestSinger(name)
+                              selectManualRequestSinger(singer)
                             }}
                           >
-                            <span>{name}</span>
+                            <span>{singer.displayName}</span>
                             <span className="manual-singer-suggestion-hint">Use existing singer</span>
                           </button>
                         ))}
