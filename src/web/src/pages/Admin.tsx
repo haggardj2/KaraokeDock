@@ -192,12 +192,13 @@ export default function Admin() {
   const [currentBrowsePath, setCurrentBrowsePath] = useState("/media");
   const [folderContents, setFolderContents] = useState<FolderItem[]>([]);
   const [browseError, setBrowseError] = useState<string>("");
-  const [browseTarget, setBrowseTarget] = useState<'library' | 'download' | 'breakLibrary' | 'breakPlaylists'>('library');
+  const [browseTarget, setBrowseTarget] = useState<'library' | 'download' | 'breakLibrary' | 'breakPlaylists' | 'images'>('library');
   const [breakFolders, setBreakFolders] = useState<BreakFolder[]>([]);
   const [breakFolderName, setBreakFolderName] = useState("");
   const [breakFolderPath, setBreakFolderPath] = useState("");
   const [showAddBreakFolderModal, setShowAddBreakFolderModal] = useState(false);
   const [breakPlaylistsFolder, setBreakPlaylistsFolder] = useState("/media/playlists");
+  const [imageUploadsDir, setImageUploadsDir] = useState("/media/images");
 
   // Login state
   const [loginUsername, setLoginUsername] = useState("");
@@ -744,6 +745,8 @@ export default function Admin() {
       setBreakFolderPath(folderPath);
     } else if (browseTarget === 'breakPlaylists') {
       setBreakPlaylistsFolder(folderPath);
+    } else if (browseTarget === 'images') {
+      setImageUploadsDir(folderPath);
     }
     setShowBrowser(false);
   };
@@ -805,6 +808,7 @@ export default function Admin() {
       setLocalBrowseEnabled(parseBooleanSetting(settings["requests.local_browse_enabled"]));
       setAllowDownloads(parseBooleanSetting(settings["ytdlp.allow_downloads"]));
       setBreakPlaylistsFolder(settings["break_music.playlists_folder"] || "/media/playlists");
+      setImageUploadsDir(settings["images.upload_dir"] || "/media/images");
       setStationMode(settings["station.mode"] === true);
       setRemoteGatewayEnabled(settings["remote_gateway.enabled"] === true);
       setRemoteGatewayUrl(settings["remote_gateway.url"] || "");
@@ -848,6 +852,17 @@ export default function Admin() {
       setTimeout(() => setBanner(""), 3000);
     } catch (err: any) {
       setBanner(`⚠️ Failed to update break music playlists folder: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+    }
+  }
+
+  async function handleImageUploadsDirChange() {
+    try {
+      await saveSetting("images.upload_dir", imageUploadsDir);
+      setBanner("✔ Image upload directory updated");
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update image upload directory: ${err.message}`);
       setTimeout(() => setBanner(""), 5000);
     }
   }
@@ -1062,6 +1077,13 @@ export default function Admin() {
     setShowBrowser(true);
     setCurrentBrowsePath(breakPlaylistsFolder || "/media/playlists");
     browseFolders(breakPlaylistsFolder || "/media/playlists");
+  };
+
+  const openImageUploadsBrowser = () => {
+    setBrowseTarget('images');
+    setShowBrowser(true);
+    setCurrentBrowsePath(imageUploadsDir || "/media/images");
+    browseFolders(imageUploadsDir || "/media/images");
   };
 
   async function scanDownloadLocation() {
@@ -2431,6 +2453,50 @@ export default function Admin() {
                   </div>
                 </div>
                   </div>
+              </div>
+
+              {/* Image Uploads */}
+              <div style={{
+                background: "var(--color-bg-secondary)",
+                border: "1px solid var(--color-border)",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16
+              }}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="image" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />Image Uploads</h3>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Image Upload Directory</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      className="form-input"
+                      placeholder="/media/images"
+                      value={imageUploadsDir}
+                      onChange={(e) => setImageUploadsDir(e.target.value)}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn}
+                    />
+                    <button
+                      className="btn-icon"
+                      onClick={openImageUploadsBrowser}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn}
+                      title="Browse image upload folders"
+                      aria-label="Browse image upload folders"
+                    >
+                      <MaterialIcon name="folder" />
+                    </button>
+                    <button
+                      className="btn-icon success"
+                      onClick={handleImageUploadsDirChange}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn || !imageUploadsDir.trim()}
+                      title="Save image upload directory"
+                      aria-label="Save image upload directory"
+                    >
+                      <MaterialIcon name="check" />
+                    </button>
+                  </div>
+                  <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+                    Player background images uploaded from the Host page are stored here and served through the app as image references.
+                  </p>
+                </div>
               </div>
 
               {/* Background Tasks */}

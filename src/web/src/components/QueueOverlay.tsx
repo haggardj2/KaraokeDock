@@ -18,6 +18,7 @@ export type OverlaySettings = {
   hideSingerQueue: boolean // Whether to hide the songs the singer has queued (show singer name only)
   keepRotationScrollerSingers: boolean
   showRequestsUrl: boolean
+  showBreakMusicTrack: boolean
 }
 
 export const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
@@ -29,7 +30,8 @@ export const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   showQrCode: true,
   hideSingerQueue: false,
   keepRotationScrollerSingers: false,
-  showRequestsUrl: true
+  showRequestsUrl: true,
+  showBreakMusicTrack: false
 }
 
 export default function QueueOverlay({

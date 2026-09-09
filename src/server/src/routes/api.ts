@@ -93,6 +93,300 @@ interface PublicSettings {
 }
 
 const DEFAULT_BREAK_PLAYLISTS_FOLDER = process.env.BREAK_MUSIC_PLAYLISTS_FOLDER || '/media/playlists';
+const DEFAULT_IMAGE_UPLOADS_DIR = process.env.IMAGE_UPLOADS_DIR || '/media/images';
+const PLAYER_BACKGROUND_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES = 30;
+const PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_INTERVAL_SECONDS = 10;
+const PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS = 3;
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS = 300;
+const PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_TRANSITION_DURATION_SECONDS = 3;
+const PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS = 0.5;
+const PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS = 10;
+const PLAYER_BACKGROUND_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const PLAYER_BACKGROUND_TRANSITION_STYLES = new Set(['fade', 'slide', 'zoom']);
+const PLAYER_BACKGROUND_IMAGE_EXTENSION_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+type PlayerBackgroundMode = 'default' | 'image' | 'slideshow';
+type PlayerBackgroundTransitionStyle = 'fade' | 'slide' | 'zoom';
+type StoredPlayerBackgroundImage = {
+  id: string;
+  mime: string;
+  updatedAt: string;
+  data?: string;
+  filename?: string;
+};
+type PlayerBackgroundLibraryImage = {
+  filename: string;
+  mime: string;
+  updatedAt: string;
+  size: number;
+};
+
+function getPlayerBackgroundImageExtension(mime: string): string {
+  switch (mime) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/webp':
+      return '.webp';
+    case 'image/gif':
+      return '.gif';
+    case 'image/png':
+    default:
+      return '.png';
+  }
+}
+
+async function getImageUploadsDir(): Promise<string> {
+  const configured = await getSetting('images.upload_dir');
+  return typeof configured === 'string' && configured.trim()
+    ? configured.trim()
+    : DEFAULT_IMAGE_UPLOADS_DIR;
+}
+
+async function ensureImageUploadsDir(): Promise<string> {
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  await fs.mkdir(uploadDir, { recursive: true });
+  return uploadDir;
+}
+
+function getPlayerBackgroundMimeFromFilename(filename: string): string | null {
+  return PLAYER_BACKGROUND_IMAGE_EXTENSION_MIME_TYPES[path.extname(filename).toLowerCase()] ?? null;
+}
+
+function normalizeImageLibraryFilename(filename: unknown): string | null {
+  if (typeof filename !== 'string') return null;
+  const trimmed = filename.trim();
+  if (!trimmed || trimmed !== path.basename(trimmed)) return null;
+  return getPlayerBackgroundMimeFromFilename(trimmed) ? trimmed : null;
+}
+
+async function getPlayerBackgroundLibraryImage(filename: unknown): Promise<PlayerBackgroundLibraryImage | null> {
+  const normalizedFilename = normalizeImageLibraryFilename(filename);
+  if (!normalizedFilename) return null;
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  const filePath = path.resolve(uploadDir, normalizedFilename);
+  const relativePath = path.relative(uploadDir, filePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return null;
+
+  try {
+    const stat = await fs.stat(filePath);
+    const mime = getPlayerBackgroundMimeFromFilename(normalizedFilename);
+    if (!stat.isFile() || !mime) return null;
+    return {
+      filename: normalizedFilename,
+      mime,
+      updatedAt: stat.mtime.toISOString(),
+      size: stat.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getPlayerBackgroundLibraryImageUrl(filename: string, updatedAt: string): string {
+  return `/api/player/background/library-images/${encodeURIComponent(filename)}?updatedAt=${encodeURIComponent(updatedAt)}`;
+}
+
+async function listPlayerBackgroundLibraryImages(): Promise<PlayerBackgroundLibraryImage[]> {
+  const uploadDir = await ensureImageUploadsDir();
+  const entries = await fs.readdir(uploadDir, { withFileTypes: true });
+  const images = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && !!getPlayerBackgroundMimeFromFilename(entry.name))
+      .map((entry) => getPlayerBackgroundLibraryImage(entry.name)),
+  );
+  return images
+    .filter((image): image is PlayerBackgroundLibraryImage => !!image)
+    .sort((a, b) => a.filename.localeCompare(b.filename));
+}
+
+async function getStoredPlayerBackgroundImageBuffer(image: StoredPlayerBackgroundImage): Promise<Buffer | null> {
+  if (typeof image.data === 'string' && image.data) {
+    return Buffer.from(image.data, 'base64');
+  }
+  if (typeof image.filename !== 'string' || !image.filename) {
+    return null;
+  }
+
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  const filePath = path.resolve(uploadDir, image.filename);
+  const relativePath = path.relative(uploadDir, filePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  try {
+    return await fs.readFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+async function deleteStoredPlayerBackgroundImageFile(image: StoredPlayerBackgroundImage): Promise<void> {
+  if (typeof image.filename !== 'string' || !image.filename) return;
+  const uploadDir = path.resolve(await getImageUploadsDir());
+  const filePath = path.resolve(uploadDir, image.filename);
+  const relativePath = path.relative(uploadDir, filePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return;
+  await fs.unlink(filePath).catch(() => undefined);
+}
+
+async function writePlayerBackgroundImageFile(buffer: Buffer, mime: string, id: string = crypto.randomUUID()): Promise<StoredPlayerBackgroundImage> {
+  const updatedAt = new Date().toISOString();
+  const filename = `player-background-${id}${getPlayerBackgroundImageExtension(mime)}`;
+  const uploadDir = await ensureImageUploadsDir();
+  await fs.writeFile(path.join(uploadDir, filename), buffer);
+  return { id, mime, filename, updatedAt };
+}
+
+function normalizePlayerBackgroundMode(value: unknown): PlayerBackgroundMode {
+  if (value === 'image' || value === 'slideshow') return value;
+  return 'default';
+}
+
+function normalizePlayerBackgroundTransitionStyle(value: unknown): PlayerBackgroundTransitionStyle {
+  return PLAYER_BACKGROUND_TRANSITION_STYLES.has(String(value)) ? value as PlayerBackgroundTransitionStyle : 'fade';
+}
+
+function normalizePlayerBackgroundSlideshowIntervalSeconds(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_INTERVAL_SECONDS;
+  return Math.max(
+    PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS,
+    Math.min(PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS, Math.round(numeric)),
+  );
+}
+
+function normalizePlayerBackgroundSlideshowTransitionDurationSeconds(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return PLAYER_BACKGROUND_SLIDESHOW_DEFAULT_TRANSITION_DURATION_SECONDS;
+  return Math.max(
+    PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS,
+    Math.min(PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS, Math.round(numeric * 10) / 10),
+  );
+}
+
+function getPlayerBackgroundImageUrl(updatedAt: string): string {
+  return `/api/player/background/image?updatedAt=${encodeURIComponent(updatedAt)}`;
+}
+
+function getPlayerBackgroundSlideshowImageUrl(id: string, updatedAt: string): string {
+  return `/api/player/background/slideshow-images/${encodeURIComponent(id)}?updatedAt=${encodeURIComponent(updatedAt)}`;
+}
+
+function isStoredPlayerBackgroundImage(value: unknown): value is StoredPlayerBackgroundImage {
+  if (!value || typeof value !== 'object') return false;
+  const image = value as Partial<StoredPlayerBackgroundImage>;
+  const hasStoredImage =
+    (typeof image.data === 'string' && !!image.data) ||
+    (typeof image.filename === 'string' && !!image.filename);
+  return (
+    typeof image.id === 'string' &&
+    !!image.id &&
+    typeof image.mime === 'string' &&
+    PLAYER_BACKGROUND_IMAGE_MIME_TYPES.has(image.mime) &&
+    hasStoredImage &&
+    typeof image.updatedAt === 'string' &&
+    !!image.updatedAt
+  );
+}
+
+async function getStoredPlayerBackgroundImageInfo(): Promise<StoredPlayerBackgroundImage | null> {
+  const mime = await getSetting('player.backgroundImageMime');
+  const data = await getSetting('player.backgroundImageData');
+  const filename = await getSetting('player.backgroundImageFilename');
+  const updatedAt = await getSetting('player.backgroundImageUpdatedAt');
+
+  if (
+    typeof mime !== 'string' ||
+    !PLAYER_BACKGROUND_IMAGE_MIME_TYPES.has(mime) ||
+    !((typeof data === 'string' && data) || (typeof filename === 'string' && filename)) ||
+    typeof updatedAt !== 'string' ||
+    !updatedAt
+  ) {
+    return null;
+  }
+
+  return {
+    id: 'static',
+    mime,
+    ...(typeof filename === 'string' && filename ? { filename } : {}),
+    ...(typeof data === 'string' && data ? { data } : {}),
+    updatedAt,
+  };
+}
+
+async function getStoredPlayerBackgroundSlideshowImages(): Promise<StoredPlayerBackgroundImage[]> {
+  const stored = await getSetting('player.backgroundSlideshowImages');
+  if (!Array.isArray(stored)) return [];
+  return stored.filter(isStoredPlayerBackgroundImage).slice(0, PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES);
+}
+
+async function getPlayerBackgroundSettingsResponse() {
+  const [
+    modeSetting,
+    imageInfo,
+    slideshowImages,
+    transitionStyle,
+    slideshowIntervalSeconds,
+    slideshowTransitionDurationSeconds,
+  ] = await Promise.all([
+    getSetting('player.backgroundMode'),
+    getStoredPlayerBackgroundImageInfo(),
+    getStoredPlayerBackgroundSlideshowImages(),
+    getSetting('player.backgroundSlideshowTransitionStyle'),
+    getSetting('player.backgroundSlideshowIntervalSeconds'),
+    getSetting('player.backgroundSlideshowTransitionDurationSeconds'),
+  ]);
+  const mode = normalizePlayerBackgroundMode(modeSetting);
+  const responseMode =
+    mode === 'image' && imageInfo
+      ? 'image'
+      : mode === 'slideshow' && slideshowImages.length > 0
+        ? 'slideshow'
+        : 'default';
+  return {
+    mode: responseMode,
+    imageUrl: imageInfo ? getPlayerBackgroundImageUrl(imageInfo.updatedAt) : null,
+    imageFilename: imageInfo?.filename ?? null,
+    updatedAt: imageInfo?.updatedAt ?? null,
+    slideshowImages: slideshowImages.map((image) => ({
+      id: image.id,
+      filename: image.filename ?? null,
+      imageUrl: getPlayerBackgroundSlideshowImageUrl(image.id, image.updatedAt),
+      updatedAt: image.updatedAt,
+    })),
+    slideshowTransitionStyle: normalizePlayerBackgroundTransitionStyle(transitionStyle),
+    slideshowIntervalSeconds: normalizePlayerBackgroundSlideshowIntervalSeconds(slideshowIntervalSeconds),
+    slideshowTransitionDurationSeconds:
+      normalizePlayerBackgroundSlideshowTransitionDurationSeconds(slideshowTransitionDurationSeconds),
+  };
+}
+
+async function broadcastPlayerBackgroundSettings(): Promise<void> {
+  postQueueUpdate('player.background.settings', await getPlayerBackgroundSettingsResponse());
+}
+
+function detectPlayerBackgroundImageMime(buffer: Buffer): string | null {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  const header = buffer.subarray(0, 12).toString('ascii');
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) {
+    return 'image/gif';
+  }
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
 
 let postQueueUpdate: (type?: string, data?: any) => void = () => {};
 export function setPostQueueUpdate(fn: (type?: string, data?: any) => void) {
@@ -2405,7 +2699,7 @@ apiRouter.get(
 
 // ---------------------------------------------------------------------------
 // GET /api/search/suggestions — fuzzy "did you mean?" suggestions
-// Returns up to 5 tracks that closely match the query using word-level search,
+// Returns up to 5 tracks that closely match the query using trigram similarity,
 // intended for use when the main search returns few/no results.
 // ---------------------------------------------------------------------------
 apiRouter.get(
@@ -2415,38 +2709,73 @@ apiRouter.get(
     if (!(await isLocalLibraryEnabled())) return res.json([]);
     const q = String(req.query.q ?? '').trim();
     if (q.length < 2) return res.json([]);
+    const normalizedQuery = q.toLowerCase();
+    const fieldFilter = parseLocalSearchField(req.query.field) ?? 'all';
+    const kindFilter =
+      req.query.kind === 'mp4' || req.query.kind === 'cdgmp3'
+        ? req.query.kind
+        : null;
+    const similarityThreshold =
+      normalizedQuery.length <= 4 ? 0.25 : normalizedQuery.length <= 8 ? 0.3 : 0.35;
 
-    // Split query into words and search for each independently, rank by match count
-    const words = q.toLowerCase().split(/\s+/).filter(w => w.length >= 2).slice(0, 5);
-    if (words.length === 0) return res.json([]);
-
-    // Build per-word LIKE conditions and a score expression
-    const params: any[] = [];
-    const wordConds: string[] = [];
-    const scoreTerms: string[] = [];
-    for (const word of words) {
-      params.push(`%${word}%`);
-      const p = `$${params.length}`;
-      wordConds.push(`(LOWER(t.title) LIKE ${p} OR LOWER(COALESCE(a.name,'')) LIKE ${p})`);
-      scoreTerms.push(`(CASE WHEN LOWER(t.title) LIKE ${p} OR LOWER(COALESCE(a.name,'')) LIKE ${p} THEN 1 ELSE 0 END)`);
-    }
-
-    try {
-      const result = await query(
-        `SELECT t.id, t.title, t.disc_id, t.kind, a.name AS artist,
-                (${scoreTerms.join(' + ')}) AS score
+    const result = await query(
+      `WITH scored AS (
+         SELECT t.id,
+                t.title,
+                t.disc_id,
+                t.kind,
+                a.name AS artist,
+                GREATEST(
+                  similarity(LOWER(COALESCE(a.name, '')), $1),
+                  word_similarity($1, LOWER(COALESCE(a.name, '')))
+                ) AS artist_score,
+                GREATEST(
+                  similarity(LOWER(COALESCE(t.title, '')), $1),
+                  word_similarity($1, LOWER(COALESCE(t.title, '')))
+                ) AS title_score,
+                GREATEST(
+                  similarity(
+                    LOWER(COALESCE(a.name, '') || ' ' || COALESCE(t.title, '')),
+                    $1
+                  ),
+                  word_similarity(
+                    $1,
+                    LOWER(COALESCE(a.name, '') || ' ' || COALESCE(t.title, ''))
+                  )
+                ) AS combined_score
            FROM tracks t
            LEFT JOIN artists a ON a.id = t.artist_id
           WHERE (t.source IS NULL OR t.source = 'local')
-            AND (${wordConds.join(' OR ')})
-          ORDER BY score DESC, LOWER(COALESCE(a.name,'')), LOWER(COALESCE(t.title,''))
-          LIMIT 5`,
-        params,
-      );
-      res.json(result.rows);
-    } catch {
-      res.json([]);
-    }
+            AND ($4::text IS NULL OR t.kind::text = $4)
+       ),
+       ranked AS (
+         SELECT id,
+                title,
+                disc_id,
+                kind,
+                artist,
+                CASE
+                  WHEN $3 = 'artist' THEN artist
+                  WHEN $3 = 'title' THEN title
+                  WHEN artist_score >= title_score AND artist_score >= combined_score THEN artist
+                  WHEN title_score >= combined_score THEN title
+                  ELSE CONCAT_WS(' — ', NULLIF(artist, ''), NULLIF(title, ''))
+                END AS matched_term,
+                CASE
+                  WHEN $3 = 'artist' THEN artist_score
+                  WHEN $3 = 'title' THEN title_score
+                  ELSE GREATEST(artist_score, title_score, combined_score)
+                END AS score
+           FROM scored
+       )
+       SELECT id, title, disc_id, kind, artist, matched_term
+         FROM ranked
+        WHERE score >= $2
+        ORDER BY score DESC, LOWER(COALESCE(artist, '')), LOWER(COALESCE(title, ''))
+        LIMIT 5`,
+      [normalizedQuery, similarityThreshold, fieldFilter, kindFilter],
+    );
+    res.json(result.rows);
   })
 );
 
@@ -4510,6 +4839,318 @@ apiRouter.get(
   })
 );
 
+apiRouter.get(
+  '/player/background/settings',
+  ah(async (_req, res) => {
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.post(
+  '/player/background/settings',
+  adminGuard,
+  ah(async (req, res) => {
+    const {
+      mode,
+      slideshowTransitionStyle,
+      slideshowIntervalSeconds,
+      slideshowTransitionDurationSeconds,
+    } = req.body ?? {};
+    if (mode !== undefined && mode !== 'default' && mode !== 'image' && mode !== 'slideshow') {
+      return res.status(400).json({ error: 'mode must be "default", "image", or "slideshow"' });
+    }
+
+    if (mode === 'image' && !(await getStoredPlayerBackgroundImageInfo())) {
+      return res.status(400).json({ error: 'Choose a background image before enabling image mode' });
+    }
+    if (mode === 'slideshow' && (await getStoredPlayerBackgroundSlideshowImages()).length === 0) {
+      return res.status(400).json({ error: 'Add slideshow images before enabling slideshow mode' });
+    }
+
+    if (mode !== undefined) {
+      await setSetting('player.backgroundMode', mode);
+    }
+    if (slideshowTransitionStyle !== undefined) {
+      if (!PLAYER_BACKGROUND_TRANSITION_STYLES.has(String(slideshowTransitionStyle))) {
+        return res.status(400).json({ error: 'slideshowTransitionStyle must be "fade", "slide", or "zoom"' });
+      }
+      await setSetting('player.backgroundSlideshowTransitionStyle', slideshowTransitionStyle);
+    }
+    if (slideshowIntervalSeconds !== undefined) {
+      const numericInterval = Number(slideshowIntervalSeconds);
+      if (
+        !Number.isFinite(numericInterval) ||
+        numericInterval < PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS ||
+        numericInterval > PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS
+      ) {
+        return res.status(400).json({
+          error: `slideshowIntervalSeconds must be between ${PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS} and ${PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS}`,
+        });
+      }
+      await setSetting('player.backgroundSlideshowIntervalSeconds', Math.round(numericInterval));
+    }
+    if (slideshowTransitionDurationSeconds !== undefined) {
+      const numericDuration = Number(slideshowTransitionDurationSeconds);
+      if (
+        !Number.isFinite(numericDuration) ||
+        numericDuration < PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS ||
+        numericDuration > PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS
+      ) {
+        return res.status(400).json({
+          error:
+            `slideshowTransitionDurationSeconds must be between ` +
+            `${PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS} and ` +
+            `${PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS}`,
+        });
+      }
+      await setSetting('player.backgroundSlideshowTransitionDurationSeconds', Math.round(numericDuration * 10) / 10);
+    }
+
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.get(
+  '/player/background/library-images',
+  adminGuard,
+  ah(async (_req, res) => {
+    const images = await listPlayerBackgroundLibraryImages();
+    res.json({
+      uploadDir: await getImageUploadsDir(),
+      images: images.map((image) => ({
+        filename: image.filename,
+        mime: image.mime,
+        size: image.size,
+        updatedAt: image.updatedAt,
+        imageUrl: getPlayerBackgroundLibraryImageUrl(image.filename, image.updatedAt),
+      })),
+    });
+  })
+);
+
+apiRouter.get(
+  '/player/background/library-images/:filename',
+  ah(async (req, res) => {
+    const image = await getPlayerBackgroundLibraryImage(req.params.filename);
+    if (!image) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const uploadDir = path.resolve(await getImageUploadsDir());
+    const filePath = path.resolve(uploadDir, image.filename);
+    const relativePath = path.relative(uploadDir, filePath);
+    if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    res.setHeader('Content-Type', image.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(await fs.readFile(filePath));
+  })
+);
+
+apiRouter.get(
+  '/player/background/image',
+  ah(async (_req, res) => {
+    const imageInfo = await getStoredPlayerBackgroundImageInfo();
+    if (!imageInfo) {
+      return res.status(404).json({ error: 'No player background image has been uploaded' });
+    }
+    const imageBuffer = await getStoredPlayerBackgroundImageBuffer(imageInfo);
+    if (!imageBuffer) {
+      return res.status(404).json({ error: 'Player background image file not found' });
+    }
+
+    res.setHeader('Content-Type', imageInfo.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(imageBuffer);
+  })
+);
+
+apiRouter.post(
+  '/player/background/image',
+  adminGuard,
+  express.raw({ type: 'image/*', limit: PLAYER_BACKGROUND_IMAGE_MAX_BYTES }),
+  ah(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Upload an image file' });
+    }
+
+    const mime = detectPlayerBackgroundImageMime(req.body);
+    if (!mime) {
+      return res.status(400).json({ error: 'Supported background formats are PNG, JPEG, WebP, and GIF' });
+    }
+
+    const image = await writePlayerBackgroundImageFile(req.body, mime, 'static');
+    await setSetting('player.backgroundImageMime', image.mime);
+    await setSetting('player.backgroundImageFilename', image.filename);
+    await setSetting('player.backgroundImageData', '');
+    await setSetting('player.backgroundImageUpdatedAt', image.updatedAt);
+    await setSetting('player.backgroundMode', 'image');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.post(
+  '/player/background/image/select',
+  adminGuard,
+  ah(async (req, res) => {
+    const image = await getPlayerBackgroundLibraryImage(req.body?.filename);
+    if (!image) {
+      return res.status(400).json({ error: 'Choose an image from the configured image directory' });
+    }
+
+    await setSetting('player.backgroundImageMime', image.mime);
+    await setSetting('player.backgroundImageFilename', image.filename);
+    await setSetting('player.backgroundImageData', '');
+    await setSetting('player.backgroundImageUpdatedAt', image.updatedAt);
+    await setSetting('player.backgroundMode', 'image');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.delete(
+  '/player/background/image',
+  adminGuard,
+  ah(async (_req, res) => {
+    await Promise.all([
+      setSetting('player.backgroundImageMime', ''),
+      setSetting('player.backgroundImageFilename', ''),
+      setSetting('player.backgroundImageData', ''),
+      setSetting('player.backgroundImageUpdatedAt', ''),
+    ]);
+    if ((await getSetting('player.backgroundMode')) === 'image') {
+      await setSetting('player.backgroundMode', 'default');
+    }
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.get(
+  '/player/background/slideshow-images/:id',
+  ah(async (req, res) => {
+    const requestedId = String(req.params.id || '');
+    const imageInfo = (await getStoredPlayerBackgroundSlideshowImages()).find((image) => image.id === requestedId);
+    if (!imageInfo) {
+      return res.status(404).json({ error: 'Slideshow image not found' });
+    }
+    const imageBuffer = await getStoredPlayerBackgroundImageBuffer(imageInfo);
+    if (!imageBuffer) {
+      return res.status(404).json({ error: 'Slideshow image file not found' });
+    }
+
+    res.setHeader('Content-Type', imageInfo.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(imageBuffer);
+  })
+);
+
+apiRouter.post(
+  '/player/background/slideshow-images/select',
+  adminGuard,
+  ah(async (req, res) => {
+    const requestedFilenames = Array.isArray(req.body?.filenames)
+      ? req.body.filenames
+      : [req.body?.filename];
+    const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
+    const existingFilenames = new Set(slideshowImages.map((image) => image.filename).filter(Boolean));
+
+    for (const requestedFilename of requestedFilenames) {
+      if (slideshowImages.length >= PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES) {
+        return res.status(400).json({ error: `A slideshow can include up to ${PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES} images` });
+      }
+      const image = await getPlayerBackgroundLibraryImage(requestedFilename);
+      if (!image) {
+        return res.status(400).json({ error: 'Choose images from the configured image directory' });
+      }
+      if (existingFilenames.has(image.filename)) {
+        continue;
+      }
+      slideshowImages.push({
+        id: crypto.randomUUID(),
+        mime: image.mime,
+        filename: image.filename,
+        updatedAt: image.updatedAt,
+      });
+      existingFilenames.add(image.filename);
+    }
+
+    if (slideshowImages.length === 0) {
+      return res.status(400).json({ error: 'Choose at least one slideshow image' });
+    }
+
+    await setSetting('player.backgroundSlideshowImages', slideshowImages);
+    await setSetting('player.backgroundMode', 'slideshow');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.post(
+  '/player/background/slideshow-images',
+  adminGuard,
+  express.raw({ type: 'image/*', limit: PLAYER_BACKGROUND_IMAGE_MAX_BYTES }),
+  ah(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Upload an image file' });
+    }
+
+    const mime = detectPlayerBackgroundImageMime(req.body);
+    if (!mime) {
+      return res.status(400).json({ error: 'Supported background formats are PNG, JPEG, WebP, and GIF' });
+    }
+
+    const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
+    if (slideshowImages.length >= PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES) {
+      return res.status(400).json({ error: `A slideshow can include up to ${PLAYER_BACKGROUND_SLIDESHOW_MAX_IMAGES} images` });
+    }
+
+    slideshowImages.push(await writePlayerBackgroundImageFile(req.body, mime));
+    await setSetting('player.backgroundSlideshowImages', slideshowImages);
+    await setSetting('player.backgroundMode', 'slideshow');
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.delete(
+  '/player/background/slideshow-images/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const requestedId = String(req.params.id || '');
+    const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
+    const remainingImages = slideshowImages.filter((image) => image.id !== requestedId);
+
+    if (remainingImages.length === slideshowImages.length) {
+      return res.status(404).json({ error: 'Slideshow image not found' });
+    }
+
+    await setSetting('player.backgroundSlideshowImages', remainingImages);
+    if (remainingImages.length === 0 && (await getSetting('player.backgroundMode')) === 'slideshow') {
+      await setSetting('player.backgroundMode', 'default');
+    }
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
+apiRouter.delete(
+  '/player/background/slideshow-images',
+  adminGuard,
+  ah(async (_req, res) => {
+    await setSetting('player.backgroundSlideshowImages', []);
+    if ((await getSetting('player.backgroundMode')) === 'slideshow') {
+      await setSetting('player.backgroundMode', 'default');
+    }
+    await broadcastPlayerBackgroundSettings();
+    res.json(await getPlayerBackgroundSettingsResponse());
+  })
+);
+
 // Track song state for autoplay logic
 const songState = new Map<number | string, {
   hasFinished: boolean;
@@ -4980,6 +5621,7 @@ apiRouter.get(
     const hideSingerQueue = await getSetting('overlay.hideSingerQueue');
     const keepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
     const showRequestsUrl = await getSetting('overlay.showRequestsUrl');
+    const showBreakMusicTrack = await getSetting('overlay.showBreakMusicTrack');
     res.json({
       visible: visible === null ? true : visible === 'true',
       height: height === null ? 90 : parseInt(height, 10),
@@ -4991,6 +5633,7 @@ apiRouter.get(
       keepRotationScrollerSingers:
         keepRotationScrollerSingers === null ? false : keepRotationScrollerSingers === 'true',
       showRequestsUrl: showRequestsUrl === null ? true : showRequestsUrl === 'true',
+      showBreakMusicTrack: showBreakMusicTrack === null ? false : showBreakMusicTrack === 'true',
     });
   })
 );
@@ -5010,6 +5653,7 @@ apiRouter.post(
       hideSingerQueue,
       keepRotationScrollerSingers,
       showRequestsUrl,
+      showBreakMusicTrack,
     } = req.body;
     
     if (typeof visible === 'boolean') {
@@ -5041,6 +5685,9 @@ apiRouter.post(
     if (typeof showRequestsUrl === 'boolean') {
       await setSetting('overlay.showRequestsUrl', String(showRequestsUrl));
     }
+    if (typeof showBreakMusicTrack === 'boolean') {
+      await setSetting('overlay.showBreakMusicTrack', String(showBreakMusicTrack));
+    }
     
     // Broadcast settings update to all clients
     const currentVisible = await getSetting('overlay.visible');
@@ -5052,6 +5699,7 @@ apiRouter.post(
     const currentHideSingerQueue = await getSetting('overlay.hideSingerQueue');
     const currentKeepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
     const currentShowRequestsUrl = await getSetting('overlay.showRequestsUrl');
+    const currentShowBreakMusicTrack = await getSetting('overlay.showBreakMusicTrack');
     
     postQueueUpdate('overlay.settings', {
       visible: currentVisible === null ? true : currentVisible === 'true',
@@ -5064,6 +5712,7 @@ apiRouter.post(
       keepRotationScrollerSingers:
         currentKeepRotationScrollerSingers === null ? false : currentKeepRotationScrollerSingers === 'true',
       showRequestsUrl: currentShowRequestsUrl === null ? true : currentShowRequestsUrl === 'true',
+      showBreakMusicTrack: currentShowBreakMusicTrack === null ? false : currentShowBreakMusicTrack === 'true',
     });
     
     res.json({ ok: true });
@@ -5342,6 +5991,7 @@ apiRouter.get(
       settings[row.key] = row.value;
     }
     settings['station.mode'] = process.env.STATION_MODE === 'true';
+    settings['images.upload_dir'] = settings['images.upload_dir'] || DEFAULT_IMAGE_UPLOADS_DIR;
     res.json(settings);
   })
 );

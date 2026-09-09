@@ -23,6 +23,7 @@ type SearchRow = {
   artist: string | null;
   disc_id: string | null;
   kind: "mp4" | "cdgmp3" | "zip" | "mp3";
+  matched_term?: string | null;
 };
 
 type KaraokeNerdsTrack = {
@@ -672,11 +673,17 @@ export default function Requests() {
       if (rows.length > 0) setLocalExpanded(true);
       if (rows.length === 0 && q.trim().length >= 2) {
         try {
-          const suggestions = await api(
-            `/api/search/suggestions?q=${encodeURIComponent(q.trim())}`,
-          );
+          let suggestionUrl = `/api/search/suggestions?q=${encodeURIComponent(q.trim())}`;
+          if (kindFilter !== "all") {
+            suggestionUrl += `&kind=${kindFilter}`;
+          }
+          if (searchFieldFilter !== "all") {
+            suggestionUrl += `&field=${searchFieldFilter}`;
+          }
+          const suggestions = await api(suggestionUrl);
           setFuzzySuggestions(Array.isArray(suggestions) ? suggestions : []);
-        } catch {
+        } catch (err) {
+          console.error("Fuzzy suggestion search error:", err);
           setFuzzySuggestions([]);
         }
       } else {
@@ -1027,6 +1034,24 @@ export default function Requests() {
     }
     return Array.from(map.values());
   }, [localRows]);
+
+  const groupedFuzzySuggestions = useMemo((): GroupedResult[] => {
+    const map = new Map<string, GroupedResult>();
+    for (const row of fuzzySuggestions) {
+      const key = groupKey(row.title ?? "", row.artist ?? "");
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          title: row.title ?? "",
+          artist: row.artist ?? "",
+          versions: [],
+          kind: row.kind,
+        });
+      }
+      map.get(key)!.versions.push(row);
+    }
+    return Array.from(map.values());
+  }, [fuzzySuggestions]);
 
   // Group Karaoke Nerds results by normalised title + artist
   type GroupedKnResult = {
@@ -2414,7 +2439,10 @@ export default function Requests() {
                             : "Search Online…"
                       }
                       value={q}
-                      onChange={(e) => setQ(e.target.value)}
+                      onChange={(e) => {
+                        setQ(e.target.value);
+                        setFuzzySuggestions([]);
+                      }}
                       onKeyDown={(event) => {
                         if (!shouldHandleEnterKey(event)) return;
                         if (searchTimeoutRef.current) {
@@ -3364,6 +3392,107 @@ export default function Requests() {
                           <div className="empty-title">
                             No results for "{q}"
                           </div>
+                          {sourceFilter !== "online" &&
+                            groupedFuzzySuggestions.length > 0 && (
+                              <div
+                                style={{
+                                  width: "min(100%, 560px)",
+                                  marginTop: 16,
+                                  textAlign: "left",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    color: "var(--color-text-secondary)",
+                                    fontSize: 14,
+                                    marginBottom: 10,
+                                  }}
+                                >
+                                  {fuzzySuggestions[0]?.matched_term
+                                    ? `Do you mean “${fuzzySuggestions[0].matched_term}”?`
+                                    : "Do you mean…?"}
+                                </div>
+                                {groupedFuzzySuggestions.map((group) => (
+                                  <div
+                                    key={group.key}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 10,
+                                      padding: "10px 12px",
+                                      background: "var(--color-bg-secondary)",
+                                      border: "1px solid var(--color-border)",
+                                      borderRadius: 8,
+                                      marginBottom: 7,
+                                    }}
+                                  >
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div
+                                        style={{
+                                          fontWeight: 600,
+                                          fontSize: 14,
+                                          whiteSpace: "nowrap",
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                        }}
+                                      >
+                                        {group.title}
+                                      </div>
+                                      <div
+                                        style={{
+                                          fontSize: 12,
+                                          color: "var(--color-text-secondary)",
+                                        }}
+                                      >
+                                        {group.artist}
+                                      </div>
+                                      {group.versions.length > 1 && (
+                                        <div
+                                          style={{
+                                            fontSize: 11,
+                                            color: "var(--color-text-muted)",
+                                            marginTop: 2,
+                                          }}
+                                        >
+                                          📀 {group.versions.length} versions
+                                        </div>
+                                      )}
+                                    </div>
+                                    <button
+                                      className="add-btn"
+                                      type="button"
+                                      disabled={group.versions.some(
+                                        (version) =>
+                                          addingLocal === version.id,
+                                      )}
+                                      onClick={() => {
+                                        if (group.versions.length > 1) {
+                                          setVersionPicker({
+                                            title: group.title,
+                                            artist: group.artist,
+                                            versions: group.versions,
+                                          });
+                                        } else {
+                                          const track = group.versions[0];
+                                          void enqueueLocal(
+                                            track.id,
+                                            track.title || "",
+                                          );
+                                        }
+                                      }}
+                                      style={{ flexShrink: 0 }}
+                                    >
+                                      {group.versions.some(
+                                        (version) =>
+                                          addingLocal === version.id,
+                                      )
+                                        ? "…"
+                                        : "+ Add"}
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                         </div>
                       ))}
                     {/* Local library results */}
@@ -3711,7 +3840,9 @@ export default function Requests() {
                                   marginBottom: 8,
                                 }}
                               >
-                                Did you mean…?
+                                {fuzzySuggestions[0]?.matched_term
+                                  ? `Do you mean “${fuzzySuggestions[0].matched_term}”?`
+                                  : "Do you mean…?"}
                               </div>
                               {Array.from(
                                 fuzzySuggestions

@@ -47,6 +47,27 @@ type RotationScrollerSinger = {
   hasQueuedSong: boolean;
 };
 
+type PlayerBackgroundMode = "default" | "image" | "slideshow";
+type PlayerBackgroundTransitionStyle = "fade" | "slide" | "zoom";
+
+type PlayerBackgroundSlideshowImage = {
+  id: string;
+  filename?: string | null;
+  imageUrl: string;
+  updatedAt: string;
+};
+
+type PlayerBackgroundSettings = {
+  mode: PlayerBackgroundMode;
+  imageUrl: string | null;
+  imageFilename?: string | null;
+  updatedAt: string | null;
+  slideshowImages: PlayerBackgroundSlideshowImage[];
+  slideshowTransitionStyle: PlayerBackgroundTransitionStyle;
+  slideshowIntervalSeconds: number;
+  slideshowTransitionDurationSeconds: number;
+};
+
 function getDefaultRequestsUrl(): string {
   if (typeof window === "undefined" || !window.location?.origin) {
     return "/requests";
@@ -170,6 +191,18 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   hideSingerQueue: false,
   keepRotationScrollerSingers: false,
   showRequestsUrl: true,
+  showBreakMusicTrack: false,
+};
+
+const DEFAULT_PLAYER_BACKGROUND_SETTINGS: PlayerBackgroundSettings = {
+  mode: "default",
+  imageUrl: null,
+  imageFilename: null,
+  updatedAt: null,
+  slideshowImages: [],
+  slideshowTransitionStyle: "fade",
+  slideshowIntervalSeconds: 10,
+  slideshowTransitionDurationSeconds: 3,
 };
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
@@ -220,7 +253,101 @@ function normalizeOverlaySettings(value: unknown): OverlaySettings {
       settings.showRequestsUrl,
       DEFAULT_OVERLAY_SETTINGS.showRequestsUrl,
     ),
+    showBreakMusicTrack: parseBoolean(
+      settings.showBreakMusicTrack,
+      DEFAULT_OVERLAY_SETTINGS.showBreakMusicTrack,
+    ),
   };
+}
+
+function normalizePlayerBackgroundSettings(
+  value: unknown,
+): PlayerBackgroundSettings {
+  if (!value || typeof value !== "object") {
+    return DEFAULT_PLAYER_BACKGROUND_SETTINGS;
+  }
+  const settings = value as Partial<PlayerBackgroundSettings>;
+  const imageUrl =
+    typeof settings.imageUrl === "string" && settings.imageUrl.trim()
+      ? settings.imageUrl
+      : null;
+  const slideshowImages = Array.isArray(settings.slideshowImages)
+    ? settings.slideshowImages.filter(
+        (image): image is PlayerBackgroundSlideshowImage =>
+          !!image &&
+          typeof image.id === "string" &&
+          (image.filename == null || typeof image.filename === "string") &&
+          typeof image.imageUrl === "string" &&
+          typeof image.updatedAt === "string",
+      )
+    : [];
+  const mode =
+    settings.mode === "image" && imageUrl
+      ? "image"
+      : settings.mode === "slideshow" && slideshowImages.length > 0
+        ? "slideshow"
+        : "default";
+  const interval = Number(settings.slideshowIntervalSeconds);
+  const transitionDuration = Number(settings.slideshowTransitionDurationSeconds);
+  return {
+    mode,
+    imageUrl,
+    imageFilename:
+      typeof settings.imageFilename === "string" && settings.imageFilename.trim()
+        ? settings.imageFilename
+        : null,
+    updatedAt:
+      typeof settings.updatedAt === "string" && settings.updatedAt.trim()
+        ? settings.updatedAt
+        : null,
+    slideshowImages,
+    slideshowTransitionStyle:
+      settings.slideshowTransitionStyle === "slide" ||
+      settings.slideshowTransitionStyle === "zoom"
+        ? settings.slideshowTransitionStyle
+        : "fade",
+    slideshowIntervalSeconds: Number.isFinite(interval)
+      ? Math.max(3, Math.min(300, Math.round(interval)))
+      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowIntervalSeconds,
+    slideshowTransitionDurationSeconds: Number.isFinite(transitionDuration)
+      ? Math.max(0.5, Math.min(10, Math.round(transitionDuration * 10) / 10))
+      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowTransitionDurationSeconds,
+  };
+}
+
+function getApiAssetUrl(pathOrUrl: string | null): string | null {
+  if (!pathOrUrl) return null;
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  return `${API_BASE}${pathOrUrl}`;
+}
+
+function getBackgroundImageCss(url: string): string {
+  const escapedUrl = url.replace(/["\\]/g, "\\$&");
+  return `linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), url("${escapedUrl}")`;
+}
+
+function renderTickerText(text: string, highlightedText: string) {
+  if (!highlightedText || !text.includes(highlightedText)) {
+    return text;
+  }
+
+  return text.split(highlightedText).map((part, index) => (
+    <React.Fragment key={`${index}-${part.length}`}>
+      {index > 0 && (
+        <span
+          style={{
+            color: "#facc15",
+            fontWeight: 800,
+            textShadow:
+              "0 0 12px rgba(250, 204, 21, 0.65), 2px 2px 4px rgba(0,0,0,0.95)",
+          }}
+        >
+          {highlightedText}
+        </span>
+      )}
+      {part}
+    </React.Fragment>
+  ));
 }
 
 export default function Player() {
@@ -235,6 +362,10 @@ export default function Player() {
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>(
     DEFAULT_OVERLAY_SETTINGS,
   );
+  const [playerBackgroundSettings, setPlayerBackgroundSettings] =
+    useState<PlayerBackgroundSettings>(DEFAULT_PLAYER_BACKGROUND_SETTINGS);
+  const [playerBackgroundSlideIndex, setPlayerBackgroundSlideIndex] =
+    useState(0);
   const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
   const [rotationScrollerSingers, setRotationScrollerSingers] = useState<
     RotationScrollerSinger[]
@@ -274,6 +405,52 @@ export default function Player() {
     () => formatRequestsUrlForDisplay(requestsUrl),
     [requestsUrl],
   );
+  const playerBackgroundStyle = useMemo<React.CSSProperties>(() => {
+    const imageUrl = getApiAssetUrl(playerBackgroundSettings.imageUrl);
+    if (playerBackgroundSettings.mode !== "image" || !imageUrl) {
+      return { background: "#000" };
+    }
+    return {
+      backgroundColor: "#000",
+      backgroundImage: getBackgroundImageCss(imageUrl),
+      backgroundPosition: "center",
+      backgroundRepeat: "no-repeat",
+      backgroundSize: "cover",
+    };
+  }, [playerBackgroundSettings]);
+  const isCustomPlayerBackground =
+    (playerBackgroundSettings.mode === "image" &&
+      !!playerBackgroundSettings.imageUrl) ||
+    (playerBackgroundSettings.mode === "slideshow" &&
+      playerBackgroundSettings.slideshowImages.length > 0);
+
+  useEffect(() => {
+    setPlayerBackgroundSlideIndex(0);
+  }, [
+    playerBackgroundSettings.mode,
+    playerBackgroundSettings.slideshowImages,
+  ]);
+
+  useEffect(() => {
+    if (
+      playerBackgroundSettings.mode !== "slideshow" ||
+      playerBackgroundSettings.slideshowImages.length <= 1
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setPlayerBackgroundSlideIndex((current) =>
+        (current + 1) % playerBackgroundSettings.slideshowImages.length,
+      );
+    }, playerBackgroundSettings.slideshowIntervalSeconds * 1000);
+
+    return () => window.clearInterval(timer);
+  }, [
+    playerBackgroundSettings.mode,
+    playerBackgroundSettings.slideshowImages.length,
+    playerBackgroundSettings.slideshowIntervalSeconds,
+  ]);
 
   // Force dark theme
   useEffect(() => {
@@ -373,6 +550,67 @@ export default function Player() {
     }
   };
 
+  const renderPlayerBackground = () => {
+    if (playerBackgroundSettings.mode !== "slideshow") {
+      return null;
+    }
+
+    const images = playerBackgroundSettings.slideshowImages;
+    if (images.length === 0) {
+      return null;
+    }
+
+    const transitionDurationMs = Math.round(
+      playerBackgroundSettings.slideshowTransitionDurationSeconds * 1000,
+    );
+    const transition = `opacity ${transitionDurationMs}ms ease-in-out, transform ${transitionDurationMs}ms ease-in-out`;
+    const getTransform = (active: boolean) => {
+      if (playerBackgroundSettings.slideshowTransitionStyle === "slide") {
+        return active ? "translateX(0)" : "translateX(4%)";
+      }
+      if (playerBackgroundSettings.slideshowTransitionStyle === "zoom") {
+        return active ? "scale(1)" : "scale(1.06)";
+      }
+      return "scale(1)";
+    };
+
+    return (
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          overflow: "hidden",
+          zIndex: 0,
+          background: "#000",
+        }}
+      >
+        {images.map((image, index) => {
+          const imageUrl = getApiAssetUrl(image.imageUrl);
+          if (!imageUrl) return null;
+          const active = index === playerBackgroundSlideIndex % images.length;
+          return (
+            <div
+              key={image.id}
+              style={{
+                position: "absolute",
+                inset: 0,
+                backgroundColor: "#000",
+                backgroundImage: getBackgroundImageCss(imageUrl),
+                backgroundPosition: "center",
+                backgroundRepeat: "no-repeat",
+                backgroundSize: "cover",
+                opacity: active ? 1 : 0,
+                transform: getTransform(active),
+                transition,
+              }}
+            />
+          );
+        })}
+      </div>
+    );
+  };
+
   // Fetch queue + determine current
   const refresh = useCallback(async () => {
     const [q, rotationSingers] = await Promise.all([
@@ -444,6 +682,16 @@ export default function Player() {
       })
       .catch(() => {
         // Use defaults on error
+      });
+  }, []);
+
+  useEffect(() => {
+    api("/api/player/background/settings")
+      .then((settings: PlayerBackgroundSettings) => {
+        setPlayerBackgroundSettings(normalizePlayerBackgroundSettings(settings));
+      })
+      .catch(() => {
+        // Use the default splash on error
       });
   }, []);
 
@@ -533,6 +781,11 @@ export default function Player() {
                   return prevDelay;
                 });
               }
+            }
+            if (msg.type === "player.background.settings") {
+              setPlayerBackgroundSettings(
+                normalizePlayerBackgroundSettings(msg),
+              );
             }
           } catch {
             /* ignore */
@@ -1185,6 +1438,17 @@ export default function Player() {
     // But this won't affect an already-running countdown since we capture the value in a local variable
   }, [now, autoPlay, queuedCount, autoPlayDelay, manualStop]);
 
+  const breakMusicTrackText =
+    overlaySettings.showBreakMusicTrack &&
+    !now &&
+    !breakMusicState.paused &&
+    breakMusicState.currentTrack
+      ? `${breakMusicState.currentTrack.artist || "Unknown Artist"} — ${breakMusicState.currentTrack.title}`
+      : "";
+  const breakMusicTickerText = breakMusicTrackText
+    ? `Now Playing: ${breakMusicTrackText}`
+    : "";
+
   // Build ticker text with current singer and queue
   const tickerText = useMemo(() => {
     const rotationText = rotationScrollerSingers
@@ -1195,10 +1459,20 @@ export default function Player() {
           : `${idx + 1}. ${singer.displayName} (waiting)`,
       )
       .join(" • ");
-
     // If nothing is playing
     if (!now) {
       if (upNext.length === 0 && !rotationText) {
+        if (breakMusicTickerText) {
+          const fullText = overlaySettings.customMessage
+            ? `${breakMusicTickerText} 📢 ${overlaySettings.customMessage}`
+            : breakMusicTickerText;
+          return `${fullText}     🎵     ${fullText}     🎵     `;
+        }
+        if (isCustomPlayerBackground) {
+          return overlaySettings.customMessage
+            ? `📢 ${overlaySettings.customMessage}     🎵     📢 ${overlaySettings.customMessage}     🎵     `
+            : "";
+        }
         // Show custom message at end if set, otherwise waiting message
         if (overlaySettings.customMessage) {
           return `🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     `;
@@ -1225,9 +1499,12 @@ export default function Player() {
           : "";
 
       // Add custom message at the end if set
+      const idleNowPlaying = breakMusicTickerText
+        ? `${breakMusicTickerText} • `
+        : "";
       const fullText = overlaySettings.customMessage
-        ? `${countdownInfo}🎤 QUEUE: ${queueText} 📢 ${overlaySettings.customMessage}`
-        : `${countdownInfo}🎤 QUEUE: ${queueText}`;
+        ? `${countdownInfo}${idleNowPlaying}🎤 QUEUE: ${queueText} 📢 ${overlaySettings.customMessage}`
+        : `${countdownInfo}${idleNowPlaying}🎤 QUEUE: ${queueText}`;
       return `${fullText}     🎵     ${fullText}     🎵     `;
     }
 
@@ -1272,6 +1549,8 @@ export default function Player() {
     autoPlay,
     countdown,
     manualStop,
+    isCustomPlayerBackground,
+    breakMusicTickerText,
   ]);
 
   // Render the overlay (shown always, unless visibility is false)
@@ -1378,7 +1657,7 @@ export default function Player() {
                   letterSpacing: "0.5px",
                 }}
               >
-                {tickerText}
+                {renderTickerText(tickerText, breakMusicTrackText)}
               </div>
             </div>
           )}
@@ -1445,7 +1724,7 @@ export default function Player() {
             position: "relative",
             height: "100vh",
             width: "100vw",
-            background: "#000",
+            ...playerBackgroundStyle,
             color: "#e5e7eb",
             display: "grid",
             placeItems: "center",
@@ -1458,10 +1737,13 @@ export default function Player() {
             preload="auto"
             style={{ display: "none" }}
           />
+          {renderPlayerBackground()}
           {/* Show waiting screen - queue is displayed in the roller overlay */}
           {upNext.length > 0 ? (
             <div
               style={{
+                position: "relative",
+                zIndex: 1,
                 textAlign: "center",
                 padding: "20px",
                 display: "flex",
@@ -1529,9 +1811,14 @@ export default function Player() {
                 )}
               </div>
             </div>
-          ) : (
+          ) : isCustomPlayerBackground ? null : (
             <div
-              style={{ textAlign: "center", animation: "fadeInUp 0.6s ease" }}
+              style={{
+                position: "relative",
+                zIndex: 1,
+                textAlign: "center",
+                animation: "fadeInUp 0.6s ease",
+              }}
             >
               <h1
                 style={{
@@ -1667,13 +1954,14 @@ export default function Player() {
           position: "relative",
           height: "100vh",
           width: "100vw",
-          background: "#000",
+          ...playerBackgroundStyle,
           color: "#e5e7eb",
           overflow: "hidden",
           cursor: showControls ? "default" : "none",
         }}
       >
         <audio ref={breakAudioRef} preload="auto" style={{ display: "none" }} />
+        {renderPlayerBackground()}
         {isYouTube && youtubeVideoId ? (
           <iframe
             key={youtubeVideoId}
