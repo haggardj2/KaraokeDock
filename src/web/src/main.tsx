@@ -13,7 +13,6 @@ import Player from "./pages/Player";
 import Requests from "./pages/Requests";
 import Host from "./pages/Host";
 import Admin from "./pages/Admin";
-import { writeStoredSessionToken } from "./session-token";
 
 const ACCOUNT_AVATAR_BACKGROUND = "#111827";
 
@@ -54,7 +53,6 @@ function Nav() {
       })
         .then((result) => {
           auth.setSessionToken(result.sessionToken);
-          writeStoredSessionToken(result.sessionToken);
           auth.setIsLoggedIn(true);
           auth.setRole(result.role || "user");
           auth.setProfile({
@@ -331,11 +329,23 @@ function Nav() {
   );
 }
 
+function SessionStatus() {
+  const auth = useAuth();
+  if (!auth.sessionError) return null;
+  return (
+    <div role="alert" style={{ padding: 16, textAlign: "center", color: "var(--color-danger, #ef4444)" }}>
+      {auth.sessionError}{" "}
+      <button type="button" onClick={auth.retrySessionValidation}>Retry sign-in</button>
+    </div>
+  );
+}
+
 function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
         <Nav />
+        <SessionStatus />
         <Routes>
           <Route path="/" element={<Requests />} />
           <Route path="/player" element={<Player />} />

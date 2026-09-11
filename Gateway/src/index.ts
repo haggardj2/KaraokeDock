@@ -4,9 +4,11 @@ import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { config, validateConfig } from './config.js';
 import { openDatabase, setMeta } from './db.js';
 import { searchKaraokeNerds } from './karaokeNerds.js';
+import { clampFocus, parseProfileCrop, profileImageUrl, serializeSingerProfile, type SingerProfileRow } from './singerProfile.js';
 
 type TrackInput = {
   id?: string | number;
@@ -42,6 +44,12 @@ type GatewaySettings = {
   stationConnected: boolean;
 };
 
+const PROFILE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+const PROFILE_IMAGE_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
+const PROFILE_UPLOAD_WINDOW_MS = 15 * 60 * 1000;
+const PROFILE_UPLOAD_MAX_PER_WINDOW = 10;
+const profileUploadAttempts = new Map<string, { count: number; resetAt: number }>();
+
 validateConfig();
 
 const db = openDatabase();
@@ -55,6 +63,11 @@ app.use(cors({
   credentials: false,
 }));
 app.use(express.json({ limit: config.jsonBodyLimit }));
+const require = createRequire(import.meta.url);
+app.get('/vendor/croppie/croppie.css', (_req, res) => res.sendFile(require.resolve('croppie/croppie.css')));
+app.get('/vendor/croppie/croppie.js', (_req, res) => {
+  res.sendFile(path.resolve(publicDir, '../dist/vendor/croppie.js'));
+});
 app.use(express.static(publicDir, {
   setHeaders: (res) => {
     res.setHeader('Cache-Control', 'no-cache');
@@ -99,12 +112,80 @@ function normalizeNullableString(value: unknown, maxLength: number): string | nu
   return normalized || null;
 }
 
+function normalizeSingerUuid(value: unknown): string | null {
+  const normalized = normalizeNullableString(value, 120);
+  return normalized && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
+    ? normalized.toLowerCase()
+    : null;
+}
+
 function normalizeKeyAdjustment(value: unknown): number {
   const parsed = Number(value ?? 0);
   if (!Number.isInteger(parsed) || parsed < -6 || parsed > 6) {
     throw Object.assign(new Error('keyAdjustment must be an integer between -6 and 6'), { status: 400 });
   }
   return parsed;
+}
+
+function detectProfileImageMime(buffer: Buffer): string | null {
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) return 'image/png';
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  const header = buffer.subarray(0, 12).toString('ascii');
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) return 'image/gif';
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+function getSelfProfileIdentity(req: express.Request): { name: string; singerUuid: string } | null {
+  const name = normalizeString(req.query.name ?? req.body?.name, 120);
+  const singerUuid = normalizeSingerUuid(req.query.singerUuid ?? req.body?.singerUuid);
+  return name && singerUuid ? { name, singerUuid } : null;
+}
+
+function profileUploadGuard(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const now = Date.now();
+  if (profileUploadAttempts.size > 10_000) {
+    for (const [address, attempt] of profileUploadAttempts) {
+      if (attempt.resetAt <= now) profileUploadAttempts.delete(address);
+    }
+  }
+  const key = req.ip || req.socket.remoteAddress || 'unknown';
+  const current = profileUploadAttempts.get(key);
+  const nextEntry = !current || current.resetAt <= now
+    ? { count: 1, resetAt: now + PROFILE_UPLOAD_WINDOW_MS }
+    : { count: current.count + 1, resetAt: current.resetAt };
+  profileUploadAttempts.set(key, nextEntry);
+  if (nextEntry.count > PROFILE_UPLOAD_MAX_PER_WINDOW) {
+    res.status(429).json({ error: 'Too many profile image updates. Try again later.' });
+    return;
+  }
+  next();
+}
+
+function canStoreProfileImage(singerUuid: string, imageBytes: number): boolean {
+  const usage = db.prepare(`
+    SELECT COALESCE(SUM(LENGTH(image_data)), 0) AS total
+      FROM singer_profiles
+     WHERE singer_uuid <> ?
+  `).get(singerUuid) as { total: number };
+  return Number(usage.total || 0) + imageBytes <= PROFILE_IMAGE_TOTAL_MAX_BYTES;
+}
+
+function getSingerProfileRow(singerUuid: string): SingerProfileRow | undefined {
+  return db.prepare('SELECT * FROM singer_profiles WHERE singer_uuid = ?').get(singerUuid) as SingerProfileRow | undefined;
+}
+
+function getGatewaySingerProfile(singerUuid: string, name: string) {
+  const row = getSingerProfileRow(singerUuid);
+  return {
+    singerId: singerUuid,
+    displayName: row?.requested_by || name,
+    canUpload: true,
+    profile: serializeSingerProfile(row),
+  };
 }
 
 function externalTrackId(url: string): string {
@@ -672,15 +753,17 @@ app.get('/api/history/self/export', (req, res) => {
     return;
   }
   const songs = singerHistoryRows(name, singerUuid);
+  const profile = singerUuid ? getSingerProfileRow(singerUuid) : undefined;
 
   res.json({
     format: 'karaokedock.singer-history',
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     singers: [{
       singer: {
         uuid: singerUuid || undefined,
         displayName: name || 'Gateway Singer',
+        profile: profile ? serializeSingerProfile(profile, true) : undefined,
       },
       songs,
     }],
@@ -697,12 +780,12 @@ app.get('/api/history/self', (req, res) => {
   res.json({ songs: singerHistoryRows(name, singerUuid) });
 });
 
-app.post('/api/history/self/import', asyncHandler((req, res) => {
+app.post('/api/history/self/import', profileUploadGuard, asyncHandler((req, res) => {
   const name = normalizeString(req.body?.name, 120);
-  const singerUuid = normalizeNullableString(req.body?.singerUuid, 120);
+  const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
   const data = req.body?.data;
-  if (!name) {
-    res.status(400).json({ error: 'name is required' });
+  if (!name || !singerUuid) {
+    res.status(400).json({ error: 'name and a valid singerUuid are required' });
     return;
   }
   if (data?.format !== 'karaokedock.singer-history' || !Array.isArray(data?.singers)) {
@@ -719,6 +802,53 @@ app.post('/api/history/self/import', asyncHandler((req, res) => {
   let imported = 0;
   db.transaction(() => {
     for (const singer of data.singers) {
+      const profile = singer?.singer?.profile;
+      if (singerUuid && profile) {
+        const crop = parseProfileCrop(profile.crop);
+        if (typeof profile.imageDataBase64 === 'string' &&
+            profile.imageDataBase64.length > Math.ceil(PROFILE_IMAGE_MAX_BYTES / 3) * 4) {
+          throw Object.assign(new Error('Imported profile image exceeds 2 MiB'), { status: 413 });
+        }
+        const imageData = typeof profile.imageDataBase64 === 'string'
+          ? Buffer.from(profile.imageDataBase64, 'base64')
+          : null;
+        const imageMime = imageData ? detectProfileImageMime(imageData) : null;
+        const imageUrl = profileImageUrl(profile.imageUrl);
+        if (imageData && (!imageMime || imageData.length > PROFILE_IMAGE_MAX_BYTES)) {
+          throw Object.assign(new Error('Imported profile image must be a PNG, JPEG, WebP, or GIF within 2 MiB'), { status: 400 });
+        }
+        if (!imageData && (profile.imageUrl != null || profile.imageSource === 'oidc') && !imageUrl) {
+          throw Object.assign(new Error('Imported provider image must have an HTTPS URL within 2048 characters, without credentials'), { status: 400 });
+        }
+        if (imageData && !canStoreProfileImage(singerUuid, imageData.length)) {
+          throw Object.assign(new Error('Profile image storage is full'), { status: 507 });
+        }
+        db.prepare(`
+          INSERT INTO singer_profiles(
+            singer_uuid, requested_by, image_mime, image_data, image_url, crop, focus_x, focus_y, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(singer_uuid) DO UPDATE SET
+            requested_by = excluded.requested_by,
+            image_mime = excluded.image_mime,
+            image_data = excluded.image_data,
+            image_url = excluded.image_url,
+            crop = excluded.crop,
+            focus_x = excluded.focus_x,
+            focus_y = excluded.focus_y,
+            updated_at = excluded.updated_at
+        `).run(
+          singerUuid,
+          name,
+          imageMime,
+          imageMime ? imageData : null,
+          imageData ? null : imageUrl,
+          (imageData || imageUrl) && crop ? JSON.stringify(crop) : null,
+          clampFocus(profile.focusX),
+          clampFocus(profile.focusY),
+          new Date().toISOString(),
+        );
+      }
       const songs = Array.isArray(singer?.songs) ? singer.songs : [];
       for (const song of songs) {
         const title = normalizeString(song?.title, 300);
@@ -742,6 +872,123 @@ app.post('/api/history/self/import', asyncHandler((req, res) => {
 
   res.json({ ok: true, imported });
 }));
+
+app.get('/api/singers/self/profile', (req, res) => {
+  const identity = getSelfProfileIdentity(req);
+  if (!identity) {
+    res.status(400).json({ error: 'name and singerUuid are required' });
+    return;
+  }
+  res.json(getGatewaySingerProfile(identity.singerUuid, identity.name));
+});
+
+app.post(
+  '/api/singers/self/profile/image',
+  profileUploadGuard,
+  express.raw({ type: 'image/*', limit: PROFILE_IMAGE_MAX_BYTES }),
+  (req, res) => {
+    const identity = getSelfProfileIdentity(req);
+    if (!identity) {
+      res.status(400).json({ error: 'name and singerUuid are required' });
+      return;
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'Upload an image file' });
+      return;
+    }
+    const mime = detectProfileImageMime(req.body);
+    if (!mime) {
+      res.status(400).json({ error: 'Upload a PNG, JPEG, WebP, or GIF image' });
+      return;
+    }
+    if (!canStoreProfileImage(identity.singerUuid, req.body.length)) {
+      res.status(507).json({ error: 'Profile image storage is full' });
+      return;
+    }
+    const updatedAt = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO singer_profiles(singer_uuid, requested_by, image_mime, image_data, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(singer_uuid) DO UPDATE SET
+        requested_by = excluded.requested_by,
+        image_mime = excluded.image_mime,
+        image_data = excluded.image_data,
+        image_url = NULL,
+        crop = NULL,
+        focus_x = 50,
+        focus_y = 50,
+        updated_at = excluded.updated_at
+    `).run(identity.singerUuid, identity.name, mime, req.body, updatedAt);
+    res.json(getGatewaySingerProfile(identity.singerUuid, identity.name));
+  },
+);
+
+app.patch('/api/singers/self/profile/focus', profileUploadGuard, (req, res) => {
+  const identity = getSelfProfileIdentity(req);
+  if (!identity) {
+    res.status(400).json({ error: 'name and singerUuid are required' });
+    return;
+  }
+  const crop = req.body?.crop === undefined ? undefined : parseProfileCrop(req.body.crop);
+  const existing = getSingerProfileRow(identity.singerUuid);
+  if (!existing || !(existing.image_mime && existing.image_data) && !existing.image_url) {
+    res.status(404).json({ error: 'Add a profile image before setting its crop' });
+    return;
+  }
+  db.prepare(`
+    UPDATE singer_profiles
+       SET requested_by = ?,
+           focus_x = ?,
+           focus_y = ?,
+           crop = ?,
+           updated_at = ?
+     WHERE singer_uuid = ?
+  `).run(
+    identity.name,
+    clampFocus(req.body?.focusX ?? existing.focus_x),
+    clampFocus(req.body?.focusY ?? existing.focus_y),
+    crop === undefined ? existing.crop : crop ? JSON.stringify(crop) : null,
+    new Date().toISOString(),
+    identity.singerUuid,
+  );
+  res.json(getGatewaySingerProfile(identity.singerUuid, identity.name));
+});
+
+app.delete('/api/singers/self/profile/image', (req, res) => {
+  const identity = getSelfProfileIdentity(req);
+  if (!identity) {
+    res.status(400).json({ error: 'name and singerUuid are required' });
+    return;
+  }
+  db.prepare(`
+    INSERT INTO singer_profiles(singer_uuid, requested_by, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(singer_uuid) DO UPDATE SET
+      requested_by = excluded.requested_by,
+      image_mime = NULL,
+      image_data = NULL,
+      image_url = NULL,
+      crop = NULL,
+      focus_x = 50,
+      focus_y = 50,
+      updated_at = excluded.updated_at
+  `).run(identity.singerUuid, identity.name, new Date().toISOString());
+  res.json(getGatewaySingerProfile(identity.singerUuid, identity.name));
+});
+
+app.get('/api/singers/:singerUuid/profile-image', (req, res) => {
+  const singerUuid = normalizeNullableString(req.params.singerUuid, 120);
+  const profile = singerUuid
+    ? getSingerProfileRow(singerUuid)
+    : null;
+  if (!profile?.image_mime || !profile.image_data) {
+    res.status(404).json({ error: 'Singer profile image not found' });
+    return;
+  }
+  res.setHeader('Content-Type', profile.image_mime);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.send(profile.image_data);
+});
 
 app.get('/api/my-queue', (req, res) => {
   const name = normalizeString(req.query.name, 120);
@@ -974,8 +1221,47 @@ app.get('/api/station/requests/pending', requireStationToken, (req, res) => {
      WHERE r.status = 'pending'
      ORDER BY r.created_at
      LIMIT ?
-  `).all(limit);
+  `).all(limit) as any[];
   res.json(rows);
+});
+
+app.get('/api/station/singer-profiles', requireStationToken, (req, res) => {
+  const updatedAfter = normalizeNullableString(req.query.updatedAfter, 80);
+  const afterSingerUuid = normalizeNullableString(req.query.afterSingerUuid, 120);
+  const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 10);
+  const rows = db.prepare(`
+    SELECT *
+      FROM singer_profiles
+     WHERE updated_at IS NOT NULL
+        AND (
+          ? IS NULL
+          OR updated_at > ?
+          OR (updated_at = ? AND singer_uuid > COALESCE(?, ''))
+        )
+      ORDER BY updated_at, singer_uuid
+      LIMIT ?
+  `).all(updatedAfter, updatedAfter, updatedAfter, afterSingerUuid, limit) as SingerProfileRow[];
+  res.json(rows.map((row) => ({
+    singerUuid: row.singer_uuid,
+    profile: serializeSingerProfile(row, true),
+  })));
+});
+
+app.get('/api/station/singer-profiles/:singerUuid', requireStationToken, (req, res) => {
+  const singerUuid = normalizeNullableString(req.params.singerUuid, 120);
+  if (!singerUuid) {
+    res.status(400).json({ error: 'singerUuid is required' });
+    return;
+  }
+  const row = getSingerProfileRow(singerUuid);
+  if (!row) {
+    res.json({ singerUuid, profile: null });
+    return;
+  }
+  res.json({
+    singerUuid,
+    profile: serializeSingerProfile(row, true),
+  });
 });
 
 app.get('/api/station/queue-actions/pending', requireStationToken, (req, res) => {

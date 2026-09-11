@@ -9,6 +9,9 @@ import React, {
 import { createPortal } from "react-dom";
 import { api } from "../api";
 import { useAuth } from "../auth-context";
+import SingerAvatar, { type SingerProfile, type ProfileCrop } from "../components/SingerAvatar";
+import ProfileImageEditor from "../components/ProfileImageEditor";
+import ProfileDialog from "../components/ProfileDialog";
 import "./Requests.css";
 
 const MIN_KEY_ADJUSTMENT = -6;
@@ -42,6 +45,14 @@ type MyQueueItem = {
 };
 
 type BrowseCategory = "artist" | "title";
+
+type SelfSingerProfileResponse = {
+  singerId: string;
+  singerUuid: string;
+  displayName: string;
+  canUpload: boolean;
+  profile: SingerProfile;
+};
 
 type BrowseArtistRow = {
   artist: string;
@@ -164,14 +175,6 @@ function safeHistoryFilename(name: string): string {
   return `${name.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "singer-history"}.kd`;
 }
 
-function splitNameForFields(name: string): { firstName: string; lastName: string } {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  return {
-    firstName: parts[0] ?? "",
-    lastName: parts.slice(1).join(" "),
-  };
-}
-
 function createSingerUuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -210,19 +213,14 @@ function readJsonFile(file: File): Promise<unknown> {
 export default function Requests() {
   const auth = useAuth();
   const [q, setQ] = useState("");
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
+  const [requestedBy, setRequestedBy] = useState(() => (localStorage.getItem("karaoke-name") ?? "").trim());
   const [singerUuid, setSingerUuid] = useState(() => getOrCreateSingerUuid());
-  const requestedBy = [firstName.trim(), lastName.trim()]
-    .filter(Boolean)
-    .join(" ");
-  const signedInRequestName = (
+  const signedInRequestName = auth.isLoggedIn ? (
     auth.profile.displayName ||
     auth.profile.username ||
     ""
-  ).trim();
-  const isSignedInRequester =
-    auth.isLoggedIn && Boolean(auth.sessionToken) && Boolean(signedInRequestName);
+  ).trim() : "";
+  const isSignedInRequester = Boolean(auth.sessionToken);
   const requestSingerUuid = isSignedInRequester ? undefined : singerUuid;
   const requesterHeaders = useMemo<Record<string, string>>(
     () => {
@@ -318,6 +316,12 @@ export default function Requests() {
   const myQueueRef = useRef<MyQueueItem[]>([]);
   const draggingQueueIdRef = useRef<number | null>(null);
   const historyImportInputRef = useRef<HTMLInputElement | null>(null);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const profileButtonRef = useRef<HTMLButtonElement | null>(null);
+  const profileLoadRef = useRef(0);
+  const queueLoadRef = useRef(0);
+  const requesterSessionRef = useRef(auth.sessionToken);
+  const requesterSessionChanged = requesterSessionRef.current !== auth.sessionToken;
   const completedLongClickRef = useRef<{
     id: number;
     startX: number;
@@ -337,7 +341,14 @@ export default function Requests() {
   const [nameConfirmed, setNameConfirmed] = useState(false);
   const [nameError, setNameError] = useState("");
   const [nameModalOpen, setNameModalOpen] = useState(false);
-  const [nameEditOpen, setNameEditOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState(requestedBy);
+  const [savingName, setSavingName] = useState(false);
+  const [singerProfile, setSingerProfile] = useState<SingerProfile | null>(null);
+  const [canUploadProfileImage, setCanUploadProfileImage] = useState(true);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [profilePanel, setProfilePanel] = useState<"image" | "history" | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileLoadError, setProfileLoadError] = useState("");
   // Version picker for consolidated song results
   const [versionPicker, setVersionPicker] = useState<{
     title: string;
@@ -430,8 +441,7 @@ export default function Requests() {
     const savedName = localStorage.getItem("karaoke-name");
     if (savedName) {
       const parts = savedName.trim().split(/\s+/);
-      setFirstName(parts[0] ?? "");
-      setLastName(parts.slice(1).join(" "));
+      setRequestedBy(savedName.trim().replace(/\s+/g, " "));
       if (parts.length >= 2 && parts[0] && parts[1]) {
         setNameConfirmed(true);
       }
@@ -526,17 +536,89 @@ export default function Requests() {
   useEffect(() => {
     if (!signedInRequestName) return;
 
-    const { firstName: signedInFirstName, lastName: signedInLastName } =
-      splitNameForFields(signedInRequestName);
-    setFirstName(signedInFirstName);
-    setLastName(signedInLastName);
+    setRequestedBy(signedInRequestName);
     setNameError("");
     setNameConfirmed(true);
     setNameModalOpen(false);
-    setNameEditOpen(false);
     setShowNamePrompt(false);
     localStorage.setItem("karaoke-name", signedInRequestName);
   }, [signedInRequestName]);
+
+  useEffect(() => {
+    if (requesterSessionRef.current === auth.sessionToken) return;
+    requesterSessionRef.current = auth.sessionToken;
+    profileLoadRef.current++;
+    queueLoadRef.current++;
+    setSingerProfile(null);
+    setMyQueue([]);
+    setMyQueueOpen(false);
+    setMyQueueLoading(false);
+    setProfileMenuOpen(false);
+    setProfilePanel(null);
+    setProfileLoading(false);
+    setProfileLoadError("");
+    setNameError("");
+    if (auth.sessionToken) {
+      setNameModalOpen(false);
+    } else {
+      localStorage.removeItem("karaoke-name");
+      setRequestedBy("");
+      setNameDraft("");
+      setNameConfirmed(false);
+      setNameModalOpen(true);
+    }
+  }, [auth.sessionToken]);
+
+  const loadSingerProfile = useCallback(async () => {
+    if (requesterSessionChanged || !nameConfirmed || !requestedBy.trim()) return;
+    const request = ++profileLoadRef.current;
+    setProfileLoading(true);
+    setProfileLoadError("");
+    try {
+      const result = (await api(`/api/singers/self/profile?${buildRequesterParams().toString()}`, {
+        headers: requesterHeaders,
+      })) as SelfSingerProfileResponse;
+      if (request === profileLoadRef.current) {
+        setSingerProfile(result.profile);
+        setCanUploadProfileImage(result.canUpload);
+        if (!isSignedInRequester && typeof result.singerUuid === "string") {
+          localStorage.setItem(SINGER_UUID_STORAGE_KEY, result.singerUuid);
+          setSingerUuid(result.singerUuid);
+          setRequestedBy(result.displayName);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load singer profile:", error);
+      if (request === profileLoadRef.current) setProfileLoadError(error instanceof Error ? error.message : "Could not load profile picture.");
+    } finally {
+      if (request === profileLoadRef.current) setProfileLoading(false);
+    }
+  }, [buildRequesterParams, nameConfirmed, requestedBy, requesterHeaders, isSignedInRequester, requesterSessionChanged]);
+
+  useEffect(() => {
+    if (nameModalOpen) return;
+    void loadSingerProfile();
+    return () => { profileLoadRef.current++; };
+  }, [loadSingerProfile, nameModalOpen]);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    function dismiss(event: PointerEvent) {
+      if (event.target instanceof Node && !profileMenuRef.current?.contains(event.target)) setProfileMenuOpen(false);
+    }
+    function escape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setProfileMenuOpen(false);
+        profileButtonRef.current?.focus();
+      }
+    }
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [profileMenuOpen]);
 
   // Auto-open name modal on first load if name not yet confirmed.
   // Read localStorage directly — the nameConfirmed state hasn't been set yet
@@ -545,10 +627,7 @@ export default function Requests() {
     const saved = localStorage.getItem("karaoke-name");
     const parts = (saved ?? "").trim().split(/\s+/);
     const alreadyConfirmed = parts.length >= 2 && !!parts[0] && !!parts[1];
-    if (!alreadyConfirmed) {
-      setNameEditOpen(true);
-      setNameModalOpen(true);
-    }
+    if (!alreadyConfirmed && !auth.sessionToken) openNameDialog();
   }, []);
 
   // Helper function to adjust key
@@ -975,38 +1054,43 @@ export default function Requests() {
   const isKnLoading = knBusy;
   const availableBrowseLetters = new Set(browseLetters);
 
+  function openNameDialog() {
+    setNameDraft(requestedBy);
+    setNameError("");
+    setNameModalOpen(true);
+  }
+
   async function confirmName() {
-    const fn = firstName.trim();
-    const ln = lastName.trim();
-    if (!fn) {
-      setNameError("First name is required");
+    if (savingName) return;
+    const name = nameDraft.trim().replace(/\s+/g, " ");
+    if (name.split(" ").length < 2) {
+      setNameError("Enter your first name and at least a last initial.");
       return;
     }
-    if (!ln) {
-      setNameError("Last name (or initial) is required");
-      return;
-    }
-    const name = [fn, ln].join(" ");
+    setSavingName(true);
     try {
       const result = await api("/api/singers/self/name", {
         method: "POST",
         headers: requesterJsonHeaders,
         body: JSON.stringify({ name, singerUuid: requestSingerUuid }),
       });
-      if (typeof result?.singer?.uuid === "string") {
+      if (!isSignedInRequester && typeof result?.singer?.uuid === "string") {
         localStorage.setItem(SINGER_UUID_STORAGE_KEY, result.singer.uuid);
         setSingerUuid(result.singer.uuid);
       }
+      const savedName = result.singer.displayName;
+      setRequestedBy(savedName);
+      if (isSignedInRequester) auth.setProfile({ displayName: savedName });
+      setNameError("");
+      setNameConfirmed(true);
+      setNameModalOpen(false);
+      setShowNamePrompt(false);
     } catch (err) {
-      setNameError("Could not save name. Please try again.");
+      setNameError(err instanceof Error ? err.message : "Could not save name. Please try again.");
       console.error(err);
-      return;
+    } finally {
+      setSavingName(false);
     }
-    setNameError("");
-    setNameConfirmed(true);
-    setNameModalOpen(false);
-    setNameEditOpen(false);
-    setShowNamePrompt(false);
   }
 
   // Group local search results by normalised title + artist to deduplicate across disc IDs
@@ -1160,6 +1244,8 @@ export default function Requests() {
   ]);
 
   const loadMyQueue = useCallback(async () => {
+    if (requesterSessionChanged) return;
+    const request = ++queueLoadRef.current;
     const name = requestedBy.trim();
     if (!name) {
       setMyQueue([]);
@@ -1171,16 +1257,20 @@ export default function Requests() {
         `/api/queue/by-requester?${buildRequesterParams().toString()}`,
         { headers: requesterHeaders },
       );
-      setMyQueue(normalizeMyQueueItems(items));
-    } catch {
-      setMyQueue([]);
+      if (request === queueLoadRef.current) setMyQueue(normalizeMyQueueItems(items));
+    } catch (error) {
+      if (request === queueLoadRef.current) {
+        console.error("Could not load singer queue:", error);
+        setMyQueue([]);
+      }
     } finally {
-      setMyQueueLoading(false);
+      if (request === queueLoadRef.current) setMyQueueLoading(false);
     }
-  }, [buildRequesterParams, requestedBy, requesterHeaders]);
+  }, [buildRequesterParams, requestedBy, requesterHeaders, requesterSessionChanged]);
 
   useEffect(() => {
     void loadMyQueue();
+    return () => { queueLoadRef.current++; };
   }, [loadMyQueue]);
 
   useEffect(() => {
@@ -1384,9 +1474,11 @@ export default function Requests() {
       );
       downloadJsonFile(safeHistoryFilename(name), data);
       showToast("Singer history exported");
+      return true;
     } catch (err) {
-      showToast("Could not export singer history.", "error");
+      showToast(err instanceof Error ? `Could not export singer history: ${err.message}` : "Could not export singer history.", "error");
       console.error(err);
+      return false;
     }
   }
 
@@ -1401,6 +1493,7 @@ export default function Requests() {
         body: JSON.stringify({ name, singerUuid: requestSingerUuid, data }),
       });
       await loadMyQueue();
+      await loadSingerProfile();
       showToast(
         `Imported ${Number(result.imported ?? 0)} history song${Number(result.imported ?? 0) === 1 ? "" : "s"}`,
       );
@@ -1415,22 +1508,56 @@ export default function Requests() {
   }
 
   async function logOffSingerProfile() {
-    if (requestedBy.trim() && window.confirm("Do you want to export your singer history before logging off?")) {
-      await exportMySingerHistory();
+    if (isSignedInRequester) {
+      await auth.handleLogout();
+      return;
     }
+    profileLoadRef.current++;
+    setProfileMenuOpen(false);
+    setProfilePanel(null);
     localStorage.removeItem("karaoke-name");
     localStorage.removeItem(SINGER_UUID_STORAGE_KEY);
     const nextUuid = createSingerUuid();
     localStorage.setItem(SINGER_UUID_STORAGE_KEY, nextUuid);
     setSingerUuid(nextUuid);
-    setFirstName("");
-    setLastName("");
+    setRequestedBy("");
     setNameConfirmed(false);
-    setNameEditOpen(true);
+    setNameDraft("");
     setNameModalOpen(true);
     setMyQueue([]);
     setRevealedRemoveQueueId(null);
     setNameError("");
+    setSingerProfile(null);
+  }
+
+  async function saveProfileImage(crop: ProfileCrop, image?: Blob) {
+    const request = profileLoadRef.current;
+    if (image) {
+      const uploaded: SelfSingerProfileResponse = await api(
+        `/api/singers/self/profile/image?${buildRequesterParams().toString()}`,
+        {
+          method: "POST",
+          headers: { ...requesterHeaders, "Content-Type": image.type },
+          body: image,
+        },
+      );
+      if (request === profileLoadRef.current) setSingerProfile(uploaded.profile);
+    }
+    const result: SelfSingerProfileResponse = await api("/api/singers/self/profile/focus", {
+      method: "PATCH",
+      headers: requesterJsonHeaders,
+      body: JSON.stringify({ name: requestedBy.trim(), singerUuid: requestSingerUuid, crop, focusX: 50, focusY: 50 }),
+    });
+    if (request === profileLoadRef.current) setSingerProfile(result.profile);
+  }
+
+  async function removeProfileImage() {
+    const request = profileLoadRef.current;
+    const result: SelfSingerProfileResponse = await api(
+      `/api/singers/self/profile/image?${buildRequesterParams().toString()}`,
+      { method: "DELETE", headers: requesterHeaders },
+    );
+    if (request === profileLoadRef.current) setSingerProfile(result.profile);
   }
 
   async function reorderMyQueue(orderedIds: number[]) {
@@ -1455,9 +1582,7 @@ export default function Requests() {
     if (!name) {
       setShowNamePrompt(true);
       setNameConfirmed(false);
-      setNameEditOpen(true);
-      setNameModalOpen(true);
-      document.getElementById("singer-first-name-input")?.focus();
+      openNameDialog();
       return;
     }
 
@@ -1514,8 +1639,7 @@ export default function Requests() {
     const name = requestedBy.trim();
     if (!name) {
       setShowNamePrompt(true);
-      setNameEditOpen(true);
-      setNameModalOpen(true);
+      openNameDialog();
       return;
     }
 
@@ -1576,304 +1700,86 @@ export default function Requests() {
 
       <div className="container">
         {/* Header */}
-        <div className="top-actions">
+        <div className="top-actions" ref={profileMenuRef}>
           <button
+            ref={profileButtonRef}
             className="profile-button"
             onClick={() => {
-              setNameEditOpen(!nameConfirmed);
-              setNameModalOpen(true);
+              if (!nameConfirmed) {
+                openNameDialog();
+              } else setProfileMenuOpen(!profileMenuOpen);
             }}
             title={
               nameConfirmed ? `Singing as ${requestedBy}` : "Enter your name"
             }
             type="button"
+            aria-label={nameConfirmed ? `${requestedBy} profile options` : "Set up your profile"}
+            aria-expanded={profileMenuOpen}
+            aria-controls="request-profile-menu"
           >
-            <span>👤</span>
-            <span className="profile-name">
-              {nameConfirmed ? firstName || "Profile" : "Set name"}
-            </span>
+            <SingerAvatar name={requestedBy} profile={singerProfile ?? {
+              imageUrl: isSignedInRequester ? auth.profile.picture : null, focusX: 50, focusY: 50,
+            }} size={42} />
           </button>
+          {profileMenuOpen && (
+            <nav id="request-profile-menu" className="request-profile-menu" aria-label="Profile options">
+              <button type="button" onClick={() => {
+                setProfileMenuOpen(false); setProfilePanel("history");
+              }}>Manage History</button>
+              <button type="button" onClick={() => {
+                setProfileMenuOpen(false); setProfilePanel("image");
+                void loadSingerProfile();
+              }}>Manage Profile Picture</button>
+              <button type="button" onClick={() => {
+                setProfileMenuOpen(false); openNameDialog();
+              }}>Edit Name</button>
+              <button type="button" onClick={() => void logOffSingerProfile()}>Logout</button>
+            </nav>
+          )}
         </div>
 
-        <div className="header">
-          <img className="app-icon" src="/icon.png" alt="" />
-          <h1 className="header-title">Karaoke Requests</h1>
-          <p className="header-subtitle">
-            Search the catalog, pick your version, and watch your queue.
-          </p>
-        </div>
-
-        {/* Name modal — portal, auto-opens if no name confirmed */}
-        {nameModalOpen &&
-          createPortal(
-            <>
-              <div
-                style={{
-                  position: "fixed",
-                  inset: 0,
-                  zIndex: 1000,
-                  background: "rgba(0,0,0,0.6)",
-                }}
-                onClick={() => {
-                  if (nameConfirmed) {
-                    setNameModalOpen(false);
-                    setNameEditOpen(false);
-                    setNameError("");
-                  }
+        {profilePanel === "history" && (
+          <ProfileDialog title="Manage History" onClose={() => setProfilePanel(null)}>
+            <div className="profile-history-actions">
+              <button type="button" onClick={() => void exportMySingerHistory()}>Export History</button>
+              <button type="button" onClick={() => historyImportInputRef.current?.click()}>Import History</button>
+              <input ref={historyImportInputRef} type="file" accept=".kd,application/json" hidden
+                onChange={(event) => void importMySingerHistory(event.currentTarget.files?.[0])} />
+            </div>
+          </ProfileDialog>
+        )}
+        {profilePanel === "image" && (
+          <ProfileDialog title="Manage Profile Picture" onClose={() => setProfilePanel(null)}>
+            {profileLoading ? <p>Loading profile picture...</p> : profileLoadError ? (
+              <div role="alert"><p>{profileLoadError}</p><button type="button" onClick={() => void loadSingerProfile()}>Retry</button></div>
+            ) : <ProfileImageEditor
+              name={requestedBy} profile={singerProfile} canUpload={canUploadProfileImage}
+              onSave={saveProfileImage} onRemove={removeProfileImage} onCancel={() => setProfilePanel(null)}
+            />}
+          </ProfileDialog>
+        )}
+        {nameModalOpen && (
+          <ProfileDialog title="Who is singing?" className="request-name-dialog"
+            onClose={nameConfirmed && !savingName ? () => setNameModalOpen(false) : undefined}>
+            <form className="request-name-form" onSubmit={(event) => { event.preventDefault(); void confirmName(); }}>
+              <p id="singer-name-help">Enter your first name and at least a last initial so requests and queue edits stay linked to you.</p>
+              {showNamePrompt && !requestedBy.trim() && <p className="profile-error">Enter your name to add songs to the queue.</p>}
+              <input
+                id="singer-name-input" aria-label="Singer name" aria-describedby="singer-name-help singer-name-error"
+                aria-invalid={Boolean(nameError)} type="text" autoComplete="name" autoCapitalize="words"
+                placeholder="First L or First Last" value={nameDraft} disabled={savingName} autoFocus
+                onChange={(event) => { setNameDraft(event.currentTarget.value); setNameError(""); }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !shouldHandleEnterKey(event)) event.preventDefault();
                 }}
               />
-              <div
-                style={{
-                  position: "fixed",
-                  top: "50%",
-                  left: "50%",
-                  transform: "translate(-50%, -50%)",
-                  zIndex: 1001,
-                  background: "var(--color-bg-card)",
-                  border: "1px solid var(--color-border)",
-                  borderRadius: 16,
-                  boxShadow: "0 8px 40px rgba(0,0,0,0.8)",
-                  width: "min(380px, 94vw)",
-                  padding: "24px",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    marginBottom: 20,
-                  }}
-                >
-                  <span style={{ fontWeight: 700, fontSize: 17 }}>
-                    👤 {nameEditOpen || !nameConfirmed ? (nameConfirmed ? "Change Name" : "Enter Your Name") : "Profile"}
-                  </span>
-                  {nameConfirmed && (
-                    <button
-                      onClick={() => {
-                        setNameModalOpen(false);
-                        setNameEditOpen(false);
-                        setNameError("");
-                      }}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        color: "var(--color-text-secondary)",
-                        cursor: "pointer",
-                        fontSize: 18,
-                        padding: "2px 6px",
-                      }}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-                {(nameEditOpen || !nameConfirmed) && (
-                  <>
-                    {showNamePrompt && !requestedBy.trim() && (
-                      <div
-                        style={{
-                          background: "rgba(239,68,68,0.1)",
-                          border: "1px solid rgba(239,68,68,0.3)",
-                          borderRadius: 10,
-                          padding: "10px 14px",
-                          marginBottom: 16,
-                          fontSize: 13,
-                          color: "#ef4444",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                        }}
-                      >
-                        <span>⚠️</span>
-                        <span>Enter your name to add songs to the queue</span>
-                      </div>
-                    )}
-                    <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>
-                      <div style={{ flex: 1 }}>
-                        <label
-                          style={{
-                            display: "block",
-                            fontSize: 12,
-                            fontWeight: 500,
-                            color: "var(--color-text-secondary)",
-                            marginBottom: 6,
-                          }}
-                        >
-                          First Name{" "}
-                          <span style={{ color: "var(--color-danger)" }}>*</span>
-                        </label>
-                        <input
-                          id="singer-first-name-input"
-                          className="input-field"
-                          type="text"
-                          placeholder="First name…"
-                          value={firstName}
-                          onChange={(e) => {
-                            setFirstName(e.target.value);
-                            setNameError("");
-                          }}
-                          autoComplete="given-name"
-                          autoCapitalize="words"
-                          onKeyDown={(e) => {
-                            if (shouldHandleEnterKey(e)) void confirmName();
-                          }}
-                          style={{ paddingLeft: 14 }}
-                        />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label
-                          style={{
-                            display: "block",
-                            fontSize: 12,
-                            fontWeight: 500,
-                            color: "var(--color-text-secondary)",
-                            marginBottom: 6,
-                          }}
-                        >
-                          Last Name{" "}
-                          <span style={{ color: "var(--color-danger)" }}>*</span>
-                        </label>
-                        <input
-                          id="singer-last-name-input"
-                          className="input-field"
-                          type="text"
-                          placeholder="Last name…"
-                          value={lastName}
-                          onChange={(e) => {
-                            setLastName(e.target.value);
-                            setNameError("");
-                          }}
-                          autoComplete="family-name"
-                          autoCapitalize="words"
-                          onKeyDown={(e) => {
-                            if (shouldHandleEnterKey(e)) void confirmName();
-                          }}
-                          style={{ paddingLeft: 14 }}
-                        />
-                      </div>
-                    </div>
-                    {nameError && (
-                      <div
-                        style={{
-                          color: "var(--color-danger)",
-                          fontSize: 13,
-                          marginBottom: 10,
-                        }}
-                      >
-                        ⚠️ {nameError}
-                      </div>
-                    )}
-                    <button
-                      onClick={() => void confirmName()}
-                      style={{
-                        marginTop: 14,
-                        width: "100%",
-                        padding: "12px",
-                        background: "var(--color-accent)",
-                        color: "#fff",
-                        border: "none",
-                        borderRadius: 10,
-                        fontWeight: 700,
-                        fontSize: 15,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {nameConfirmed ? "Save Changes" : "Let's go! 🎤"}
-                    </button>
-                  </>
-                )}
-                {nameConfirmed && (
-                  <div
-                    style={{
-                      marginTop: 12,
-                      paddingTop: 12,
-                      borderTop: "1px solid var(--color-border)",
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 8,
-                    }}
-                  >
-                    <input
-                      ref={historyImportInputRef}
-                      type="file"
-                      accept=".kd,application/json"
-                      style={{ display: "none" }}
-                      onChange={(event) =>
-                        void importMySingerHistory(event.currentTarget.files?.[0])
-                      }
-                    />
-                    <button
-                      onClick={() => {
-                        setNameEditOpen(true);
-                        requestAnimationFrame(() =>
-                          document.getElementById("singer-first-name-input")?.focus(),
-                        );
-                      }}
-                      style={{
-                        flex: "1 1 45%",
-                        padding: "10px",
-                        background: "var(--color-bg-secondary)",
-                        color: "var(--color-text-primary)",
-                        border: "1px solid var(--color-border)",
-                        borderRadius: 10,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      ✏️ Change Name
-                    </button>
-                    <button
-                      onClick={() => void exportMySingerHistory()}
-                      style={{
-                        flex: "1 1 45%",
-                        padding: "10px",
-                        background: "rgba(99,102,241,0.15)",
-                        color: "var(--color-accent)",
-                        border: "1px solid rgba(99,102,241,0.3)",
-                        borderRadius: 10,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Export History
-                    </button>
-                    <button
-                      onClick={() => historyImportInputRef.current?.click()}
-                      style={{
-                        flex: "1 1 45%",
-                        padding: "10px",
-                        background: "var(--color-bg-secondary)",
-                        color: "var(--color-text-primary)",
-                        border: "1px solid var(--color-border)",
-                        borderRadius: 10,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Import History
-                    </button>
-                    <button
-                      onClick={() => void logOffSingerProfile()}
-                      style={{
-                        flex: "1 1 45%",
-                        padding: "10px",
-                        background: "rgba(239,68,68,0.12)",
-                        color: "var(--color-danger)",
-                        border: "1px solid rgba(239,68,68,0.3)",
-                        borderRadius: 10,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Log Off
-                    </button>
-                  </div>
-                )}
-              </div>
-            </>,
-            document.body,
-          )}
+              <p id="singer-name-error" className="profile-error" role="alert">{nameError}</p>
+              <button type="submit" className="request-name-save" disabled={savingName}>
+                {savingName ? "Saving..." : "Continue"}
+              </button>
+            </form>
+          </ProfileDialog>
+        )}
 
         {/* Bottom footer bar — My Queue / next song */}
         {nameConfirmed &&

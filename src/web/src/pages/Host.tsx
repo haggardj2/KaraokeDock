@@ -3,7 +3,11 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { api, API_BASE, getWsUrl } from '../api'
 import { useAuth } from '../auth-context'
 import { parseBooleanSetting } from '../utils/settings'
-import { clearStoredSessionToken, writeStoredSessionToken } from '../session-token'
+import SingerAvatar, { type SingerProfile, type ProfileCrop } from '../components/SingerAvatar'
+import ProfileDialog from '../components/ProfileDialog'
+import ProfileImageEditor from '../components/ProfileImageEditor'
+import type { OverlaySettings } from '../components/QueueOverlay'
+import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, singerPlaybackAction, getSingerDisplaySong, type PlayerPlaybackState } from '../playerPlayback'
 
 type Row = {
   id: number
@@ -49,6 +53,7 @@ type QueueSinger = {
   completedSongs: QueueSong[]
   completedSongsCount: number
   queuedSongsCount: number
+  profile: SingerProfile
 }
 
 type ActiveRotation = {
@@ -89,6 +94,7 @@ type SingerHistory = {
     status: string
     totalSongsSung: number
     lastSangAt: string | null
+    profile: SingerProfile
   }
   queuedSongs: SingerHistorySong[]
   completedSongs: SingerHistorySong[]
@@ -102,6 +108,16 @@ type SingerHistoryKdSinger = {
     id?: string
     displayName?: string
     normalizedName?: string
+    profile?: {
+      imageSource?: 'oidc' | 'upload' | null
+      imageUrl?: string | null
+      imageMime?: string | null
+      imageDataBase64?: string | null
+      focusX?: number | null
+      focusY?: number | null
+      crop?: ProfileCrop | null
+      updatedAt?: string | null
+    }
   }
   songs?: unknown[]
 }
@@ -111,6 +127,16 @@ type SingerHistoryKdFile = {
   version?: number
   exportedAt?: string
   singers?: SingerHistoryKdSinger[]
+}
+
+type ArchivedSinger = {
+  singerId: string
+  displayName: string
+  status: string
+  totalSongsSung: number
+  historyCount: number
+  lastSangAt: string | null
+  profile: SingerProfile
 }
 
 const LOCAL_SEARCH_DELAY_MS = 300
@@ -283,6 +309,14 @@ function readJsonFile(file: File): Promise<unknown> {
   })
 }
 
+function getKdSingerAvatarUrl(singer: SingerHistoryKdSinger): string | null {
+  const profile = singer.singer?.profile
+  if (profile?.imageSource === 'upload' && profile.imageMime && profile.imageDataBase64) {
+    return `data:${profile.imageMime};base64,${profile.imageDataBase64}`
+  }
+  return profile?.imageUrl ?? null
+}
+
 function getInitialBreakColumns(): BreakColumnVisibility {
   if (typeof window === 'undefined') return DEFAULT_BREAK_COLUMNS
   try {
@@ -383,6 +417,9 @@ function isPlayerBackgroundLibraryImage(value: unknown): value is PlayerBackgrou
 export default function Host() {
   const auth = useAuth()
   const [queue, setQueue] = useState<Row[]>([])
+  const [playerState, setPlayerState] = useState(DEFAULT_PLAYER_PLAYBACK_STATE)
+  const playerStateRef = useRef(DEFAULT_PLAYER_PLAYBACK_STATE)
+  const queueRefreshRef = useRef(0)
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
@@ -413,6 +450,7 @@ export default function Host() {
   const [keepRotationScrollerSingers, setKeepRotationScrollerSingers] = useState(false)
   const [showRequestsUrl, setShowRequestsUrl] = useState(true)
   const [showBreakMusicTrack, setShowBreakMusicTrack] = useState(false)
+  const [showProfilePictures, setShowProfilePictures] = useState(true)
   const [playerBackgroundMode, setPlayerBackgroundMode] = useState<PlayerBackgroundMode>('default')
   const [playerBackgroundImageUrl, setPlayerBackgroundImageUrl] = useState<string | null>(null)
   const [playerBackgroundImageFilename, setPlayerBackgroundImageFilename] = useState<string | null>(null)
@@ -465,6 +503,8 @@ export default function Host() {
   const [breakMusicCrossfadeSec, setBreakMusicCrossfadeSec] = useState(3)
   const [breakMusicVolumePercent, setBreakMusicVolumePercent] = useState(100)
   const [breakMusicResumeDelay, setBreakMusicResumeDelay] = useState(2)
+  const [breakPauseDuringKaraoke, setBreakPauseDuringKaraoke] = useState(true)
+  const [savingBreakPlayback, setSavingBreakPlayback] = useState(false)
   const [showBreakPlaylistModal, setShowBreakPlaylistModal] = useState(false)
   const [breakSearchQuery, setBreakSearchQuery] = useState('')
   const [breakLibraryTracks, setBreakLibraryTracks] = useState<BreakTrack[]>([])
@@ -499,6 +539,7 @@ export default function Host() {
   const [selectedSingerId, setSelectedSingerId] = useState<string | null>(null)
   const [selectedSingerHistory, setSelectedSingerHistory] = useState<SingerHistory | null>(null)
   const [singerModalOpen, setSingerModalOpen] = useState(false)
+  const [singerImageEditorOpen, setSingerImageEditorOpen] = useState(false)
   const [singerModalLoading, setSingerModalLoading] = useState(false)
   const [renameSingerDialogOpen, setRenameSingerDialogOpen] = useState(false)
   const [editingSingerName, setEditingSingerName] = useState('')
@@ -508,10 +549,12 @@ export default function Host() {
   const [modalSongDraggedId, setModalSongDraggedId] = useState<number | null>(null)
   const [modalSongDragOverId, setModalSongDragOverId] = useState<number | null>(null)
   const [historyManagerOpen, setHistoryManagerOpen] = useState(false)
-  const [historyManagerMode, setHistoryManagerMode] = useState<'menu' | 'export' | 'import'>('menu')
+  const [historyManagerMode, setHistoryManagerMode] = useState<'menu' | 'export' | 'import' | 'archived'>('menu')
   const [historyExportSelectedSingerIds, setHistoryExportSelectedSingerIds] = useState<Set<string>>(new Set())
   const [pendingHistoryImportData, setPendingHistoryImportData] = useState<SingerHistoryKdFile | null>(null)
   const [historyImportSelectedIndexes, setHistoryImportSelectedIndexes] = useState<Set<number>>(new Set())
+  const [archivedSingers, setArchivedSingers] = useState<ArchivedSinger[]>([])
+  const [archivedSingersLoading, setArchivedSingersLoading] = useState(false)
   // Merge singer state
   const [mergeSingerDialogOpen, setMergeSingerDialogOpen] = useState(false)
   const [mergeSingerQuery, setMergeSingerQuery] = useState('')
@@ -591,7 +634,6 @@ export default function Host() {
       })
         .then((result) => {
           auth.setSessionToken(result.sessionToken)
-          writeStoredSessionToken(result.sessionToken)
           auth.setIsLoggedIn(true)
           auth.setRole(result.role || 'user')
           auth.setProfile({
@@ -667,7 +709,6 @@ export default function Host() {
 
       if (result.ok && result.sessionToken) {
         auth.setSessionToken(result.sessionToken)
-        writeStoredSessionToken(result.sessionToken)
         auth.setIsLoggedIn(true)
         auth.setRole(result.role || 'user')
         setLoginPassword('')
@@ -690,44 +731,6 @@ export default function Host() {
       setBusy(false)
     }
   }
-
-  // Validate session on mount
-  useEffect(() => {
-    async function validateSession() {
-      if (!auth.sessionToken) {
-        auth.setIsLoggedIn(false)
-        return
-      }
-
-      try {
-        const result = await api('/api/auth/validate', {
-          headers: { 'x-session-token': auth.sessionToken }
-        })
-
-        if (result.valid) {
-          auth.setIsLoggedIn(true)
-          auth.setRole(result.role || 'user')
-          auth.setProfile({
-            username: result.username || '',
-            displayName: result.displayName || '',
-            picture: result.picture || ''
-          })
-        } else {
-          auth.setIsLoggedIn(false)
-          auth.setSessionToken('')
-          auth.clearProfile()
-          clearStoredSessionToken()
-        }
-      } catch (err) {
-        auth.setIsLoggedIn(false)
-        auth.setSessionToken('')
-        auth.clearProfile()
-        clearStoredSessionToken()
-      }
-    }
-
-    validateSession()
-  }, [auth.sessionToken])
 
   useEffect(() => {
     const handleShowAccountManagement = () => {
@@ -854,6 +857,7 @@ export default function Host() {
       const state = await api('/api/break-music/state')
       const nextPlaylistIndex = Number(state.playlistIndex)
       setBreakMusicPaused(!!state.paused)
+      setBreakPauseDuringKaraoke(state.pauseDuringKaraoke !== false)
       setBreakMusicTrack(state.currentTrack || null)
       setBreakMusicRemainingSec(typeof state.remainingSec === 'number' ? state.remainingSec : null)
       setBreakPlaylistTrackIds(Array.isArray(state.playlistTrackIds) ? state.playlistTrackIds : [])
@@ -901,6 +905,24 @@ export default function Host() {
       headers,
       body: JSON.stringify({ resumeDelaySec }),
     })
+  }
+
+  async function updateBreakPauseDuringKaraoke(pauseDuringKaraoke: boolean) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setSavingBreakPlayback(true)
+    try {
+      await api('/api/break-music/settings', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ pauseDuringKaraoke }),
+      })
+      await loadBreakMusicState()
+    } catch (err) {
+      console.error('Failed to update break music playback:', err)
+      setBanner('Unable to save break music playback setting.')
+    } finally {
+      setSavingBreakPlayback(false)
+    }
   }
 
   function scheduleBreakVolumeUpdate(volumePercent: number) {
@@ -1313,8 +1335,22 @@ export default function Host() {
     }
   }
 
+  function applyPlayerState(value: Partial<PlayerPlaybackState>) {
+    const state = normalizePlayerPlaybackState(value, playerStateRef.current)
+    playerStateRef.current = state
+    setPlayerState(state)
+    explicitStopRef.current = state.manualStop
+    if (state.paused) setCurrentTime(state.positionSec)
+  }
+
   async function refreshQueue() {
-    const q = await api('/api/queue')
+    const revision = ++queueRefreshRef.current
+    const [q, state] = await Promise.all([
+      api('/api/queue'),
+      api('/api/player/state'),
+    ])
+    if (revision !== queueRefreshRef.current) return
+    applyPlayerState(state)
     setQueue(q || [])
   }
 
@@ -1349,6 +1385,7 @@ export default function Host() {
     setSelectedSingerId(null)
     setSelectedSingerHistory(null)
     setEditingSingerName('')
+    setSingerImageEditorOpen(false)
   }
 
   function openHistoryManager() {
@@ -1365,6 +1402,89 @@ export default function Host() {
     setPendingHistoryImportData(null)
     setHistoryImportSelectedIndexes(new Set())
     if (hostHistoryImportInputRef.current) hostHistoryImportInputRef.current.value = ''
+  }
+
+  async function loadArchivedSingers() {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setHistoryManagerMode('archived')
+    setArchivedSingersLoading(true)
+    try {
+      const singers = await api('/api/singers/archived', { headers })
+      setArchivedSingers(Array.isArray(singers) ? singers : [])
+    } catch (err) {
+      console.error('Failed to load stored singers:', err)
+      setBanner('⚠️ Could not load stored singers')
+      setTimeout(() => setBanner(''), 5000)
+    } finally {
+      setArchivedSingersLoading(false)
+    }
+  }
+
+  async function restoreArchivedSinger(singerId: string) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    setBusy(true)
+    try {
+      await api(`/api/singers/${singerId}/restore`, { method: 'POST', headers })
+      await Promise.all([refreshQueueState(), loadArchivedSingers()])
+      setBanner('✔ Singer restored to the rotation')
+      setTimeout(() => setBanner(''), 4000)
+    } catch (err) {
+      console.error('Failed to restore singer:', err)
+      setBanner('⚠️ Could not restore singer')
+      setTimeout(() => setBanner(''), 5000)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function deleteStoredSinger(singer: ArchivedSinger) {
+    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!confirm(`Permanently delete ${singer.displayName}, including all history and their profile image? This cannot be undone.`)) return
+    setBusy(true)
+    try {
+      await api(`/api/singers/${singer.singerId}`, { method: 'DELETE', headers })
+      await loadArchivedSingers()
+      setBanner(`✔ ${singer.displayName} was permanently deleted`)
+      setTimeout(() => setBanner(''), 4000)
+    } catch (err) {
+      console.error('Failed to delete singer:', err)
+      setBanner('⚠️ Could not delete singer')
+      setTimeout(() => setBanner(''), 5000)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveSingerProfileImage(crop: ProfileCrop, image?: Blob) {
+    if (!selectedSingerId || !auth.sessionToken || !auth.isLoggedIn) throw new Error('Select a singer and sign in as host.')
+    const singerId = selectedSingerId
+    if (image) {
+      const result = await api(`/api/singers/${selectedSingerId}/profile/image`, {
+        method: 'POST',
+        headers: { 'x-session-token': auth.sessionToken, 'Content-Type': image.type },
+        body: image,
+      })
+      setSelectedSingerHistory((current) => current?.singer.id === singerId
+        ? { ...current, singer: { ...current.singer, profile: result.profile } }
+        : current)
+    }
+    const result = await api(`/api/singers/${singerId}/profile/focus`, {
+      method: 'PATCH', headers, body: JSON.stringify({ crop, focusX: 50, focusY: 50 }),
+    })
+    setSelectedSingerHistory((current) => current?.singer.id === singerId
+      ? { ...current, singer: { ...current.singer, profile: result.profile } } : current)
+    await refreshQueueState()
+  }
+
+  async function removeSingerProfileImage() {
+    if (!selectedSingerId || !auth.sessionToken || !auth.isLoggedIn) throw new Error('Select a singer and sign in as host.')
+    const singerId = selectedSingerId
+    const result = await api(`/api/singers/${singerId}/profile/image`, {
+      method: 'DELETE', headers,
+    })
+    setSelectedSingerHistory((current) => current?.singer.id === singerId
+      ? { ...current, singer: { ...current.singer, profile: result.profile } } : current)
+    await refreshQueueState()
   }
 
   async function exportAllSingerHistory() {
@@ -1438,17 +1558,23 @@ export default function Host() {
       return
     }
     try {
-      const result = await api('/api/history/import', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ data }),
-      })
+      let imported = 0
+      let skipped = 0
+      for (const singer of data.singers ?? []) {
+        const result = await api('/api/history/import', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ data: { ...data, singers: [singer] } }),
+        })
+        imported += Number(result.imported ?? 0)
+        skipped += Number(result.skipped ?? 0)
+      }
       await refreshQueueState()
       if (selectedSingerId) {
         const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
         setSelectedSingerHistory(history || null)
       }
-      setBanner(`✔ Imported ${Number(result.imported ?? 0)} history song${Number(result.imported ?? 0) === 1 ? '' : 's'}`)
+      setBanner(`✔ Imported ${imported} history song${imported === 1 ? '' : 's'}${skipped ? ` (${skipped} skipped)` : ''}`)
       setTimeout(() => setBanner(''), 4000)
       closeHistoryManager()
     } catch (err) {
@@ -1874,7 +2000,7 @@ export default function Host() {
   // Fetch initial overlay settings
   useEffect(() => {
     api('/api/overlay/settings')
-      .then((settings: { visible: boolean; height: number; qrSize: number; customMessage: string; showRoller: boolean; showQrCode: boolean; hideSingerQueue: boolean; keepRotationScrollerSingers: boolean; showRequestsUrl: boolean; showBreakMusicTrack: boolean }) => {
+      .then((settings: OverlaySettings) => {
         setOverlayVisible(settings.visible)
         setOverlayHeight(settings.height)
         setQrSize(settings.qrSize)
@@ -1885,6 +2011,7 @@ export default function Host() {
         setKeepRotationScrollerSingers(settings.keepRotationScrollerSingers ?? false)
         setShowRequestsUrl(settings.showRequestsUrl ?? true)
         setShowBreakMusicTrack(settings.showBreakMusicTrack ?? false)
+        setShowProfilePictures(settings.showProfilePictures ?? true)
       })
       .catch(() => {})
   }, [])
@@ -1912,6 +2039,7 @@ export default function Host() {
     keepRotationScrollerSingersVal?: boolean,
     showRequestsUrlVal?: boolean,
     showBreakMusicTrackVal?: boolean,
+    showProfilePicturesVal?: boolean,
   ) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     try {
@@ -1929,6 +2057,7 @@ export default function Host() {
           keepRotationScrollerSingers: keepRotationScrollerSingersVal ?? keepRotationScrollerSingers,
           showRequestsUrl: showRequestsUrlVal ?? showRequestsUrl,
           showBreakMusicTrack: showBreakMusicTrackVal ?? showBreakMusicTrack,
+          showProfilePictures: showProfilePicturesVal ?? showProfilePictures,
         })
       })
     } catch (err) {
@@ -2252,7 +2381,12 @@ export default function Host() {
                 msg.type === 'player.updated' ||
                 msg.type === 'player.play' ||
                 msg.type === 'player.next' ||
+                msg.type === 'player.pause' ||
+                msg.type === 'player.resume' ||
                 msg.type === 'player.stop') {
+              if (msg.type === 'player.pause' || msg.type === 'player.resume') {
+                applyPlayerState(msg)
+              }
               refreshQueue() // Auto-refresh queue on updates
               refreshQueueState()
             } else if (msg.type === 'break_music.updated') {
@@ -2267,6 +2401,8 @@ export default function Host() {
                 setTimeout(() => setBanner(''), 5000)
               }
             } else if (msg.type === 'player.timing') {
+              if (playerStateRef.current.paused ||
+                  (msg.queueId != null && String(msg.queueId) !== String(playerStateRef.current.queueId))) return
               if (typeof msg.currentTime === 'number') {
                 setCurrentTime(msg.currentTime)
                 lastWebSocketUpdateRef.current = Date.now()
@@ -2333,6 +2469,8 @@ export default function Host() {
 
         wsRef.current.onopen = () => {
           console.log('WebSocket connected')
+          refreshQueue()
+          loadBreakMusicState()
           // Start heartbeat - send a message every 45 seconds to keep connection alive
           // This is in addition to server's ping/pong mechanism
           wsHeartbeatRef.current = setInterval(() => {
@@ -2359,6 +2497,9 @@ export default function Host() {
   const currentPlaying = useMemo(() => {
     return queue.find(r => r.status === 'playing')
   }, [queue])
+  const singerPaused = isSingerPaused(playerState, currentPlaying?.id)
+  const playbackAction = singerPlaybackAction(playerState, currentPlaying?.id)
+  const playbackLabel = playbackAction === 'pause' ? 'Pause singer' : playbackAction === 'resume' ? 'Resume singer' : 'Play'
 
   const playNextSong = useCallback(async () => {
     if (! auth.sessionToken || !auth.isLoggedIn) return
@@ -2389,7 +2530,7 @@ export default function Host() {
   useEffect(() => {
     // Reset state whenever the currently playing song ID changes (including when it goes to null)
     // This effect only triggers when currentPlaying?.id changes, not on every re-render
-    setCurrentTime(0)
+    setCurrentTime(isSingerPaused(playerStateRef.current, currentPlaying?.id) ? playerStateRef.current.positionSec : 0)
     setActualDuration(null)
     durationSetForSongRef.current = false  // Reset the ref so duration can be set for new song
     lastWebSocketUpdateRef.current = 0
@@ -2585,25 +2726,23 @@ export default function Host() {
     setManualRequestForSingerId(null)
   }
 
-  function selectManualRequestSinger(singer: { displayName: string }) {
+  function selectManualRequestSinger(singer: { singerId: string; displayName: string }) {
     setManualRequestName(singer.displayName)
+    setManualRequestForSingerId(singer.singerId)
     setShowManualSingerSuggestions(false)
     setManualSingerHighlightIndex(0)
   }
 
-  function getManualRequestSingerUuid(): string | null {
+  function getManualRequestTarget() {
     const normalizedName = manualRequestName.trim().toLocaleLowerCase()
-    if (!normalizedName) return null
-
-    const selectedById = manualRequestForSingerId
+    const selected = manualRequestForSingerId
       ? (queueState?.queueOrder ?? []).find((singer) => singer.singerId === manualRequestForSingerId)
-      : null
-    if (selectedById?.publicUuid) return selectedById.publicUuid
-
-    const selectedByName = (queueState?.queueOrder ?? []).find(
-      (singer) => singer.displayName.trim().toLocaleLowerCase() === normalizedName && singer.publicUuid,
-    )
-    return selectedByName?.publicUuid ?? null
+      : (queueState?.queueOrder ?? []).find((singer) => singer.displayName.trim().toLocaleLowerCase() === normalizedName)
+    return {
+      requestAsHost: true,
+      singerId: manualRequestForSingerId ?? selected?.singerId,
+      singerUuid: selected?.publicUuid ?? null,
+    }
   }
 
   // Add manual request to queue - Local track
@@ -2618,7 +2757,7 @@ export default function Host() {
         body: JSON.stringify({
           trackId,
           requestedBy: manualRequestName || null,
-          singerUuid: getManualRequestSingerUuid(),
+          ...getManualRequestTarget(),
         })
       })
 
@@ -2644,7 +2783,7 @@ export default function Host() {
           url: track.url,
           brand: track.brand || null,
           requestedBy: manualRequestName || null,
-          singerUuid: getManualRequestSingerUuid(),
+          ...getManualRequestTarget(),
         })
       })
 
@@ -2710,7 +2849,7 @@ export default function Host() {
           url: manualRequestUrl,
           requestedBy: manualRequestName || null,
           discId: manualRequestDiscId || null,
-          singerUuid: getManualRequestSingerUuid(),
+          ...getManualRequestTarget(),
         })
       })
 
@@ -2809,13 +2948,24 @@ function closeDetails(e: React.SyntheticEvent) {
     }
   }
 
-  // FIXED: Play button to work properly - plays top of queue if nothing playing
   async function playTop() {
     if (!auth.sessionToken || !auth.isLoggedIn) return
     explicitStopRef.current = false
     setBusy(true)
     try {
-      await api('/api/player/play', { method:'POST', headers })
+      if (currentPlaying) {
+        const state = await api('/api/player/pause', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            queueId: currentPlaying.id,
+            paused: !isSingerPaused(playerStateRef.current, currentPlaying.id),
+          }),
+        })
+        applyPlayerState(state)
+      } else {
+        await api('/api/player/play', { method:'POST', headers })
+      }
     } finally {
       setBusy(false)
       await refreshQueue()
@@ -2916,12 +3066,19 @@ function closeDetails(e: React.SyntheticEvent) {
 
   async function removeSingerFromRotation(singerId: string) {
     if (!auth.sessionToken || !auth.isLoggedIn) return
-    if (!confirm('Remove this singer from the rotation? This will also delete their sang history and cannot be undone.')) return
+    if (!confirm('Remove this singer from the active rotation? Their history and profile will remain available in Singer History.')) return
     setBusy(true)
     try {
-      // Delete ALL queue entries for the singer (pending + history) and reset their stats
-      await api(`/api/singers/${singerId}/history`, { method: 'DELETE', headers })
-      // Remove from active rotation if one exists
+      const singer = queueState?.queueOrder.find((entry) => entry.singerId === singerId)
+      await Promise.all(
+        (singer?.queuedSongs ?? []).map((song) =>
+          api(`/api/queue/${song.queueId}/status`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ status: 'removed' }),
+          }),
+        ),
+      )
       if (queueState?.activeRotation) {
         const rotationId = queueState.activeRotation.id
         await api(`/api/rotations/${rotationId}/singers/${singerId}`, { method: 'DELETE', headers })
@@ -4074,10 +4231,6 @@ function closeDetails(e: React.SyntheticEvent) {
           </div>
         ) : (
           <>
-            <div className="header">
-              <h1 className="header-title">Host Panel</h1>
-            </div>
-
             <div className="card host-top-card">
               <div className="host-top-card-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
@@ -4184,8 +4337,8 @@ function closeDetails(e: React.SyntheticEvent) {
 
               <section className="host-top-section host-controls-card">
                 <div className="host-control-buttons">
-                  <button className="control-btn success" onClick={playTop} disabled={busy} title="Play" aria-label="Play">
-                    <MaterialIcon name="play_arrow" />
+                  <button className="control-btn success" onClick={playTop} disabled={busy} title={playbackLabel} aria-label={playbackLabel}>
+                    <MaterialIcon name={playbackAction === 'pause' ? 'pause' : 'play_arrow'} style={singerPaused ? { color: '#facc15' } : undefined} />
                   </button>
                   <button className="control-btn primary" onClick={next} disabled={busy} title="Next" aria-label="Next">
                     <MaterialIcon name="skip_next" />
@@ -4215,6 +4368,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       {renderReplaceButton(currentPlaying, 'Replace current song')}
                     </div>
                     <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }}>
+                      {singerPaused && <span role="status" style={{ color: '#facc15', marginRight: 8 }}>Paused</span>}
                       {currentPlaying.artist || 'Unknown Artist'}
                       {currentPlaying.requested_by && <span style={{ marginLeft: 8 }}>· <strong style={{ color: 'var(--color-text-primary)' }}>{currentPlaying.requested_by}</strong></span>}
                     </div>
@@ -4308,18 +4462,18 @@ function closeDetails(e: React.SyntheticEvent) {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {(() => {
                     // Single-pass: tag each singer with isSinging, then sort current singer first
-                    type TaggedSinger = typeof queueState.queueOrder[number] & { isSinging: boolean }
-                    const tagged: TaggedSinger[] = queueState.queueOrder.map(s => ({
-                      ...s,
-                      isSinging: s.queuedSongs.some(q => q.status === 'playing'),
-                    }))
+                    type TaggedSinger = typeof queueState.queueOrder[number] & { isSinging: boolean; displaySong: QueueSong | null }
+                    const tagged: TaggedSinger[] = queueState.queueOrder.map(s => {
+                      const displaySong = getSingerDisplaySong(s)
+                      return { ...s, displaySong, isSinging: displaySong?.status === 'playing' }
+                    })
                     const sorted = [...tagged].sort((a, b) => {
                       if (a.isSinging && !b.isSinging) return -1
                       if (!a.isSinging && b.isSinging) return 1
                       return 0
                     })
                     return sorted.map((singer, idx) => {
-                      const { isSinging } = singer
+                      const { isSinging, displaySong } = singer
                       return (
                     <div
                       key={singer.singerId}
@@ -4363,6 +4517,8 @@ function closeDetails(e: React.SyntheticEvent) {
                           {isSinging ? <MaterialIcon name="mic_external_on" style={{ fontSize: 18 }} /> : idx + 1}
                         </span>
 
+                        <SingerAvatar name={singer.displayName} profile={singer.profile} size={44} />
+
                         {/* Singer info */}
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontWeight: 700, fontSize: 16, color: isSinging ? 'rgba(16,185,129,1)' : 'var(--color-text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -4374,8 +4530,8 @@ function closeDetails(e: React.SyntheticEvent) {
                             )}
                           </div>
                           <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 2 }}>
-                            {singer.nextSong
-                              ? <><strong style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'}</strong> {singer.nextSong.title || 'Unknown'} — {singer.nextSong.artist || 'Unknown'}{renderDiscIdTag(singer.nextSong.discId)}</>
+                            {displaySong
+                              ? <><strong style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'}</strong> {displaySong.title || 'Unknown'} — {displaySong.artist || 'Unknown'}{renderDiscIdTag(displaySong.discId)}</>
                               : <span style={{ opacity: 0.6 }}>No queued song</span>
                             }
                           </div>
@@ -4474,6 +4630,15 @@ function closeDetails(e: React.SyntheticEvent) {
                       >
                         Import Singer History
                       </button>
+                      <button
+                        className="control-btn"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void loadArchivedSingers()}
+                        style={{ justifyContent: 'center', padding: '14px 18px' }}
+                      >
+                        Find Stored Singers
+                      </button>
                     </div>
                   )}
 
@@ -4541,6 +4706,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                   })
                                 }}
                               />
+                              <SingerAvatar name={singer.displayName} profile={singer.profile} size={32} />
                               <span style={{ flex: 1, fontWeight: 600 }}>{singer.displayName}</span>
                               <span style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
                                 {singer.totalSongsSung} sang
@@ -4628,6 +4794,12 @@ function closeDetails(e: React.SyntheticEvent) {
                                     })
                                   }}
                                 />
+                                <SingerAvatar name={getKdSingerDisplayName(singer, index)} size={32} profile={{
+                                  imageUrl: getKdSingerAvatarUrl(singer),
+                                  focusX: singer.singer?.profile?.focusX ?? 50,
+                                  focusY: singer.singer?.profile?.focusY ?? 50,
+                                  crop: singer.singer?.profile?.crop,
+                                }} />
                                 <span style={{ flex: 1, fontWeight: 600 }}>{getKdSingerDisplayName(singer, index)}</span>
                                 <span style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
                                   {singer.songs?.length ?? 0} songs
@@ -4636,6 +4808,77 @@ function closeDetails(e: React.SyntheticEvent) {
                             ))}
                           </div>
                         </>
+                      )}
+                    </div>
+                  )}
+
+                  {historyManagerMode === 'archived' && (
+                        <div style={{ display: 'grid', gap: 14 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <button className="control-btn" type="button" onClick={() => setHistoryManagerMode('menu')}>
+                              <MaterialIcon name="arrow_back" /> Back
+                            </button>
+                            <div style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>
+                              Singers removed from the active rotation keep their history and profile here.
+                            </div>
+                          </div>
+                          {archivedSingersLoading ? (
+                            <div style={{ textAlign: 'center', padding: 24, color: 'var(--color-text-secondary)' }}>Loading…</div>
+                          ) : archivedSingers.length === 0 ? (
+                            <div style={{ textAlign: 'center', padding: 24, color: 'var(--color-text-secondary)' }}>
+                              No stored singers outside the active rotation.
+                            </div>
+                          ) : (
+                            <div style={{ display: 'grid', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
+                              {archivedSingers.map((singer) => (
+                                <div
+                                  key={singer.singerId}
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 10,
+                                    padding: 12,
+                                    borderRadius: 10,
+                                    border: '1px solid var(--color-border)',
+                                    background: 'var(--color-bg-secondary)',
+                                  }}
+                                >
+                                  <SingerAvatar name={singer.displayName} profile={singer.profile} />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      closeHistoryManager()
+                                      void openSingerModal(singer.singerId)
+                                    }}
+                                    style={{ flex: 1, minWidth: 0, border: 0, background: 'transparent', color: 'inherit', textAlign: 'left', cursor: 'pointer', padding: 0 }}
+                                  >
+                                    <div style={{ fontWeight: 700 }}>{singer.displayName}</div>
+                                    <div style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
+                                      {singer.historyCount} history item{singer.historyCount === 1 ? '' : 's'}
+                                      {singer.lastSangAt ? ` • ${formatTimeAgo(singer.lastSangAt)}` : ''}
+                                    </div>
+                                  </button>
+                                  <button
+                                    className="control-btn"
+                                    type="button"
+                                    disabled={busy}
+                                    title="Restore singer to rotation"
+                                    onClick={() => void restoreArchivedSinger(singer.singerId)}
+                                  >
+                                    <MaterialIcon name="restore" />
+                                  </button>
+                                  <button
+                                    className="control-btn danger"
+                                    type="button"
+                                    disabled={busy}
+                                    title="Permanently delete singer"
+                                    onClick={() => void deleteStoredSinger(singer)}
+                                  >
+                                    <MaterialIcon name="delete_forever" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
                       )}
                     </div>
                   )}
@@ -4713,6 +4956,30 @@ function closeDetails(e: React.SyntheticEvent) {
                     </div>
                   ) : selectedSingerHistory ? (
                     <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      {singerImageEditorOpen && (
+                        <ProfileDialog title={`Profile Picture: ${selectedSingerHistory.singer.displayName}`} onClose={() => setSingerImageEditorOpen(false)}>
+                          <ProfileImageEditor key={selectedSingerHistory.singer.id}
+                            name={selectedSingerHistory.singer.displayName} profile={selectedSingerHistory.singer.profile}
+                            onSave={saveSingerProfileImage} onRemove={removeSingerProfileImage}
+                            onCancel={() => setSingerImageEditorOpen(false)} />
+                        </ProfileDialog>
+                      )}
+                      <div style={{
+                        display: 'flex',
+                        gap: 16,
+                        alignItems: 'center',
+                        padding: 14,
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 12,
+                        background: 'var(--color-bg-secondary)',
+                        flexWrap: 'wrap',
+                      }}>
+                        <SingerAvatar name={selectedSingerHistory.singer.displayName} profile={selectedSingerHistory.singer.profile} size={80} />
+                        <button className="control-btn" type="button" disabled={busy} onClick={() => setSingerImageEditorOpen(true)}>
+                          Manage Profile Picture
+                        </button>
+                      </div>
+
                       {/* Singer stats */}
                       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                         <span className="stat-pill"><MaterialIcon name="music_note" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{selectedSingerHistory.singer.totalSongsSung} songs sung</span>
@@ -5378,6 +5645,25 @@ function closeDetails(e: React.SyntheticEvent) {
                         </div>
                       </div>
                     )}
+                  </div>
+
+                  <div className="settings-section">
+                    <div className="settings-title">Break Music During Karaoke</div>
+                    <label className="form-label" htmlFor="break-music-during-karaoke">While a singer is on stage</label>
+                    <select
+                      id="break-music-during-karaoke"
+                      className="form-input"
+                      value={breakPauseDuringKaraoke ? 'pause' : 'continue'}
+                      disabled={savingBreakPlayback}
+                      onChange={e => void updateBreakPauseDuringKaraoke(e.target.value === 'pause')}
+                    >
+                      <option value="pause">Pause break music (default)</option>
+                      <option value="continue">Keep break music advancing silently</option>
+                    </select>
+                    <p style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>
+                      Break music is always muted during a singer&apos;s song, including when the singer is paused.
+                      Manually paused break music stays paused.
+                    </p>
                   </div>
 
                   <div className="settings-section">
@@ -6170,6 +6456,50 @@ function closeDetails(e: React.SyntheticEvent) {
                                 fontSize: '14px', fontWeight: '500', minWidth: '60px'
                               }}>
                                 {showRoller ? 'Visible' : 'Hidden'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                            <div>
+                              <span id="scroller-profile-pictures-label" style={{ fontSize: 14, fontWeight: 500 }}>Show Profile Pictures</span>
+                              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 2 }}>
+                                Show singer pictures beside their names in the scroller.
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+                              <label style={{ position: 'relative', display: 'inline-block', width: 48, height: 24 }}>
+                                <input
+                                  type="checkbox"
+                                  aria-labelledby="scroller-profile-pictures-label"
+                                  checked={showProfilePictures}
+                                  onChange={e => {
+                                    const val = e.target.checked
+                                    setShowProfilePictures(val)
+                                    updateOverlaySettings(
+                                      overlayVisible, overlayHeight, qrSize, undefined, showRoller, showQrCode,
+                                      hideSingerQueue, keepRotationScrollerSingers, showRequestsUrl, showBreakMusicTrack, val,
+                                    )
+                                  }}
+                                  style={{ opacity: 0, width: 0, height: 0 }}
+                                />
+                                <span style={{
+                                  position: 'absolute', cursor: 'pointer', inset: 0,
+                                  backgroundColor: showProfilePictures ? '#10b981' : '#374151',
+                                  transition: '.4s', borderRadius: 34,
+                                }}>
+                                  <span style={{
+                                    position: 'absolute', height: 16, width: 16,
+                                    left: showProfilePictures ? 28 : 4, bottom: 4,
+                                    backgroundColor: 'white', transition: '.4s', borderRadius: '50%',
+                                  }} />
+                                </span>
+                              </label>
+                              <span style={{
+                                color: showProfilePictures ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                                fontSize: 14, fontWeight: 500, minWidth: 60,
+                              }}>
+                                {showProfilePictures ? 'Visible' : 'Hidden'}
                               </span>
                             </div>
                           </div>
@@ -7266,6 +7596,7 @@ function closeDetails(e: React.SyntheticEvent) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(99,102,241,0.1)', borderRadius: 8, border: '1px solid rgba(99,102,241,0.2)' }}>
                       <span style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>Adding for:</span>
                       <strong style={{ fontSize: 13 }}><MaterialIcon name="mic_external_on" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 3 }} />{manualRequestName}</strong>
+                      <button className="control-btn" type="button" onClick={() => setManualRequestForSingerId(null)}>Change Singer</button>
                     </div>
                   ) : (
                   <div className="form-group" style={{ position: 'relative' }}>
@@ -7277,6 +7608,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       autoComplete="off"
                       onChange={e => {
                         setManualRequestName(e.target.value)
+                        setManualRequestForSingerId(null)
                         setShowManualSingerSuggestions(true)
                         setManualSingerHighlightIndex(0)
                       }}

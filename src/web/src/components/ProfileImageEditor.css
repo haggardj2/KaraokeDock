@@ -1,0 +1,89 @@
+.profile-dialog {
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--color-border, #444);
+  border-radius: 16px;
+  background: var(--color-bg-card, #1d1d27);
+  color: var(--color-text-primary, #fff);
+  box-shadow: 0 16px 48px #0008;
+}
+.profile-dialog::backdrop { background: #000b; }
+.profile-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border, #444);
+}
+.profile-dialog-header h3 { margin: 0; font-size: 17px; }
+.profile-dialog-body { padding: 12px 16px; }
+.profile-dialog button, .profile-dialog input { font: inherit; }
+.profile-dialog button {
+  border: 1px solid var(--color-border, #444);
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: inherit;
+  background: var(--color-bg-secondary, #252532);
+  cursor: pointer;
+}
+.profile-dialog button:disabled { opacity: 0.5; cursor: default; }
+.profile-image-editor { display: grid; justify-items: center; gap: 10px; min-width: 0; }
+.profile-file-picker { display: grid; gap: 6px; font-size: 13px; width: 100%; }
+.profile-file-picker input { width: 100%; min-width: 0; font-size: 13px; }
+.profile-crop-mount { width: 100%; min-width: 0; }
+.profile-crop-mount.croppie-container { height: auto; }
+.profile-crop-empty { height: 0; }
+.profile-crop-mount .cr-boundary { max-width: 100%; }
+.profile-crop-mount .cr-image { max-width: none; max-height: none; }
+.profile-crop-mount .cr-slider-wrap { margin: 10px auto 0; }
+.profile-help { font-size: 12px; color: var(--color-text-secondary, #aaa); margin: 0; text-align: center; }
+.profile-error { color: var(--color-danger, #f87171); margin: 0; font-size: 13px; }
+.profile-editor-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.profile-history-actions { display: grid; gap: 12px; }
+.profile-dialog.request-name-dialog {
+  width: min(720px, calc(100vw - 32px));
+  border-radius: 20px;
+}
+.request-name-dialog .profile-dialog-header { padding: 20px; }
+.request-name-dialog .profile-dialog-header h3 { font-size: 20px; }
+.request-name-dialog .profile-dialog-body { padding: 20px; }
+.request-name-form { display: grid; gap: 16px; }
+.request-name-form p { margin: 0; line-height: 1.5; }
+.request-name-form #singer-name-help { color: var(--color-text-secondary); }
+.request-name-form input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 2px solid var(--color-border);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+}
+.request-name-form input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 4px #6366f11a;
+}
+.request-name-form .profile-error:empty { display: none; }
+.request-name-form .request-name-save {
+  width: 100%;
+  border: 0;
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+@media (max-height: 500px) {
+  .profile-dialog-header { padding: 8px 12px; }
+  .profile-dialog-body { padding: 8px 12px; }
+  .profile-image-editor { gap: 6px; }
+}

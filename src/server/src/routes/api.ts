@@ -22,7 +22,8 @@ import {
   type User,
   updateUser,
   deleteUser,
-  countAdminUsers
+  countAdminUsers,
+  withTransaction,
 } from '../db';
 import {
   getMediaDuration,
@@ -52,6 +53,7 @@ import {
 import { findOrCreateSinger, ensureSingerInActiveRotation, normalizeSingerName, normalizeSingerUuid, type SingerRow } from '../queueIdentity.js';
 import { parseZipMediaRef } from '../zipMediaRef.js';
 import { buildOidcGrantCallbackUrl } from '../oidcRedirect.js';
+import { getOidcProfileClaims } from '../oidcProfile.js';
 import {
   getQueueState,
   getSingerHistory,
@@ -59,10 +61,24 @@ import {
   reorderSingerQueue,
 } from '../queueState.js';
 import { recalculateSingerStats } from '../singerStats.js';
+import { ensureAuthenticatedSinger, getRequestIdentity, renameAuthenticatedSinger, resolveQueueRequester } from '../authenticatedSinger.js';
+import { resolveGuestSinger } from '../guestSinger.js';
 import {
-  sortQueuedRotationItems,
-  type QueueSortBasePolicy,
-} from '../rotation/queueSort';
+  SINGER_PROFILE_IMAGE_MAX_BYTES,
+  applyImportedSingerProfile,
+  clearSingerProfileImage,
+  detectSingerProfileImageMime,
+  getSingerProfileRow,
+  setSingerProfileFocus,
+  setSingerUploadedProfileImage,
+  singerProfileFromRow,
+  validateSingerProfileCrop,
+  type ImportedSingerProfile,
+  type SingerProfileCrop,
+} from '../singerProfile.js';
+import { advanceLiveQueue, clearLiveQueue, deleteLiveQueueSong, getLiveQueueAutoplayState, resortLiveQueue, setLiveQueueStatus, startLiveQueueSong, stopLiveQueue, writeQueueOrder } from '../rotation/liveQueue.js';
+import { withQueueTransaction } from '../rotation/queueTransaction.js';
+import { getPlayerPlaybackState, setPlayerPlaybackPaused } from '../playerPlayback.js';
 import {
   getLibraryScanStatus,
   LibraryScanAlreadyInProgressError,
@@ -405,12 +421,7 @@ const getAuthenticatedUser = async (req: express.Request): Promise<User | null> 
 };
 
 const getOptionalAuthenticatedUser = async (req: express.Request): Promise<User | null> => {
-  const token = req.headers['x-session-token'];
-  if (typeof token !== 'string' || !token.trim()) return null;
-
-  const info = await validateSessionInfo(token);
-  if (!info.valid || !info.userId) return null;
-  return getUserById(info.userId);
+  return (await getRequestIdentity(req.headers['x-session-token'])).user;
 };
 
 // Session-based authentication guard (validates session, attaches user info)
@@ -445,16 +456,12 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
   }
 
   try {
-    const info = await validateSessionInfo(token);
-    if (!info.valid) {
-      res.status(403).json({ error: 'Forbidden: Invalid or expired session' });
-      return;
-    }
-    if (info.role !== 'admin') {
+    const identity = await getRequestIdentity(token);
+    if (!identity.isAdmin) {
       res.status(403).json({ error: 'Forbidden: Admin role required' });
       return;
     }
-    (req as any).user = { userId: info.userId, role: info.role };
+    (req as any).user = { userId: identity.user?.id, role: 'admin' };
     next();
   } catch (err) {
     console.error('adminGuard error:', err);
@@ -494,13 +501,14 @@ type SingerHistoryKdSinger = {
     normalizedName?: string;
     totalSongsSung?: number;
     lastSangAt?: string | null;
+    profile?: ImportedSingerProfile;
   };
   songs: SingerHistoryKdSong[];
 };
 
 type SingerHistoryKdFile = {
   format: 'karaokedock.singer-history';
-  version: 1;
+  version: 1 | 2;
   exportedAt: string;
   singers: SingerHistoryKdSinger[];
 };
@@ -523,6 +531,7 @@ type RemoteGatewayPendingRequest = {
   brand?: string | null;
   externalUrl?: string | null;
   source?: string | null;
+  profile?: ImportedSingerProfile | null;
 };
 
 type RemoteGatewayQueueAction = {
@@ -543,6 +552,8 @@ const REMOTE_GATEWAY_CATALOG_CHUNK_SIZE = 500;
 let remoteGatewayTimer: ReturnType<typeof setTimeout> | null = null;
 let remoteGatewayInFlight: Promise<void> | null = null;
 let remoteGatewayLastCatalogSync = 0;
+let remoteGatewayLastProfileSync: string | null = null;
+let remoteGatewayLastProfileSingerUuid: string | null = null;
 
 function toSafeFilename(value: string): string {
   return value.trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'singer-history';
@@ -781,14 +792,14 @@ async function queueRemoteGatewayRequest(request: RemoteGatewayPendingRequest): 
     return { status: 'rejected', error: 'Local library is disabled' };
   }
 
-  let singerId: bigint | null = null;
-  try {
-    const singer = await findOrCreateSinger(requestedBy, normalizeSingerUuid(request.singerUuid));
-    singerId = singer.id;
-    await ensureSingerInActiveRotation(singerId);
-  } catch (err) {
-    console.error('Remote Gateway singer creation failed:', err);
+  const singer = await findOrCreateSinger(requestedBy, normalizeSingerUuid(request.singerUuid));
+  const singerUuid = normalizeSingerUuid(request.singerUuid);
+  if (singerUuid && singer.public_uuid !== singerUuid) {
+    return { status: 'rejected', error: 'Singer name belongs to another profile' };
   }
+  const singerId = singer.id;
+  await applyImportedSingerProfile(singer.id, request.profile);
+  await ensureSingerInActiveRotation(singerId);
 
   if (singerId) {
     const dupCheck = await query<{ id: string }>(
@@ -814,7 +825,10 @@ async function queueRemoteGatewayRequest(request: RemoteGatewayPendingRequest): 
 }
 
 async function pullRemoteGatewayRequests(config: RemoteGatewayConfig) {
-  const pending = await callRemoteGateway(config, '/api/station/requests/pending?limit=100') as RemoteGatewayPendingRequest[];
+  const pending = await callRemoteGateway(
+    config,
+    '/api/station/requests/pending?limit=100',
+  ) as RemoteGatewayPendingRequest[];
   const results = {
     received: Array.isArray(pending) ? pending.length : 0,
     queued: 0,
@@ -822,7 +836,17 @@ async function pullRemoteGatewayRequests(config: RemoteGatewayConfig) {
   };
   if (!Array.isArray(pending)) return results;
 
+  const profileBySingerUuid = new Map<string, ImportedSingerProfile | null>();
   for (const request of pending) {
+    const singerUuid = normalizeSingerUuid(request.singerUuid);
+    if (singerUuid && !profileBySingerUuid.has(singerUuid)) {
+      const response = await callRemoteGateway(
+        config,
+        `/api/station/singer-profiles/${encodeURIComponent(singerUuid)}`,
+      ) as { profile?: ImportedSingerProfile | null };
+      profileBySingerUuid.set(singerUuid, response.profile ?? null);
+    }
+    request.profile = singerUuid ? profileBySingerUuid.get(singerUuid) ?? null : null;
     const result = await queueRemoteGatewayRequest(request);
     if (result.status === 'queued') {
       results.queued += 1;
@@ -835,6 +859,38 @@ async function pullRemoteGatewayRequests(config: RemoteGatewayConfig) {
     });
   }
   return results;
+}
+
+async function pullRemoteGatewaySingerProfiles(config: RemoteGatewayConfig) {
+  const params = new URLSearchParams();
+  if (remoteGatewayLastProfileSync) params.set('updatedAfter', remoteGatewayLastProfileSync);
+  if (remoteGatewayLastProfileSingerUuid) params.set('afterSingerUuid', remoteGatewayLastProfileSingerUuid);
+  const profiles = await callRemoteGateway(
+    config,
+    `/api/station/singer-profiles${params.size > 0 ? `?${params.toString()}` : ''}`,
+  ) as { singerUuid?: string | null; profile?: ImportedSingerProfile | null }[];
+  if (!Array.isArray(profiles)) return { updated: 0 };
+
+  let updated = 0;
+  for (const entry of profiles) {
+    const singerUuid = normalizeSingerUuid(entry.singerUuid);
+    const updatedAt = entry.profile?.updatedAt;
+    if (!singerUuid) continue;
+    const singer = await query<{ id: string }>(
+      `SELECT id FROM singers WHERE public_uuid = $1 LIMIT 1`,
+      [singerUuid],
+    );
+    if (singer.rows.length > 0) {
+      await applyImportedSingerProfile(BigInt(singer.rows[0].id), entry.profile);
+      updated++;
+    }
+    if (updatedAt) {
+      remoteGatewayLastProfileSync = updatedAt;
+      remoteGatewayLastProfileSingerUuid = String(entry.singerUuid ?? '');
+    }
+  }
+  if (updated > 0) postQueueUpdate('queue.updated');
+  return { updated };
 }
 
 async function applyRemoteGatewayQueueAction(action: RemoteGatewayQueueAction): Promise<{ status: 'applied' | 'rejected'; error?: string }> {
@@ -946,6 +1002,7 @@ async function runRemoteGatewaySync(options: { includeCatalog: boolean }) {
     remoteGatewayLastCatalogSync = Date.now();
   }
   const pulledRequests = await pullRemoteGatewayRequests(config);
+  const profiles = await pullRemoteGatewaySingerProfiles(config);
   const queueActions = await pullRemoteGatewayQueueActions(config);
   const queue = await pushRemoteGatewayQueueSnapshot(config);
   const status = await getRemoteGatewayStatus(config);
@@ -955,6 +1012,7 @@ async function runRemoteGatewaySync(options: { includeCatalog: boolean }) {
     settings,
     catalog,
     pulledRequests,
+    profiles,
     queueActions,
     queue,
     status,
@@ -1029,86 +1087,39 @@ export async function syncRemoteGatewayTaskState(options: { runImmediately?: boo
 }
 
 function isSingerHistoryKdFile(value: any): value is SingerHistoryKdFile {
-  return value?.format === 'karaokedock.singer-history' && value?.version === 1 && Array.isArray(value?.singers);
+  return value?.format === 'karaokedock.singer-history'
+    && (value?.version === 1 || value?.version === 2)
+    && Array.isArray(value?.singers);
 }
 
-async function resolveSingerForRequester(name: string, singerUuid?: string | null): Promise<{ id: string; publicUuid: string; displayName: string; normalizedName: string } | null> {
-  const publicUuid = normalizeSingerUuid(singerUuid);
-  if (publicUuid) {
-    const singerRes = await query<{ id: string; public_uuid: string; display_name: string; normalized_name: string }>(
-      `SELECT id, public_uuid, display_name, normalized_name FROM singers WHERE public_uuid = $1 LIMIT 1`,
-      [publicUuid],
-    );
-    if (singerRes.rows.length > 0) {
-      return {
-        id: String(singerRes.rows[0].id),
-        publicUuid: singerRes.rows[0].public_uuid,
-        displayName: singerRes.rows[0].display_name,
-        normalizedName: singerRes.rows[0].normalized_name,
-      };
-    }
-  }
-
-  const norm = normalizeSingerName(name);
-  if (!norm) return null;
-  const singerRes = await query<{ id: string; public_uuid: string; display_name: string; normalized_name: string }>(
-    `SELECT id, public_uuid, display_name, normalized_name FROM singers WHERE normalized_name = $1 LIMIT 1`,
-    [norm],
-  );
-  if (singerRes.rows.length > 0) {
-    return {
-      id: String(singerRes.rows[0].id),
-      publicUuid: singerRes.rows[0].public_uuid,
-      displayName: singerRes.rows[0].display_name,
-      normalizedName: singerRes.rows[0].normalized_name,
-    };
-  }
-  return null;
-}
-
-function getUserRequesterName(user: User | null): string {
-  return String(user?.display_name || user?.username || '').trim();
+async function resolveSingerForRequester(name: string, singerUuid?: string | null): Promise<{ id: string; publicUuid: string; displayName: string; normalizedName: string }> {
+  const singer = await resolveGuestSinger(name, singerUuid, { requireUuid: false });
+  return {
+    id: String(singer.id), publicUuid: singer.public_uuid,
+    displayName: singer.display_name, normalizedName: singer.normalized_name,
+  };
 }
 
 async function getAuthenticatedRequesterSinger(req: express.Request, requestedBy: string): Promise<SingerRow | null> {
   const user = await getOptionalAuthenticatedUser(req);
-  const userName = getUserRequesterName(user);
-  if (!userName) return null;
-  return findOrCreateSinger(userName, null);
-}
-
-async function updateActiveQueueRequesterName(singerId: bigint, displayName: string): Promise<void> {
-  await query(
-    `UPDATE queue
-        SET requested_by = $1
-      WHERE singer_id = $2
-        AND status IN ('queued', 'playing')`,
-    [displayName, singerId],
-  );
+  return user ? ensureAuthenticatedSinger(user) : null;
 }
 
 async function buildSingerHistoryKdFile(options: {
   singerIds?: string[];
-  requesterName?: string;
-  singerUuid?: string | null;
+  selfSinger?: SingerRow;
   includeSingerInfo: boolean;
 }): Promise<SingerHistoryKdFile> {
   const params: any[] = [];
   let whereClause = `q.status IN ('queued', 'playing', 'done', 'skipped', 'removed', 'cancelled')`;
 
-  if (options.singerIds && options.singerIds.length > 0) {
+  if (options.selfSinger) {
+    params.push(options.selfSinger.id, options.selfSinger.normalized_name);
+    whereClause += ` AND (q.singer_id = $1 OR (q.singer_id IS NULL AND
+      LOWER(REGEXP_REPLACE(TRIM(q.requested_by), '\\s+', ' ', 'g')) = $2))`;
+  } else if (options.singerIds && options.singerIds.length > 0) {
     params.push(options.singerIds);
     whereClause += ` AND q.singer_id = ANY($${params.length}::bigint[])`;
-  } else if (options.requesterName) {
-    const norm = normalizeSingerName(options.requesterName);
-    const singer = await resolveSingerForRequester(options.requesterName, options.singerUuid);
-    if (singer) {
-      params.push(singer.id, norm);
-      whereClause += ` AND (q.singer_id = $${params.length - 1} OR LOWER(TRIM(q.requested_by)) = $${params.length})`;
-    } else {
-      params.push(norm);
-      whereClause += ` AND LOWER(TRIM(q.requested_by)) = $${params.length}`;
-    }
   }
 
   const rows = await query<{
@@ -1162,15 +1173,16 @@ async function buildSingerHistoryKdFile(options: {
 
   const singers = new Map<string, SingerHistoryKdSinger>();
   for (const row of rows.rows) {
-    const displayName = row.display_name || row.requested_by || options.requesterName || 'Unknown Singer';
-    const normalizedName = row.normalized_name || normalizeSingerName(displayName);
-    const singerKey = row.singer_id ? `id:${row.singer_id}` : `name:${normalizedName}`;
+    const displayName = options.selfSinger?.display_name || row.display_name || row.requested_by || 'Unknown Singer';
+    const normalizedName = options.selfSinger?.normalized_name || row.normalized_name || normalizeSingerName(displayName);
+    const singerId = options.selfSinger ? String(options.selfSinger.id) : row.singer_id;
+    const singerKey = singerId ? `id:${singerId}` : `name:${normalizedName}`;
     if (!singers.has(singerKey)) {
       singers.set(singerKey, {
         singer: options.includeSingerInfo
           ? {
-              id: row.singer_id ? String(row.singer_id) : undefined,
-              uuid: row.public_uuid ?? undefined,
+              id: singerId ? String(singerId) : undefined,
+              uuid: options.selfSinger?.public_uuid ?? row.public_uuid ?? undefined,
               displayName,
               normalizedName,
               totalSongsSung: row.total_songs_sung != null ? Number(row.total_songs_sung) : undefined,
@@ -1195,9 +1207,80 @@ async function buildSingerHistoryKdFile(options: {
     });
   }
 
+  const profileParams: any[] = [];
+  let profileWhere = '';
+  if (options.selfSinger) {
+    profileParams.push(options.selfSinger.id);
+    profileWhere = `WHERE id = $1`;
+  } else if (options.singerIds && options.singerIds.length > 0) {
+    profileParams.push(options.singerIds);
+    profileWhere = `WHERE id = ANY($1::bigint[])`;
+  }
+  const profileRows = await query<{
+    id: string;
+    public_uuid: string;
+    display_name: string;
+    normalized_name: string;
+    total_songs_sung: number;
+    last_sang_at: Date | null;
+    profile_image_source: string | null;
+    profile_image_url: string | null;
+    profile_image_mime: string | null;
+    profile_image_data: Buffer | null;
+    profile_image_focus_x: number | null;
+    profile_image_focus_y: number | null;
+    profile_image_crop: SingerProfileCrop | null;
+    profile_image_updated_at: Date | null;
+  }>(
+    `SELECT id, public_uuid, display_name, normalized_name, total_songs_sung, last_sang_at,
+            profile_image_source, profile_image_url, profile_image_mime, profile_image_data,
+            profile_image_focus_x, profile_image_focus_y, profile_image_crop, profile_image_updated_at
+       FROM singers
+       ${profileWhere}
+      ORDER BY display_name`,
+    profileParams,
+  );
+  for (const row of profileRows.rows) {
+    const singerKey = `id:${row.id}`;
+    const profile = {
+      imageSource:
+        row.profile_image_source === 'oidc' || row.profile_image_source === 'upload'
+          ? row.profile_image_source
+          : null,
+      imageUrl: row.profile_image_url,
+      imageMime: row.profile_image_mime,
+      imageDataBase64: row.profile_image_data?.toString('base64') ?? null,
+      focusX: Number(row.profile_image_focus_x ?? 50),
+      focusY: Number(row.profile_image_focus_y ?? 50),
+      ...(row.profile_image_crop ? { crop: row.profile_image_crop } : {}),
+      updatedAt: row.profile_image_updated_at
+        ? new Date(row.profile_image_updated_at).toISOString()
+        : null,
+    } satisfies ImportedSingerProfile;
+    const existing = singers.get(singerKey);
+    if (existing?.singer) {
+      existing.singer.profile = profile;
+      continue;
+    }
+    singers.set(singerKey, {
+      singer: options.includeSingerInfo
+        ? {
+            id: String(row.id),
+            uuid: row.public_uuid,
+            displayName: row.display_name,
+            normalizedName: row.normalized_name,
+            totalSongsSung: Number(row.total_songs_sung ?? 0),
+            lastSangAt: row.last_sang_at ? new Date(row.last_sang_at).toISOString() : null,
+            profile,
+          }
+        : undefined,
+      songs: [],
+    });
+  }
+
   return {
     format: 'karaokedock.singer-history',
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     singers: Array.from(singers.values()),
   };
@@ -1233,21 +1316,38 @@ async function resolveKdTrack(song: SingerHistoryKdSong): Promise<number | null>
   return null;
 }
 
-async function importSingerHistoryKdFile(file: SingerHistoryKdFile, options: { requesterName?: string; singerUuid?: string | null }): Promise<{
+async function importSingerHistoryKdFile(file: SingerHistoryKdFile, options: {
+  selfSinger?: SingerRow;
+  includeProfile?: boolean;
+  allowOidcProfileUrls?: boolean;
+}): Promise<{
   imported: number;
   skipped: number;
 }> {
   let imported = 0;
   let skipped = 0;
 
+  for (const entry of file.singers) {
+    if (entry.singer?.profile?.crop !== undefined) validateSingerProfileCrop(entry.singer.profile.crop);
+  }
   for (const singerEntry of file.singers) {
-    const displayName = options.requesterName || singerEntry.singer?.displayName?.trim();
+    const displayName = options.selfSinger?.display_name || singerEntry.singer?.displayName?.trim();
     if (!displayName) {
       skipped += singerEntry.songs?.length ?? 0;
       continue;
     }
-    const singerUuid = options.singerUuid || singerEntry.singer?.uuid || null;
-    const singer = await findOrCreateSinger(displayName, singerUuid);
+    const singerUuid = singerEntry.singer?.uuid || null;
+    const singer = options.selfSinger ?? await findOrCreateSinger(displayName, singerUuid);
+    if (options.includeProfile !== false) {
+      await applyImportedSingerProfile(
+        singer.id,
+        singerEntry.singer?.profile,
+        { allowOidcUrl: options.allowOidcProfileUrls === true },
+      );
+    } else if (singerEntry.singer?.profile?.crop !== undefined) {
+      const profile = singerEntry.singer.profile;
+      await setSingerProfileFocus(singer.id, profile.focusX, profile.focusY, profile.crop, { preserveAdminOverride: true });
+    }
     await ensureSingerInActiveRotation(singer.id);
     for (const song of singerEntry.songs || []) {
       const trackId = await resolveKdTrack(song);
@@ -1278,9 +1378,7 @@ async function importSingerHistoryKdFile(file: SingerHistoryKdFile, options: { r
       );
       imported++;
     }
-    await recalculateSingerStats(String(singer.id)).catch((err) =>
-      console.error('Failed to recalculate singer stats after history import for singer', singer.id, err),
-    );
+    await recalculateSingerStats(String(singer.id));
   }
 
   return { imported, skipped };
@@ -1407,34 +1505,46 @@ async function setBreakMusicState(partial: Partial<BreakMusicState>) {
   await Promise.all(writes);
 }
 
-// Pause break music automatically when a karaoke request starts playing.
-// Saves the current playback position and marks it as auto-paused so we can
-// resume correctly when karaoke ends, without overriding a deliberate user pause.
-async function autoPauseBreakMusicForKaraoke() {
+async function syncBreakMusicForKaraoke() {
+  const [pauseSetting, playing] = await Promise.all([
+    getSetting('break_music.pause_during_karaoke'),
+    query(`SELECT id FROM queue WHERE status = 'playing' LIMIT 1`),
+  ]);
+  const pauseDuringKaraoke = pauseSetting !== false;
+  const mutedForKaraoke = playing.rows.length > 0;
   const breakState = await getBreakMusicState();
-  if (breakState.paused || !breakState.currentTrackId) return;
-  let currentPositionSec = breakState.currentPositionSec || 0;
-  if (breakState.currentStartedAt) {
-    const startedMs = Date.parse(breakState.currentStartedAt);
-    if (Number.isFinite(startedMs)) {
-      currentPositionSec = Math.max(currentPositionSec, Math.floor((Date.now() - startedMs) / 1000));
+  if (pauseDuringKaraoke && mutedForKaraoke) {
+    if (!breakState.paused) {
+      let currentPositionSec = breakState.currentPositionSec || 0;
+      if (breakState.currentStartedAt) {
+        const startedMs = Date.parse(breakState.currentStartedAt);
+        if (Number.isFinite(startedMs)) {
+          currentPositionSec = Math.max(currentPositionSec, Math.floor((Date.now() - startedMs) / 1000));
+        }
+      }
+      await setBreakMusicState({ paused: true, autoPaused: true, currentPositionSec, currentStartedAt: null });
+      postQueueUpdate('break_music.updated');
     }
+  } else if (breakState.autoPaused) {
+    // Never undo a deliberate Host pause when a singer finishes or the policy changes.
+    await setBreakMusicState({
+      paused: false,
+      autoPaused: false,
+      currentStartedAt: breakState.currentTrackId
+        ? new Date(Date.now() - Math.max(0, breakState.currentPositionSec) * 1000).toISOString()
+        : null,
+    });
+    postQueueUpdate('break_music.updated');
   }
-  await setBreakMusicState({ paused: true, autoPaused: true, currentPositionSec, currentStartedAt: null });
-  postQueueUpdate('break_music.updated');
+  return { pauseDuringKaraoke, mutedForKaraoke };
 }
 
-// Resume break music after a karaoke request ends, but only if it was
-// auto-paused by karaoke start (not paused by the user).
+async function autoPauseBreakMusicForKaraoke() {
+  await syncBreakMusicForKaraoke();
+}
+
 async function autoResumeBreakMusicForKaraoke() {
-  const breakState = await getBreakMusicState();
-  if (!breakState.autoPaused) return;
-  await setBreakMusicState({
-    paused: false,
-    autoPaused: false,
-    currentStartedAt: new Date(Date.now() - Math.max(0, breakState.currentPositionSec) * 1000).toISOString(),
-  });
-  postQueueUpdate('break_music.updated');
+  await syncBreakMusicForKaraoke();
 }
 
 async function getBreakTrackById(id: number | null): Promise<BreakMusicTrackRow | null> {
@@ -1717,6 +1827,10 @@ apiRouter.get(
     }
 
     const user = info.userId ? await getUserById(info.userId) : null;
+    if (info.userId && (!user || !user.is_active)) {
+      return res.json({ valid: false, role: 'user' });
+    }
+    if (user) await ensureAuthenticatedSinger(user);
     res.json({
       valid: true,
       role: info.role,
@@ -2232,10 +2346,7 @@ apiRouter.get(
         },
       );
 
-      const claims = tokenSet.claims();
-      if (!claims?.sub) {
-        throw new Error('Missing subject claim from OIDC token');
-      }
+      const claims = await getOidcProfileClaims(config, tokenSet);
       const sub = claims.sub;
       const emailClaim = typeof claims.email === 'string' ? claims.email.trim() : '';
       const email = emailClaim.toLowerCase();
@@ -2275,6 +2386,7 @@ apiRouter.get(
           picture,
         });
       } else {
+        if (user.is_active) await ensureAuthenticatedSinger(user);
         let nextUsername = user.username;
         if (baseUsername && baseUsername !== user.username) {
           nextUsername = await findAvailableOidcUsername(baseUsername, user.id) || user.username;
@@ -2295,6 +2407,8 @@ apiRouter.get(
         return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=Account+disabled`);
       }
 
+      await ensureAuthenticatedSinger(user);
+      postQueueUpdate('queue.updated');
       const sessionToken = await createSession(30, user.id, user.role);
       const exchangeCode = crypto.randomBytes(24).toString('hex');
       oidcExchangeStore.set(exchangeCode, {
@@ -3016,12 +3130,12 @@ apiRouter.post(
       return res.status(403).json({ error: 'External library is disabled' });
     }
     
-    const { title, artist, url, requestedBy, keyAdjustment, brand, discId } = req.body;
-    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
+    const { title, artist, url, keyAdjustment, brand, discId } = req.body;
     
     if (!title || !url) {
       return res.status(400).send('title and url required');
     }
+    const singer = await resolveQueueRequester(req.headers['x-session-token'], req.body);
 
     // Import upsertArtist and upsertExternalTrack
     const { upsertArtist, upsertExternalTrack } = await import('../db');
@@ -3062,18 +3176,9 @@ apiRouter.post(
     }
 
     // Find or create singer for this request
-    let kn_singerId: bigint | null = null;
-    let queueRequestedBy = requestedBy || null;
-    if (requestedBy && requestedBy.trim()) {
-      try {
-        const singer = await getAuthenticatedRequesterSinger(req, requestedBy) ?? await findOrCreateSinger(requestedBy, singerUuid);
-        kn_singerId = singer.id;
-        queueRequestedBy = singer.display_name || requestedBy;
-        await ensureSingerInActiveRotation(kn_singerId);
-      } catch (err) {
-        console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
-      }
-    }
+    const kn_singerId = singer?.id ?? null;
+    const queueRequestedBy = singer?.display_name ?? null;
+    if (singer) await ensureSingerInActiveRotation(singer.id);
 
     // Try to insert with key_adjustment if the column exists
     try {
@@ -3244,313 +3349,75 @@ export function broadcastQueueUpdate(type = 'queue.updated', data?: any): void {
   postQueueUpdate(type, data);
 }
 
-// Re-sort queued items according to the active rotation policy.
-// Called after new items are added or a song completes so the queue respects
-// the configured rotation order.
-//
-// Algorithm:
-//  1. Count how many songs each singer has already had played (done/playing) —
-//     this tells us which "round" their next queued song belongs to.
-//  2. Assign round numbers to all queued songs: round = doneSongs + 1 + songIndex.
-//  3. Sort by (round ASC, tiebreaker) where the tiebreaker depends on policy:
-//     - strict_round_robin / signup_order / hybrid: rotation position (rs.position)
-//     - least_recently_sung: last_sang_at ASC (never sung first), then position
-//  4. For singers who have queued songs but are not yet in rotation_singers,
-//     derive their rotation slot from their first-appearance order in the queue.
+// Queue previews and actual playback use the same scheduling rules.
 export async function resortQueueByRotation(): Promise<void> {
-  try {
-    // Get the active rotation type
-    const rotRes = await query<any>(
-      `SELECT id, type, config, current_round FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`
-    );
-    if (rotRes.rows.length === 0) return;
-
-    const rotRow = rotRes.rows[0];
-    const rotationType: string = (rotRow.config?.type) || rotRow.type || 'strict_round_robin';
-    const currentRound = Number(rotRow.current_round) > 0 ? Number(rotRow.current_round) : 1;
-
-    // For manual mode, never touch the order
-    if (rotationType === 'manual') return;
-
-    // song_queue_only: sort strictly by original request order (no singer fairness).
-    // The queue is already in insertion order, so nothing needs to change.
-    if (rotationType === 'song_queue_only') return;
-
-    // Get all queued (not yet playing) items in their current order.
-    // Prefer singer_id for grouping; fall back to requested_by for old rows.
-    const queueRes = await query<{
-      id: number;
-      requested_by: string | null;
-      singer_id: string | null;
-      position: number;
-    }>(
-      `SELECT id, requested_by, singer_id, position FROM queue WHERE status = 'queued' ORDER BY position`
-    );
-    if (queueRes.rows.length <= 1) return;
-
-    const playingRes = await query<{ singer_id: string | null; requested_by: string | null }>(
-      `SELECT singer_id, requested_by FROM queue WHERE status = 'playing' ORDER BY started_at DESC NULLS LAST, id DESC LIMIT 1`
-    );
-    const currentlyPlayingSingerKey =
-      playingRes.rows.length > 0
-        ? (playingRes.rows[0].singer_id
-            ? String(playingRes.rows[0].singer_id)
-            : `name:${normalizeSingerName(playingRes.rows[0].requested_by ?? '')}`)
-        : null;
-
-    // Get singer positions from the rotation (used as tiebreaker within a round).
-    // Join via singer_id for precision.
-    const singerRes = await query<{
-      singer_id: string;
-      display_name: string;
-      position: number;
-      last_sang_at: Date | null;
-      current_round_joined: number;
-      last_round_sang: number | null;
-    }>(
-      `SELECT s.id AS singer_id, s.display_name, rs.position, rs.last_sang_at, rs.current_round_joined, rs.last_round_sang
-        FROM rotation_singers rs
-        JOIN singers s ON s.id = rs.singer_id
-        WHERE rs.rotation_id = $1 AND rs.status = 'active'
-        ORDER BY rs.position`,
-      [rotRow.id]
-    );
-
-    // Build lookup: singer_id string → { position, lastSangAt }
-    // Also keep a fallback lookup by lowercase display_name for old queue rows without singer_id
-    const singerInfoById = new Map<string, { position: number; lastSangAt: Date | null; currentRoundJoined: number; lastRoundSang: number | null }>();
-    const singerInfoByName = new Map<string, { position: number; lastSangAt: Date | null; currentRoundJoined: number; lastRoundSang: number | null }>();
-    for (const row of singerRes.rows) {
-      const info = {
-        position: row.position,
-        lastSangAt: row.last_sang_at,
-        currentRoundJoined: Number(row.current_round_joined) > 0 ? Number(row.current_round_joined) : 1,
-        lastRoundSang: row.last_round_sang === null ? null : Number(row.last_round_sang),
-      };
-      singerInfoById.set(String(row.singer_id), info);
-      singerInfoByName.set(normalizeSingerName(row.display_name), info);
-    }
-
-    // For singers in the queue but not yet in rotation_singers, assign them
-    // positions after the existing rotation singers, in first-appearance order.
-    const maxRegisteredPos =
-      singerInfoById.size > 0
-        ? Math.max(...Array.from(singerInfoById.values()).map((v) => v.position))
-        : -1;
-    let nextPos = maxRegisteredPos + 1;
-
-    // Helper: derive a stable singer key and info for a queue row
-    const getSingerKey = (row: { id: number; requested_by: string | null; singer_id: string | null }) => {
-      return row.singer_id ? row.singer_id : `name:${normalizeSingerName(row.requested_by ?? '')}`;
-    };
-
-    const resolvedInfo = new Map<string, { position: number; lastSangAt: Date | null; currentRoundJoined: number; lastRoundSang: number | null }>();
-    for (const item of queueRes.rows) {
-      const key = getSingerKey(item);
-      if (resolvedInfo.has(key)) continue;
-
-      if (item.singer_id && singerInfoById.has(item.singer_id)) {
-        resolvedInfo.set(key, singerInfoById.get(item.singer_id)!);
-      } else {
-        const name = normalizeSingerName(item.requested_by ?? '');
-        if (name && singerInfoByName.has(name)) {
-          resolvedInfo.set(key, singerInfoByName.get(name)!);
-        } else {
-          resolvedInfo.set(key, {
-            position: nextPos++,
-            lastSangAt: null,
-            currentRoundJoined: currentRound,
-            lastRoundSang: null,
-          });
-        }
-      }
-    }
-
-    if (resolvedInfo.size === 0) return;
-
-    // Group queued items by singer key
-    const bySinger = new Map<string, Array<{ id: number; requested_by: string | null; singer_id: string | null; position: number }>>();
-    for (const item of queueRes.rows) {
-      const key = getSingerKey(item);
-      if (!bySinger.has(key)) bySinger.set(key, []);
-      bySinger.get(key)!.push(item);
-    }
-
-    // Assign a (round, tiebreaker) to every queued item
-    const sortableInputs: Array<{
-      id: number;
-      item: { id: number; requested_by: string | null; singer_id: string | null; position: number };
-      origPos: number;
-      rotPos: number;
-      lastSangAt: Date | null;
-      currentRoundJoined: number;
-      lastRoundSang: number | null;
-      isCurrentlyPlaying: boolean;
-      songIndex: number;
-    }> = [];
-
-    for (const [key, items] of bySinger) {
-      // Build the doneCounts key using the same logic as the SQL query:
-      // singer_id::text when available, else LOWER(requested_by).
-      const doneKey = items[0].singer_id
-        ? items[0].singer_id
-        : `name:${normalizeSingerName(items[0].requested_by ?? '')}`;
-      const info = resolvedInfo.get(key) ?? {
-        position: Number.MAX_SAFE_INTEGER,
-        lastSangAt: null,
-        currentRoundJoined: currentRound,
-        lastRoundSang: null,
-      };
-      items.forEach((item, songIndex) => {
-        sortableInputs.push({
-          id: item.id,
-          item,
-          origPos: item.position,
-          rotPos: info.position,
-          lastSangAt: info.lastSangAt,
-          currentRoundJoined: info.currentRoundJoined,
-          lastRoundSang: info.lastRoundSang,
-          isCurrentlyPlaying: currentlyPlayingSingerKey === doneKey,
-          songIndex,
-        });
-      });
-    }
-
-    // Determine the effective base policy for sort tiebreaking
-    const basePolicy: QueueSortBasePolicy =
-      rotationType === 'hybrid'
-        ? (rotRow.config?.basePolicy === 'least_recently_sung' || rotRow.config?.basePolicy === 'signup_order'
-            ? rotRow.config.basePolicy
-            : 'strict_round_robin')
-        : (rotationType === 'least_recently_sung' || rotationType === 'signup_order'
-            ? rotationType
-            : 'strict_round_robin');
-
-    const sortedOrder = sortQueuedRotationItems(
-      sortableInputs.map((item) => ({
-        id: item.id,
-        origPos: item.origPos,
-        rotPos: item.rotPos,
-        lastSangAt: item.lastSangAt,
-        currentRoundJoined: item.currentRoundJoined,
-        lastRoundSang: item.lastRoundSang,
-        isCurrentlyPlaying: item.isCurrentlyPlaying,
-        songIndex: item.songIndex,
-      })),
-      { currentRound, basePolicy }
-    );
-
-    const itemById = new Map(sortableInputs.map((item) => [item.id, item.item]));
-    const sorted = sortedOrder.map((s) => itemById.get(s.id)!).filter(Boolean);
-
-    // Skip if already in the correct order
-    const currentIds = queueRes.rows.map((r) => r.id);
-    const sortedIds = sorted.map((r) => r.id);
-    if (currentIds.every((id, i) => id === sortedIds[i])) return;
-
-    const minPos = queueRes.rows[0].position;
-    // Temporary offset used in the two-phase position update to avoid
-    // intermediate unique-constraint conflicts when shuffling positions.
-    const TEMP_OFFSET = 1_000_000;
-
-    await query('BEGIN');
-    try {
-      // Phase 1: move to temp positions to avoid conflicts
-      for (let i = 0; i < sorted.length; i++) {
-        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, sorted[i].id]);
-      }
-      // Phase 2: move to final positions
-      for (let i = 0; i < sorted.length; i++) {
-        await query(`UPDATE queue SET position = $1 WHERE id = $2`, [minPos + i, sorted[i].id]);
-      }
-      await query('COMMIT');
-    } catch (e) {
-      await query('ROLLBACK');
-      throw e;
-    }
-  } catch (err) {
-    console.error('resortQueueByRotation failed:', err);
-  }
+  await resortLiveQueue();
 }
 
 export async function applyManualSingerQueueOrder(orderedSingerIds: string[]): Promise<void> {
-  const normalizedOrder = orderedSingerIds
+  const normalizedOrder = [...new Set(orderedSingerIds
     .map((id) => String(id).trim())
-    .filter((id) => /^\d+$/.test(id));
+    .filter((id) => /^\d+$/.test(id)))];
   if (normalizedOrder.length === 0) return;
 
-  const queueRes = await query<{
-    id: number;
-    singer_id: string | null;
-    position: number;
-  }>(
-    `SELECT id, singer_id, position
-       FROM queue
-      WHERE status = 'queued'
-      ORDER BY position`
-  );
-  if (queueRes.rows.length <= 1) return;
+  await withQueueTransaction(async (client) => {
+    const queueRes = await client.query<{
+      id: number;
+      singer_id: string | null;
+      position: number;
+    }>(
+      `SELECT id, singer_id, position FROM queue
+        WHERE status = 'queued' ORDER BY position, id FOR UPDATE`
+    );
+    if (queueRes.rows.length <= 1) return;
 
-  const bySinger = new Map<string, Array<{ id: number; position: number }>>();
-  const unordered: Array<{ id: number; position: number }> = [];
-  for (const row of queueRes.rows) {
-    if (row.singer_id) {
-      const key = String(row.singer_id);
-      if (!bySinger.has(key)) bySinger.set(key, []);
-      bySinger.get(key)!.push({ id: row.id, position: row.position });
-    } else {
-      unordered.push({ id: row.id, position: row.position });
-    }
-  }
-
-  const remainingSingerIds = new Set(bySinger.keys());
-  const singerOrder = normalizedOrder.filter((id) => {
-    const hasSinger = bySinger.has(id);
-    if (hasSinger) remainingSingerIds.delete(id);
-    return hasSinger;
-  });
-  singerOrder.push(...Array.from(remainingSingerIds).sort((a, b) => {
-    const aFirst = bySinger.get(a)?.[0]?.position ?? Number.MAX_SAFE_INTEGER;
-    const bFirst = bySinger.get(b)?.[0]?.position ?? Number.MAX_SAFE_INTEGER;
-    return aFirst - bFirst;
-  }));
-
-  const sorted: Array<{ id: number; position: number }> = [];
-  let added = true;
-  let songIndex = 0;
-  while (added) {
-    added = false;
-    for (const singerId of singerOrder) {
-      const item = bySinger.get(singerId)?.[songIndex];
-      if (item) {
-        sorted.push(item);
-        added = true;
+    const bySinger = new Map<string, Array<{ id: number; position: number }>>();
+    const unordered: Array<{ id: number; position: number }> = [];
+    for (const row of queueRes.rows) {
+      if (row.singer_id) {
+        const key = String(row.singer_id);
+        if (!bySinger.has(key)) bySinger.set(key, []);
+        bySinger.get(key)!.push({ id: row.id, position: row.position });
+      } else {
+        unordered.push({ id: row.id, position: row.position });
       }
     }
-    songIndex++;
-  }
-  sorted.push(...unordered);
 
-  const currentIds = queueRes.rows.map((row) => row.id);
-  const sortedIds = sorted.map((row) => row.id);
-  if (currentIds.length === sortedIds.length && currentIds.every((id, index) => id === sortedIds[index])) return;
+    const remainingSingerIds = new Set(bySinger.keys());
+    const singerOrder = normalizedOrder.filter((id) => {
+      const hasSinger = bySinger.has(id);
+      if (hasSinger) remainingSingerIds.delete(id);
+      return hasSinger;
+    });
+    singerOrder.push(...Array.from(remainingSingerIds).sort((a, b) => {
+      const aFirst = bySinger.get(a)?.[0]?.position ?? Number.MAX_SAFE_INTEGER;
+      const bFirst = bySinger.get(b)?.[0]?.position ?? Number.MAX_SAFE_INTEGER;
+      return aFirst - bFirst;
+    }));
 
-  const positions = queueRes.rows.map((row) => row.position).sort((a, b) => a - b);
-  const TEMP_OFFSET = 1_000_000;
-
-  await query('BEGIN');
-  try {
-    for (let i = 0; i < sorted.length; i++) {
-      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, sorted[i].id]);
+    const sorted: Array<{ id: number; position: number }> = [];
+    let added = true;
+    let songIndex = 0;
+    while (added) {
+      added = false;
+      for (const singerId of singerOrder) {
+        const item = bySinger.get(singerId)?.[songIndex];
+        if (item) {
+          sorted.push(item);
+          added = true;
+        }
+      }
+      songIndex++;
     }
-    for (let i = 0; i < sorted.length; i++) {
-      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [positions[i], sorted[i].id]);
-    }
-    await query('COMMIT');
-  } catch (e) {
-    await query('ROLLBACK');
-    throw e;
-  }
+    sorted.push(...unordered);
+
+    const currentIds = queueRes.rows.map((row) => row.id);
+    const sortedIds = sorted.map((row) => row.id);
+    if (currentIds.length === sortedIds.length && currentIds.every((id, index) => id === sortedIds[index])) return;
+
+    const positions = queueRes.rows.map((row) => row.position).sort((a, b) => a - b);
+    await writeQueueOrder(client, sortedIds, positions, true);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -3569,6 +3436,241 @@ apiRouter.get(
 // ---------------------------------------------------------------------------
 // GET /api/singers/:id/history — singer history including completed songs
 // ---------------------------------------------------------------------------
+async function resolveSelfSingerProfile(
+  req: express.Request,
+): Promise<{ singer: SingerRow; user: User | null; canUpload: boolean }> {
+  const user = await getOptionalAuthenticatedUser(req);
+  if (user) {
+    const singer = await ensureAuthenticatedSinger(user);
+    return { singer, user, canUpload: !user.oidc_subject };
+  }
+
+  const singer = await resolveGuestSinger(
+    req.query.name ?? req.body?.name, req.query.singerUuid ?? req.body?.singerUuid,
+  );
+  return { singer, user: null, canUpload: true };
+}
+
+async function buildSelfSingerProfileResponse(
+  resolved: { singer: SingerRow; user: User | null; canUpload: boolean },
+) {
+  const row = await getSingerProfileRow(resolved.singer.id);
+  if (!row) throw Object.assign(new Error('Singer profile not found'), { status: 404 });
+  return {
+    singerId: resolved.singer.id.toString(),
+    singerUuid: resolved.singer.public_uuid,
+    displayName: resolved.singer.display_name,
+    canUpload: resolved.canUpload,
+    profile: singerProfileFromRow(row),
+  };
+}
+
+apiRouter.get(
+  '/singers/self/profile',
+  ah(async (req, res) => {
+    const resolved = await resolveSelfSingerProfile(req);
+    res.json(await buildSelfSingerProfileResponse(resolved));
+  }),
+);
+
+apiRouter.post(
+  '/singers/self/profile/image',
+  queueLimiter,
+  express.raw({ type: 'image/*', limit: SINGER_PROFILE_IMAGE_MAX_BYTES }),
+  ah(async (req, res) => {
+    const resolved = await resolveSelfSingerProfile(req);
+    if (!resolved.canUpload) {
+      return res.status(403).json({ error: 'This profile image is managed by your OIDC provider' });
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Upload an image file' });
+    }
+    const mime = detectSingerProfileImageMime(req.body);
+    if (!mime) {
+      return res.status(400).json({ error: 'Upload a PNG, JPEG, WebP, or GIF image' });
+    }
+    await setSingerUploadedProfileImage(resolved.singer.id, req.body, mime);
+    postQueueUpdate('queue.updated');
+    res.json(await buildSelfSingerProfileResponse(resolved));
+  }),
+);
+
+apiRouter.patch(
+  '/singers/self/profile/focus',
+  queueLimiter,
+  ah(async (req, res) => {
+    const resolved = await resolveSelfSingerProfile(req);
+    await setSingerProfileFocus(resolved.singer.id, req.body?.focusX, req.body?.focusY, req.body?.crop);
+    postQueueUpdate('queue.updated');
+    res.json(await buildSelfSingerProfileResponse(resolved));
+  }),
+);
+
+apiRouter.delete(
+  '/singers/self/profile/image',
+  queueLimiter,
+  ah(async (req, res) => {
+    const resolved = await resolveSelfSingerProfile(req);
+    if (!resolved.canUpload) {
+      return res.status(403).json({ error: 'This profile image is managed by your OIDC provider' });
+    }
+    await clearSingerProfileImage(resolved.singer.id);
+    postQueueUpdate('queue.updated');
+    res.json(await buildSelfSingerProfileResponse(resolved));
+  }),
+);
+
+apiRouter.get(
+  '/singers/archived',
+  adminGuard,
+  ah(async (_req, res) => {
+    const activeRotation = await query<{ id: string }>(
+      `SELECT id FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`,
+    );
+    const result = await query<any>(
+      `SELECT s.id, s.display_name, s.status, s.total_songs_sung, s.last_sang_at,
+              s.profile_image_source, s.profile_image_url, s.profile_image_mime,
+              s.profile_image_focus_x, s.profile_image_focus_y, s.profile_image_crop, s.profile_image_updated_at,
+              COUNT(q.id)::int AS history_count
+         FROM singers s
+         LEFT JOIN queue q ON q.singer_id = s.id
+        WHERE NOT EXISTS (
+          SELECT 1
+            FROM rotation_singers rs
+           WHERE rs.singer_id = s.id
+             AND rs.rotation_id = $1
+             AND rs.status = 'active'
+        )
+        GROUP BY s.id
+        ORDER BY s.last_sang_at DESC NULLS LAST, s.display_name`,
+      [activeRotation.rows[0]?.id ?? null],
+    );
+    res.json(result.rows.map((row) => ({
+      singerId: String(row.id),
+      displayName: row.display_name,
+      status: row.status,
+      totalSongsSung: Number(row.total_songs_sung ?? 0),
+      historyCount: Number(row.history_count ?? 0),
+      lastSangAt: row.last_sang_at ? new Date(row.last_sang_at).toISOString() : null,
+      profile: singerProfileFromRow(row),
+    })));
+  }),
+);
+
+apiRouter.get(
+  '/singers/:id/profile-image',
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    const result = await query<{ profile_image_mime: string | null; profile_image_data: Buffer | null }>(
+      `SELECT profile_image_mime, profile_image_data FROM singers WHERE id = $1`,
+      [singerId],
+    );
+    const image = result.rows[0];
+    if (!image?.profile_image_mime || !image.profile_image_data) {
+      return res.status(404).json({ error: 'Singer profile image not found' });
+    }
+    res.setHeader('Content-Type', image.profile_image_mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(image.profile_image_data);
+  }),
+);
+
+apiRouter.post(
+  '/singers/:id/profile/image',
+  adminGuard,
+  express.raw({ type: 'image/*', limit: SINGER_PROFILE_IMAGE_MAX_BYTES }),
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Upload an image file' });
+    }
+    const mime = detectSingerProfileImageMime(req.body);
+    if (!mime) {
+      return res.status(400).json({ error: 'Upload a PNG, JPEG, WebP, or GIF image' });
+    }
+    await setSingerUploadedProfileImage(BigInt(singerId), req.body, mime, { adminOverride: true });
+    const row = await getSingerProfileRow(BigInt(singerId));
+    if (!row) return res.status(404).json({ error: 'Singer not found' });
+    postQueueUpdate('queue.updated');
+    res.json({ profile: singerProfileFromRow(row) });
+  }),
+);
+
+apiRouter.patch(
+  '/singers/:id/profile/focus',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    await setSingerProfileFocus(BigInt(singerId), req.body?.focusX, req.body?.focusY, req.body?.crop, { adminOverride: true });
+    const row = await getSingerProfileRow(BigInt(singerId));
+    if (!row) return res.status(404).json({ error: 'Singer not found' });
+    postQueueUpdate('queue.updated');
+    res.json({ profile: singerProfileFromRow(row) });
+  }),
+);
+
+apiRouter.delete(
+  '/singers/:id/profile/image',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    await clearSingerProfileImage(BigInt(singerId), { adminOverride: true });
+    const row = await getSingerProfileRow(BigInt(singerId));
+    if (!row) return res.status(404).json({ error: 'Singer not found' });
+    postQueueUpdate('queue.updated');
+    res.json({ profile: singerProfileFromRow(row) });
+  }),
+);
+
+apiRouter.post(
+  '/singers/:id/restore',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    const exists = await query<{ id: string }>(`SELECT id FROM singers WHERE id = $1`, [singerId]);
+    if (exists.rows.length === 0) return res.status(404).json({ error: 'Singer not found' });
+    await query(`UPDATE singers SET status = 'active' WHERE id = $1`, [singerId]);
+    await ensureSingerInActiveRotation(BigInt(singerId));
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  }),
+);
+
+apiRouter.delete(
+  '/singers/:id',
+  adminGuard,
+  ah(async (req, res) => {
+    const singerId = Number(req.params.id);
+    if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
+    const deleted = await withTransaction(async (client) => {
+      const exists = await client.query<{ id: string }>(`SELECT id FROM singers WHERE id = $1 FOR UPDATE`, [singerId]);
+      if (exists.rows.length === 0) {
+        return false;
+      }
+      await client.query(`DELETE FROM queue WHERE singer_id = $1`, [singerId]);
+      await client.query(
+        `UPDATE song_requests
+            SET participant_singer_ids = array_remove(participant_singer_ids, $1::bigint)
+          WHERE $1::bigint = ANY(participant_singer_ids)`,
+        [singerId],
+      );
+      await client.query(`DELETE FROM manual_overrides WHERE singer_id = $1`, [singerId]);
+      await client.query(`DELETE FROM rotation_turns WHERE singer_id = $1`, [singerId]);
+      await client.query(`DELETE FROM singers WHERE id = $1`, [singerId]);
+      return true;
+    });
+    if (!deleted) return res.status(404).json({ error: 'Singer not found' });
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true });
+  }),
+);
+
 apiRouter.get(
   '/singers/:id/history',
   ah(async (req, res) => {
@@ -3584,14 +3686,14 @@ apiRouter.post(
   '/singers/self/name',
   queueLimiter,
   ah(async (req, res) => {
-    const displayName = String(req.body?.name ?? '').trim();
-    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
+    if (typeof req.body?.name !== 'string') return res.status(400).json({ error: 'name is required' });
+    const displayName = req.body.name.trim();
     if (!displayName) return res.status(400).json({ error: 'name is required' });
-    if (!singerUuid) return res.status(400).json({ error: 'singerUuid is required' });
-
-    const singer = await findOrCreateSinger(displayName, singerUuid);
+    const user = await getOptionalAuthenticatedUser(req);
+    const singer = user
+      ? await renameAuthenticatedSinger(user, displayName)
+      : await resolveGuestSinger(displayName, req.body?.singerUuid, { rename: true });
     await ensureSingerInActiveRotation(singer.id);
-    await updateActiveQueueRequesterName(singer.id, displayName);
     postQueueUpdate('queue.updated');
     res.json({
       ok: true,
@@ -3611,12 +3713,9 @@ apiRouter.post(
 apiRouter.get(
   '/history/self/export',
   ah(async (req, res) => {
-    const name = String(req.query.name ?? '').trim();
-    const singerUuid = normalizeSingerUuid(req.query.singerUuid);
-    if (!name) return res.status(400).json({ error: 'name is required' });
+    const { singer, user } = await resolveSelfSingerProfile(req);
     const data = await buildSingerHistoryKdFile({
-      requesterName: name,
-      singerUuid,
+      ...(user ? { singerIds: [String(singer.id)] } : { selfSinger: singer }),
       includeSingerInfo: true,
     });
     res.json(data);
@@ -3627,12 +3726,13 @@ apiRouter.post(
   '/history/self/import',
   queueLimiter,
   ah(async (req, res) => {
-    const name = String(req.body?.name ?? '').trim();
-    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
     const data = req.body?.data;
-    if (!name) return res.status(400).json({ error: 'name is required' });
     if (!isSingerHistoryKdFile(data)) return res.status(400).json({ error: 'Invalid .kd singer history file' });
-    const result = await importSingerHistoryKdFile(data, { requesterName: name, singerUuid });
+    const { singer, user } = await resolveSelfSingerProfile(req);
+    const result = await importSingerHistoryKdFile(data, {
+      selfSinger: singer,
+      includeProfile: !user?.oidc_subject,
+    });
     await resortQueueByRotation();
     postQueueUpdate('queue.updated');
     res.json({ ok: true, ...result });
@@ -3681,7 +3781,7 @@ apiRouter.post(
   ah(async (req, res) => {
     const data = req.body?.data;
     if (!isSingerHistoryKdFile(data)) return res.status(400).json({ error: 'Invalid .kd singer history file' });
-    const result = await importSingerHistoryKdFile(data, {});
+    const result = await importSingerHistoryKdFile(data, { allowOidcProfileUrls: true });
     await resortQueueByRotation();
     postQueueUpdate('queue.updated');
     res.json({ ok: true, ...result });
@@ -3751,7 +3851,6 @@ apiRouter.patch(
 // ---------------------------------------------------------------------------
 // DELETE /api/singers/:id/history — delete ALL of a singer's queue entries
 // (pending queued songs, history, skipped, removed, cancelled) and reset stats.
-// Used when removing a singer from the rotation.
 // ---------------------------------------------------------------------------
 apiRouter.delete(
   '/singers/:id/history',
@@ -3830,29 +3929,33 @@ apiRouter.post(
     if (targetId === sourceId) {
       return res.status(400).json({ error: 'Cannot merge singer with itself' });
     }
-    await query('BEGIN');
-    try {
-      const singerCheck = await query<{ id: string }>(
+    const merged = await withTransaction(async (client) => {
+      const singerCheck = await client.query<{ id: string }>(
         `SELECT id FROM singers WHERE id = ANY($1::bigint[])`,
         [[targetId, sourceId]],
       );
       if (singerCheck.rows.length < 2) {
-        await query('ROLLBACK');
-        return res.status(404).json({ error: 'One or both singers not found' });
+        return false;
+      }
+      const linkedUsers = await client.query(
+        `SELECT id FROM users WHERE singer_id IN ($1, $2) FOR UPDATE`, [targetId, sourceId],
+      );
+      if (linkedUsers.rows.length > 1) {
+        throw Object.assign(new Error('Cannot merge singers linked to different users'), { status: 409 });
       }
       // Get target display name for updating queue rows
-      const targetRes = await query<{ display_name: string }>(
+      const targetRes = await client.query<{ display_name: string }>(
         `SELECT display_name FROM singers WHERE id = $1`,
         [targetId],
       );
       const targetDisplayName = targetRes.rows[0]?.display_name ?? '';
       // Move all queue entries from source to target
-      await query(
+      await client.query(
         `UPDATE queue SET singer_id = $1, requested_by = $2 WHERE singer_id = $3`,
         [targetId, targetDisplayName, sourceId],
       );
       // Remove source from rotations where target already exists, then reassign the rest
-      await query(
+      await client.query(
         `DELETE FROM rotation_singers
           WHERE singer_id = $1
             AND rotation_id IN (
@@ -3860,22 +3963,56 @@ apiRouter.post(
             )`,
         [sourceId, targetId],
       );
-      await query(
+      await client.query(
         `UPDATE rotation_singers SET singer_id = $1 WHERE singer_id = $2`,
         [targetId, sourceId],
       );
-      // Recalculate stats for target
-      await recalculateSingerStats(String(targetId));
-      // Delete source singer
-      await query(`DELETE FROM singers WHERE id = $1`, [sourceId]);
-      await query('COMMIT');
-      await resortQueueByRotation();
-      postQueueUpdate('queue.updated');
-      res.json({ ok: true });
-    } catch (e) {
-      await query('ROLLBACK');
-      throw e;
-    }
+      await client.query(`UPDATE rotation_turns SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
+      await client.query(`UPDATE manual_overrides SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
+      await client.query(
+        `UPDATE song_requests
+            SET participant_singer_ids = ARRAY(
+              SELECT mapped_id
+                FROM (
+                  SELECT
+                    CASE WHEN participant_id = $1::bigint THEN $2::bigint ELSE participant_id END AS mapped_id,
+                    MIN(ordinality) AS first_position
+                  FROM unnest(participant_singer_ids) WITH ORDINALITY AS participant(participant_id, ordinality)
+                  GROUP BY CASE WHEN participant_id = $1::bigint THEN $2::bigint ELSE participant_id END
+                ) deduplicated
+               ORDER BY first_position
+            )
+          WHERE $1::bigint = ANY(participant_singer_ids)`,
+        [sourceId, targetId],
+      );
+      await client.query(`UPDATE song_requests SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
+      await client.query(
+        `UPDATE singers target
+            SET profile_image_source = source.profile_image_source,
+                profile_image_url = source.profile_image_url,
+                profile_image_mime = source.profile_image_mime,
+                profile_image_data = source.profile_image_data,
+                profile_image_focus_x = source.profile_image_focus_x,
+                profile_image_focus_y = source.profile_image_focus_y,
+                profile_image_crop = source.profile_image_crop,
+                profile_image_admin_override = source.profile_image_admin_override,
+                profile_image_updated_at = source.profile_image_updated_at
+           FROM singers source
+          WHERE target.id = $1
+            AND source.id = $2
+            AND target.profile_image_source IS NULL
+            AND source.profile_image_source IS NOT NULL`,
+        [targetId, sourceId],
+      );
+      await client.query(`UPDATE users SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
+      await client.query(`DELETE FROM singers WHERE id = $1`, [sourceId]);
+      return true;
+    });
+    if (!merged) return res.status(404).json({ error: 'One or both singers not found' });
+    await recalculateSingerStats(String(targetId));
+    await resortQueueByRotation();
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true });
   })
 );
 
@@ -3888,7 +4025,6 @@ apiRouter.get(
     const name = String(req.query.name ?? '').trim();
     const singerUuid = normalizeSingerUuid(req.query.singerUuid);
     if (!name) return res.status(400).json({ error: 'name is required' });
-    const norm = normalizeSingerName(name);
     const authenticatedSinger = await getAuthenticatedRequesterSinger(req, name);
     if (authenticatedSinger) {
       const qRes = await query(
@@ -3907,35 +4043,19 @@ apiRouter.get(
 
     // Prefer singer_id-based lookup
     const singer = await resolveSingerForRequester(name, singerUuid);
-    let rows: any[];
-    if (singer) {
-      const singerId = singer.id;
-      const qRes = await query(
-        `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
-                t.title, t.kind, a.name AS artist
-           FROM queue q
-           JOIN tracks t ON t.id = q.track_id
-           LEFT JOIN artists a ON a.id = t.artist_id
-          WHERE q.status != 'removed'
-            AND (q.singer_id = $1 OR LOWER(TRIM(q.requested_by)) = $2)
-          ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.position`,
-        [singerId, norm],
-      );
-      rows = qRes.rows;
-    } else {
-      const qRes = await query(
-        `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
-                t.title, t.kind, a.name AS artist
-           FROM queue q
-           JOIN tracks t ON t.id = q.track_id
-           LEFT JOIN artists a ON a.id = t.artist_id
-          WHERE LOWER(TRIM(q.requested_by)) = $1 AND q.status != 'removed'
-          ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.position`,
-        [norm],
-      );
-      rows = qRes.rows;
-    }
-    res.json(rows);
+    const qRes = await query(
+      `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
+              t.title, t.kind, a.name AS artist
+         FROM queue q
+         JOIN tracks t ON t.id = q.track_id
+         LEFT JOIN artists a ON a.id = t.artist_id
+        WHERE q.status != 'removed'
+          AND (q.singer_id = $1 OR (q.singer_id IS NULL AND
+            LOWER(REGEXP_REPLACE(TRIM(q.requested_by), '\\s+', ' ', 'g')) = $2))
+        ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.position`,
+      [singer.id, singer.normalizedName],
+    );
+    res.json(qRes.rows);
   })
 );
 
@@ -3952,7 +4072,6 @@ apiRouter.post(
     if (!Number.isFinite(queueId)) return res.status(400).json({ error: 'Invalid queue id' });
     if (!requesterName) return res.status(400).json({ error: 'name is required' });
 
-    const norm = normalizeSingerName(requesterName);
     const item = await query<{
       id: string;
       track_id: string;
@@ -3985,20 +4104,14 @@ apiRouter.post(
     const requesterOwnsItem =
       (authenticatedSinger
         ? row.singer_id !== null && String(row.singer_id) === String(authenticatedSinger.id)
-        : normalizeSingerName(row.requested_by ?? '') === norm ||
-          (singer && row.singer_id !== null && String(row.singer_id) === String(singer.id)));
+        : (row.singer_id === null && normalizeSingerName(row.requested_by ?? '') === singer.normalizedName) ||
+          (row.singer_id !== null && String(row.singer_id) === String(singer.id)));
     if (!requesterOwnsItem) {
       return res.status(403).json({ error: 'You can only re-add your own songs' });
     }
 
-    let singerId: bigint | null = row.singer_id !== null ? BigInt(row.singer_id) : null;
-    try {
-      const singer = authenticatedSinger ?? await findOrCreateSinger(requesterName, singerUuid);
-      singerId = singer.id;
-      await ensureSingerInActiveRotation(singerId);
-    } catch (err) {
-      console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
-    }
+    const singerId = BigInt(singer.id);
+    await ensureSingerInActiveRotation(singerId);
 
     const trackId = Number(row.track_id);
     if (singerId) {
@@ -4019,7 +4132,7 @@ apiRouter.post(
       `INSERT INTO queue(track_id, requested_by, singer_id, status, position, key_adjustment)
        VALUES ($1,$2,$3,'queued',$4,$5)
        RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
-      [trackId, (authenticatedSinger?.display_name || requesterName), singerId, position, keyAdjustment],
+      [trackId, singer.displayName, singerId, position, keyAdjustment],
     );
 
     await resortQueueByRotation();
@@ -4050,7 +4163,6 @@ apiRouter.delete(
     if (item.rows.length === 0) {
       return res.status(404).json({ error: 'Queue item not found or not removable' });
     }
-    const normalizedRequester = normalizeSingerName(requesterName);
     const normalizedOwner = normalizeSingerName(item.rows[0].requested_by ?? '');
     const authenticatedSinger = await getAuthenticatedRequesterSinger(req, requesterName);
     const singer = authenticatedSinger
@@ -4059,7 +4171,7 @@ apiRouter.delete(
     const requesterOwnsItem =
       authenticatedSinger
         ? item.rows[0].singer_id !== null && String(item.rows[0].singer_id) === String(authenticatedSinger.id)
-        : normalizedRequester === normalizedOwner ||
+        : (item.rows[0].singer_id === null && singer?.normalizedName === normalizedOwner) ||
           (singer &&
             item.rows[0].singer_id !== null &&
             String(item.rows[0].singer_id) === String(singer.id));
@@ -4087,8 +4199,6 @@ apiRouter.patch(
     const orderedQueueIds = queueIds.map((id) => Number(id));
     if (orderedQueueIds.some((id) => !Number.isFinite(id))) return res.status(400).json({ error: 'queueIds must be numeric' });
 
-    const norm = normalizeSingerName(requesterName);
-
     // Resolve singer_id for this requester
     const authenticatedSinger = await getAuthenticatedRequesterSinger(req, requesterName);
     const singer = authenticatedSinger
@@ -4100,10 +4210,8 @@ apiRouter.patch(
         }
       : await resolveSingerForRequester(requesterName, rawSingerUuid);
 
-    let ownedIds: Set<number>;
-    if (singer) {
-      const singerId = singer.id;
-      const owned = authenticatedSinger
+    const singerId = singer.id;
+    const owned = authenticatedSinger
         ? await query<{ id: string }>(
             `SELECT id FROM queue
               WHERE status = 'queued'
@@ -4115,17 +4223,11 @@ apiRouter.patch(
             `SELECT id FROM queue
               WHERE status = 'queued'
                 AND id = ANY($2::bigint[])
-                AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $3)`,
-            [singerId, orderedQueueIds, norm],
+                AND (singer_id = $1 OR (singer_id IS NULL AND
+                  LOWER(REGEXP_REPLACE(TRIM(requested_by), '\\s+', ' ', 'g')) = $3))`,
+            [singerId, orderedQueueIds, singer.normalizedName],
           );
-      ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
-    } else {
-      const owned = await query<{ id: string }>(
-        `SELECT id FROM queue WHERE LOWER(TRIM(requested_by)) = $1 AND status = 'queued' AND id = ANY($2::bigint[])`,
-        [norm, orderedQueueIds],
-      );
-      ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
-    }
+    const ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
 
     for (const id of orderedQueueIds) {
       if (!ownedIds.has(id)) {
@@ -4134,10 +4236,7 @@ apiRouter.patch(
     }
 
     // Preserve relative positions: slot the new order into the existing position values
-    let curRes: { rows: { id: string; position: number }[] };
-    if (singer) {
-      const singerId = singer.id;
-      curRes = authenticatedSinger
+    const curRes = authenticatedSinger
         ? await query<{ id: string; position: number }>(
             `SELECT id, position FROM queue
               WHERE status = 'queued'
@@ -4148,16 +4247,11 @@ apiRouter.patch(
         : await query<{ id: string; position: number }>(
             `SELECT id, position FROM queue
               WHERE status = 'queued'
-                AND (singer_id = $1 OR LOWER(TRIM(requested_by)) = $2)
+                AND (singer_id = $1 OR (singer_id IS NULL AND
+                  LOWER(REGEXP_REPLACE(TRIM(requested_by), '\\s+', ' ', 'g')) = $2))
               ORDER BY position`,
-            [singerId, norm],
+            [singerId, singer.normalizedName],
           );
-    } else {
-      curRes = await query<{ id: string; position: number }>(
-        `SELECT id, position FROM queue WHERE LOWER(TRIM(requested_by)) = $1 AND status = 'queued' ORDER BY position`,
-        [norm],
-      );
-    }
     const sorted = curRes.rows.map((r) => r.position).sort((a, b) => a - b);
     const TEMP_OFFSET = 2_000_000;
     await query('BEGIN');
@@ -4218,11 +4312,10 @@ apiRouter.post(
   queueLimiter, // Apply rate limiting to prevent queue spam
   ah(async (req, res) => {
     const trackId = toInt(req.body?.trackId);
-    const requestedBy = (req.body?.requestedBy ?? null) as string | null;
-    const singerUuid = normalizeSingerUuid(req.body?.singerUuid);
     const keyAdjustment = toInt(req.body?.keyAdjustment) ?? 0;
     if (trackId == null) return res.status(400).send('trackId required');
     if (!validateKeyAdjustment(keyAdjustment)) return res.status(400).send('keyAdjustment must be between -6 and 6');
+    const singer = await resolveQueueRequester(req.headers['x-session-token'], req.body);
 
     // Check if the track is from local library or external
     const trackInfo = await query<{ source: string | null }>(
@@ -4254,18 +4347,9 @@ apiRouter.post(
     const position = (posr.rows[0] as any).p;
 
     // Find or create singer, then ensure they are in the active rotation.
-    let singerId: bigint | null = null;
-    let queueRequestedBy = requestedBy;
-    if (requestedBy && requestedBy.trim()) {
-      try {
-        const singer = await getAuthenticatedRequesterSinger(req, requestedBy) ?? await findOrCreateSinger(requestedBy, singerUuid);
-        singerId = singer.id;
-        queueRequestedBy = singer.display_name || requestedBy;
-        await ensureSingerInActiveRotation(singerId);
-      } catch (err) {
-        console.error('findOrCreateSinger / ensureSingerInActiveRotation failed:', err);
-      }
-    }
+    const singerId = singer?.id ?? null;
+    const queueRequestedBy = singer?.display_name ?? null;
+    if (singer) await ensureSingerInActiveRotation(singer.id);
 
     // Check for duplicate request: same singer, same track, already queued/playing
     if (singerId && trackId) {
@@ -4359,7 +4443,7 @@ apiRouter.post(
               file: zipPath,
               cdg: cdgEntry,
               mp3: mp3Entry,
-              requestedBy,
+              requestedBy: queueRequestedBy,
               title: track.title,
               artist: track.artist
             })
@@ -4499,22 +4583,10 @@ apiRouter.post(
     const id = toInt(req.body?.id);
     if (id == null) return res.status(400).send('id required');
 
-    await query('BEGIN');
-    try {
-      const cur = await query(`SELECT position FROM queue WHERE id=$1 FOR UPDATE`, [id]);
-      if (!cur.rows.length) throw new Error('not found');
-      const pos = (cur.rows[0] as any).position as number;
-
-      await query(`DELETE FROM queue WHERE id=$1`, [id]);
-      await query(`UPDATE queue SET position = position - 1 WHERE position > $1`, [pos]);
-
-      await query('COMMIT');
-      res.json({ ok: true });
-      postQueueUpdate('queue.updated');
-    } catch (e) {
-      await query('ROLLBACK');
-      throw e;
-    }
+    if (!await deleteLiveQueueSong(id)) return res.status(404).json({ error: 'Queue item not found' });
+    songState.delete(id);
+    res.json({ ok: true });
+    postQueueUpdate('queue.updated');
   })
 );
 
@@ -4522,19 +4594,9 @@ apiRouter.post(
   '/queue/clear',
   adminGuard,
   ah(async (_req, res) => {
-    await query('BEGIN');
-    try {
-      // Reset stats for all singers who have queue entries before clearing
-      await query(`
-        UPDATE singers SET total_songs_sung = 0, last_sang_at = NULL
-        WHERE id IN (SELECT DISTINCT singer_id FROM queue WHERE singer_id IS NOT NULL)
-      `);
-      await query(`DELETE FROM queue`);
-      await query('COMMIT');
-    } catch (e) {
-      await query('ROLLBACK');
-      throw e;
-    }
+    await clearLiveQueue();
+    songState.clear();
+    lastPlayerTiming = null;
     res.json({ ok: true });
     postQueueUpdate('queue.updated');
   })
@@ -4569,11 +4631,9 @@ apiRouter.post(
   '/player/play',
   adminGuard,
   ah(async (req, res) => {
-    const id = toInt(req.body?.id ?? null);
-    
-    // Clear manual stop so autoplay can resume after this play action
-    manualStopActive = false;
-    await setSetting('player.manual_stop', 'false');
+    const id = req.body?.id == null ? null : normalizeQueueId(req.body.id);
+    if (req.body?.id != null && id == null) return res.status(400).json({ error: 'Invalid queue item id' });
+    if (id == null) await resortQueueByRotation();
 
     // First, determine which track will be played and ensure duration_ms is populated
     let trackToPlay: any = null;
@@ -4597,8 +4657,8 @@ apiRouter.post(
         FROM queue q
         JOIN tracks t ON t.id = q.track_id
         LEFT JOIN artists a ON a.id = t.artist_id
-        WHERE q.status = 'queued'
-        ORDER BY q.position
+        WHERE q.status IN ('queued', 'playing')
+        ORDER BY (q.status = 'playing') DESC, q.position
         LIMIT 1
       `);
       if (result.rows.length > 0) {
@@ -4606,6 +4666,8 @@ apiRouter.post(
       }
     }
     
+    if (id != null && !trackToPlay) return res.status(404).json({ error: 'Queue item not found' });
+
     // If we have a track to play with pitch adjustment or missing duration, ensure duration is cached
     if (trackToPlay) {
       const hasPitchAdjustment = trackToPlay.key_adjustment && trackToPlay.key_adjustment !== 0;
@@ -4632,36 +4694,19 @@ apiRouter.post(
       }
     }
     
-    let songStarted = false;
-    let startedQueueId: number | null = null;
+    manualStopActive = false;
+    await setSetting('player.manual_stop', 'false');
+    const startedQueueId = await startLiveQueueSong(id ?? undefined, true);
+    if (startedQueueId == null) return res.status(409).json({ error: 'No automatically eligible song; select a song to play' });
+    const songStarted = startedQueueId != null;
     if (trackToPlay) {
       const singerLabel = trackToPlay.requested_by ? ` (requested by ${trackToPlay.requested_by})` : '';
       const artistLabel = trackToPlay.artist ? ` by ${trackToPlay.artist}` : '';
       logger.info(`Now playing: "${trackToPlay.title}"${artistLabel}${singerLabel}`);
     }
-    await query('BEGIN');
-    try {
-      // Only reset the currently playing song back to queued; leave done/removed/skipped rows untouched
-      await query(`UPDATE queue SET status = 'queued', started_at = NULL WHERE status = 'playing'`);
-      if (id != null) {
-        const updateResult = await query<{ id: number }>(`UPDATE queue SET status = 'playing', started_at = NOW() WHERE id = $1 RETURNING id`, [id]);
-        songStarted = updateResult.rows.length > 0;
-        startedQueueId = updateResult.rows[0]?.id ?? null;
-      } else {
-        // play top
-        const updateResult = await query<{ id: number }>(`
-          UPDATE queue SET status = 'playing', started_at = NOW()
-           WHERE id = (SELECT id FROM queue WHERE status = 'queued' ORDER BY position LIMIT 1)
-           RETURNING id
-        `);
-        songStarted = updateResult.rows.length > 0;
-        startedQueueId = updateResult.rows[0]?.id ?? null;
-      }
-      await query('COMMIT');
-    } catch (e) {
-      await query('ROLLBACK'); throw e;
-    }
     if (startedQueueId != null) {
+      songState.delete(startedQueueId);
+      lastPlayerTiming = null;
       await ensureQueueTrackDurationBeforePlayback(startedQueueId);
     }
     postQueueUpdate('player.play');
@@ -4673,51 +4718,37 @@ apiRouter.post(
 );
 
 apiRouter.post(
+  '/player/pause',
+  adminGuard,
+  ah(async (req, res) => {
+    const queueId = normalizeQueueId(req.body?.queueId);
+    const paused = req.body?.paused;
+    const positionSec = req.body?.positionSec;
+    if (queueId == null || typeof paused !== 'boolean'
+        || (positionSec !== undefined && (typeof positionSec !== 'number' || !Number.isFinite(positionSec) || positionSec < 0))) {
+      return res.status(400).json({ error: 'queueId and paused (boolean) are required; positionSec must be non-negative' });
+    }
+    const position = lastPlayerTiming?.queueId === queueId ? lastPlayerTiming.positionSec : positionSec;
+    const state = await setPlayerPlaybackPaused(queueId, paused, position);
+    postQueueUpdate(paused ? 'player.pause' : 'player.resume', state);
+    res.json({ ok: true, ...state });
+  })
+);
+
+apiRouter.post(
   '/player/next',
   adminGuard,
   ah(async (_req, res) => {
-    // Re-sort the remaining queued items now that a song is about to complete.
-    // The currently-playing song is counted in doneCounts (status = 'playing')
-    // so the rotation correctly treats it as used up before picking the next song.
-    await resortQueueByRotation();
-
-    // Capture the currently-playing row so we can update singer stats after completion.
-    const playingRow = await query<{ id: number; singer_id: string | null }>(
-      `SELECT id, singer_id FROM queue WHERE status = 'playing' LIMIT 1`
-    );
-
-    // Atomically mark current song done and start the next one.
-    await query('BEGIN');
-    try {
-      await query(`UPDATE queue SET status = 'done', finished_at = NOW() WHERE status = 'playing'`);
-      await query(`
-        UPDATE queue SET status = 'playing', started_at = NOW()
-         WHERE id IN (
-           SELECT id FROM queue
-           WHERE status = 'queued'
-           ORDER BY position
-           LIMIT 1
-         )
-      `);
-      await query('COMMIT');
-    } catch (e) {
-      await query('ROLLBACK'); throw e;
-    }
-
-    // Update singer stats for the completed song using authoritative COUNT to avoid double-counting
-    if (playingRow.rows.length > 0 && playingRow.rows[0].singer_id) {
-      const singerId = playingRow.rows[0].singer_id;
-      try {
-        await recalculateSingerStats(singerId);
-      } catch (err) {
-        console.error('Failed to update singer stats after completion:', err);
-      }
-    }
+    manualStopActive = false;
+    await setSetting('player.manual_stop', 'false');
+    const startedQueueId = await advanceLiveQueue();
+    lastPlayerTiming = null;
 
     // Resume break music only when there is no next karaoke song to play
-    const stillPlaying = await query<{ id: number }>(`SELECT id FROM queue WHERE status = 'playing' LIMIT 1`);
-    if (stillPlaying.rows.length) {
-      await ensureQueueTrackDurationBeforePlayback(stillPlaying.rows[0].id);
+    if (startedQueueId != null) {
+      songState.delete(startedQueueId);
+      await ensureQueueTrackDurationBeforePlayback(startedQueueId);
+      await autoPauseBreakMusicForKaraoke();
     } else {
       await autoResumeBreakMusicForKaraoke();
     }
@@ -4732,7 +4763,8 @@ apiRouter.post(
   ah(async (_req, res) => {
     manualStopActive = true;
     await setSetting('player.manual_stop', 'true');
-    await query(`UPDATE queue SET status = 'queued' WHERE status = 'playing'`);
+    await stopLiveQueue();
+    lastPlayerTiming = null;
     postQueueUpdate('player.stop');
     await autoResumeBreakMusicForKaraoke();
     res.json({ ok: true });
@@ -4838,7 +4870,7 @@ apiRouter.post(
 apiRouter.get(
   '/player/state',
   ah(async (_req, res) => {
-    res.json({ manualStop: manualStopActive });
+    res.json(await getPlayerPlaybackState());
   })
 );
 
@@ -5159,6 +5191,7 @@ const songState = new Map<number | string, {
   hasFinished: boolean;
   autoplayScheduled: boolean;
 }>();
+let lastPlayerTiming: { queueId: number; positionSec: number } | null = null;
 
 // Track initial autoplay state to prevent duplicate triggers
 let initialAutoplayScheduled = false;
@@ -5190,17 +5223,8 @@ async function checkInitialAutoplayConditions(): Promise<{
   hasQueuedSongs: boolean;
 }> {
   const autoplayEnabled = await getSetting('autoplay.enabled');
-  const isEnabled = autoplayEnabled === 'true';
-  
-  const currentlyPlaying = await query<{ id: number }>(`
-    SELECT id FROM queue WHERE status = 'playing' LIMIT 1
-  `);
-  const hasPlayingSong = currentlyPlaying.rows.length > 0;
-  
-  const queuedSongs = await query<{ id: number }>(`
-    SELECT id FROM queue WHERE status = 'queued' ORDER BY position LIMIT 1
-  `);
-  const hasQueuedSongs = queuedSongs.rows.length > 0;
+  const { allowed, hasPlayingSong, hasQueuedSongs } = await getLiveQueueAutoplayState();
+  const isEnabled = autoplayEnabled === 'true' && allowed;
   
   return {
     shouldAutoplay: isEnabled && !hasPlayingSong && hasQueuedSongs,
@@ -5309,38 +5333,14 @@ setInterval(async () => {
             return;
           }
           
-          // Start playing the first queued song with proper transaction handling
-          try {
-            await query('BEGIN');
-            const result = await query<{ id: number; title: string | null; artist: string | null }>(`
-              WITH next_song AS (
-                SELECT id FROM queue
-                WHERE status = 'queued'
-                ORDER BY position
-                LIMIT 1
-              ), updated AS (
-                UPDATE queue SET status = 'playing'
-                WHERE id = (SELECT id FROM next_song)
-                RETURNING id, track_id
-              )
-              SELECT u.id, t.title, a.name AS artist
-                FROM updated u
-                JOIN tracks t ON t.id = u.track_id
-                LEFT JOIN artists a ON a.id = t.artist_id
-            `);
-            await query('COMMIT');
-            
-            if (result.rows.length > 0) {
-              const { id, title, artist } = result.rows[0];
-              const songLabel = [artist, title].filter(Boolean).join(' - ') || `ID: ${id}`;
-              await ensureQueueTrackDurationBeforePlayback(id);
-              logger.info(`Initial autoplay: Started first song — ${songLabel}`);
-              postQueueUpdate('player.play');
-              await autoPauseBreakMusicForKaraoke();
-            }
-          } catch (dbErr) {
-            await query('ROLLBACK');
-            throw dbErr;
+          const id = await startLiveQueueSong();
+          if (id != null) {
+            songState.delete(id);
+            lastPlayerTiming = null;
+            await ensureQueueTrackDurationBeforePlayback(id);
+            logger.info(`Initial autoplay: Started song ${id}`);
+            postQueueUpdate('player.play');
+            await autoPauseBreakMusicForKaraoke();
           }
           
           initialAutoplayScheduled = false;
@@ -5357,17 +5357,18 @@ setInterval(async () => {
 }, INITIAL_AUTOPLAY_CHECK_INTERVAL_MS);
 
 // Helper function to normalize queue ID to a number
-function normalizeQueueId(queueId: number | string): number | null {
+function normalizeQueueId(queueId: unknown): number | null {
   if (typeof queueId === 'number') {
-    return queueId;
+    return Number.isSafeInteger(queueId) && queueId > 0 ? queueId : null;
   }
+  if (typeof queueId !== 'string') return null;
   
   // Use stricter validation for string inputs
   const parsed = parseInt(queueId, 10);
   
   // Ensure the parsed value is valid and the string representation matches
   // This prevents cases like '123abc' being parsed as 123
-  if (isNaN(parsed) || String(parsed) !== String(queueId).trim()) {
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || String(parsed) !== queueId.trim()) {
     return null;
   }
   
@@ -5375,51 +5376,14 @@ function normalizeQueueId(queueId: number | string): number | null {
 }
 
 // Mark a finished song as 'done' and keep it in the queue for history.
-// Returns true if the song was found (whether it needed updating or was already
-// done), false if the song does not exist in the queue at all.
+// Ignore stale timing reports after stop, skip, or a previous completion.
 async function markSongDone(queueId: number | string): Promise<boolean> {
-  try {
-    const id = normalizeQueueId(queueId);
-    if (id === null) {
-      console.warn(`Invalid queueId for completion: ${queueId}`);
-      return false;
-    }
-
-    const checkResult = await query<{ id: number; singer_id: string | null; status: string }>(`
-      SELECT id, singer_id, status FROM queue WHERE id = $1
-    `, [id]);
-
-    if (checkResult.rows.length === 0) {
-      logger.verbose(`Song ${id} not found in queue`);
-      return false;
-    }
-
-    const row = checkResult.rows[0];
-    if (row.status === 'done') {
-      // Already marked done (e.g. manual /player/next was called first)
-      logger.verbose(`Song ${id} already marked done`);
-      return true;
-    }
-
-    // Mark song done and record completion time
-    await query(
-      `UPDATE queue SET status = 'done', finished_at = NOW() WHERE id = $1`,
-      [id],
-    );
-    logger.verbose(`Marked finished song ${id} as done`);
-
-    // Recalculate singer stats from actual done-count
-    if (row.singer_id) {
-      await recalculateSingerStats(row.singer_id).catch((err) =>
-        console.error(`Failed to recalculate singer stats after completion for singer ${row.singer_id}:`, err),
-      );
-    }
-
-    return true;
-  } catch (err) {
-    console.error('Error marking finished song as done:', queueId, err);
-    throw err;
+  const id = normalizeQueueId(queueId);
+  if (id === null) {
+    console.warn(`Invalid queueId for completion: ${queueId}`);
+    return false;
   }
+  return setLiveQueueStatus(id, 'done', true);
 }
 
 // Report playback timing from Player
@@ -5439,6 +5403,12 @@ apiRouter.post(
       return res.status(400).json({ error: 'Invalid timing values: must be finite, non-negative, and duration must be positive' });
     }
     
+    const reportId = normalizeQueueId(queueId);
+    if (reportId == null) return res.status(400).json({ error: 'A valid queueId is required' });
+    const playback = await getPlayerPlaybackState();
+    if (playback.queueId !== reportId || playback.paused) return res.json({ ok: true, ignored: true });
+    lastPlayerTiming = { queueId: reportId, positionSec: currentTime };
+
     // Broadcast timing update to all connected clients via WebSocket
     postQueueUpdate('player.timing', {
       currentTime,
@@ -5469,9 +5439,9 @@ apiRouter.post(
         state.autoplayScheduled = true;
         songState.set(normalizedQueueId, state);
         
-        // Check if autoplay is enabled (default: enabled when setting is not explicitly set)
+        // Keep the same opt-in default as initial autoplay and Player settings.
         const autoplayEnabled = await getSetting('autoplay.enabled');
-        const isEnabled = autoplayEnabled !== 'false';
+        const isEnabled = autoplayEnabled === 'true' && (await getLiveQueueAutoplayState()).allowed;
         
         if (isEnabled) {
           const delayStr = await getSetting('autoplay.delay');
@@ -5513,8 +5483,6 @@ apiRouter.post(
             // Wait for the appropriate delay, then advance to next song or resume break music
             setTimeout(async () => {
               try {
-                await query('BEGIN');
-                
                 // Check if there's already a song playing (could happen if user manually advanced)
                 const currentlyPlaying = await query<{ id: number }>(`
                   SELECT id FROM queue WHERE status = 'playing' LIMIT 1
@@ -5522,7 +5490,6 @@ apiRouter.post(
                 
                 if (currentlyPlaying.rows.length > 0) {
                   // Another song is already playing, don't start a new one
-                  await query('COMMIT');
                   songState.delete(normalizedQueueId);
                   logger.verbose(`Autoplay: Another song is already playing (ID: ${currentlyPlaying.rows[0].id}), skipping autoplay`);
                   return;
@@ -5530,56 +5497,39 @@ apiRouter.post(
                 
                 // Check if manual stop is active — host pressed stop during the autoplay delay
                 if (manualStopActive) {
-                  await query('COMMIT');
                   songState.delete(normalizedQueueId);
                   logger.verbose(`Autoplay: Manual stop is active, skipping autoplay for song ${normalizedQueueId}`);
                   return;
                 }
                 
                 // Play the next queued song
-                const result = await query<{ id: number; title: string | null; artist: string | null }>(`
-                  WITH next_song AS (
-                    SELECT id FROM queue
-                    WHERE status = 'queued'
-                    ORDER BY position
-                    LIMIT 1
-                  ), updated AS (
-                    UPDATE queue SET status = 'playing'
-                    WHERE id = (SELECT id FROM next_song)
-                    RETURNING id, track_id
-                  )
-                  SELECT u.id, t.title, a.name AS artist
-                    FROM updated u
-                    JOIN tracks t ON t.id = u.track_id
-                    LEFT JOIN artists a ON a.id = t.artist_id
-                `);
-                
-                await query('COMMIT');
+                const id = await startLiveQueueSong();
                 
                 // Clean up state for the finished song
                 songState.delete(normalizedQueueId);
                 
-                if (result.rows.length > 0) {
-                  const { id, title, artist } = result.rows[0];
-                  const songLabel = [artist, title].filter(Boolean).join(' - ') || `ID: ${id}`;
+                if (id != null) {
+                  songState.delete(id);
+                  lastPlayerTiming = null;
                   await ensureQueueTrackDurationBeforePlayback(id);
-                  logger.info(`Autoplay: Started next song — ${songLabel}`);
+                  logger.info(`Autoplay: Started next song ${id}`);
                   // Pause break music now that the next karaoke song is starting
                   await autoPauseBreakMusicForKaraoke();
                   postQueueUpdate('player.next');
                 } else {
-                  logger.info('Autoplay: No more songs in queue');
+                  if ((await query(`SELECT id FROM queue WHERE status = 'playing' LIMIT 1`)).rows.length) return;
+                  logger.info('Autoplay: No eligible automatic turn');
                   postQueueUpdate('queue.updated');
                   await autoResumeBreakMusicForKaraoke();
                 }
               } catch (err) {
-                await query('ROLLBACK');
                 console.error('Autoplay error:', err);
                 songState.delete(normalizedQueueId);
               }
             }, timerDelay * 1000);
           } catch (err) {
-            logger.error('Error marking finished song as done for autoplay:', err);
+            songState.delete(normalizedQueueId);
+            throw err;
           }
         } else {
           logger.verbose(`Song ${normalizedQueueId} finished but autoplay is disabled`);
@@ -5592,11 +5542,8 @@ apiRouter.post(
               await autoResumeBreakMusicForKaraoke();
             }
           } catch (err) {
-            console.error('Error in autoplay-disabled song completion:', err);
-            // If marking fails, still clean up state and notify clients
-            // The song may have been manually removed already
             songState.delete(normalizedQueueId);
-            postQueueUpdate('queue.updated');
+            throw err;
           }
         }
       }
@@ -5625,6 +5572,7 @@ apiRouter.get(
     const keepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
     const showRequestsUrl = await getSetting('overlay.showRequestsUrl');
     const showBreakMusicTrack = await getSetting('overlay.showBreakMusicTrack');
+    const showProfilePictures = await getSetting('overlay.showProfilePictures');
     res.json({
       visible: visible === null ? true : visible === 'true',
       height: height === null ? 90 : parseInt(height, 10),
@@ -5637,6 +5585,7 @@ apiRouter.get(
         keepRotationScrollerSingers === null ? false : keepRotationScrollerSingers === 'true',
       showRequestsUrl: showRequestsUrl === null ? true : showRequestsUrl === 'true',
       showBreakMusicTrack: showBreakMusicTrack === null ? false : showBreakMusicTrack === 'true',
+      showProfilePictures: showProfilePictures === null ? true : showProfilePictures === 'true',
     });
   })
 );
@@ -5657,6 +5606,7 @@ apiRouter.post(
       keepRotationScrollerSingers,
       showRequestsUrl,
       showBreakMusicTrack,
+      showProfilePictures,
     } = req.body;
     
     if (typeof visible === 'boolean') {
@@ -5691,6 +5641,9 @@ apiRouter.post(
     if (typeof showBreakMusicTrack === 'boolean') {
       await setSetting('overlay.showBreakMusicTrack', String(showBreakMusicTrack));
     }
+    if (typeof showProfilePictures === 'boolean') {
+      await setSetting('overlay.showProfilePictures', String(showProfilePictures));
+    }
     
     // Broadcast settings update to all clients
     const currentVisible = await getSetting('overlay.visible');
@@ -5703,6 +5656,7 @@ apiRouter.post(
     const currentKeepRotationScrollerSingers = await getSetting('overlay.keepRotationScrollerSingers');
     const currentShowRequestsUrl = await getSetting('overlay.showRequestsUrl');
     const currentShowBreakMusicTrack = await getSetting('overlay.showBreakMusicTrack');
+    const currentShowProfilePictures = await getSetting('overlay.showProfilePictures');
     
     postQueueUpdate('overlay.settings', {
       visible: currentVisible === null ? true : currentVisible === 'true',
@@ -5716,6 +5670,7 @@ apiRouter.post(
         currentKeepRotationScrollerSingers === null ? false : currentKeepRotationScrollerSingers === 'true',
       showRequestsUrl: currentShowRequestsUrl === null ? true : currentShowRequestsUrl === 'true',
       showBreakMusicTrack: currentShowBreakMusicTrack === null ? false : currentShowBreakMusicTrack === 'true',
+      showProfilePictures: currentShowProfilePictures === null ? true : currentShowProfilePictures === 'true',
     });
     
     res.json({ ok: true });
@@ -5735,13 +5690,29 @@ apiRouter.get(
     }
 
     const result = await query<{
+      id: string;
       display_name: string;
       position: number;
       has_queue: boolean;
+      profile_image_source: string | null;
+      profile_image_url: string | null;
+      profile_image_mime: string | null;
+      profile_image_focus_x: number | null;
+      profile_image_focus_y: number | null;
+      profile_image_crop: SingerProfileCrop | null;
+      profile_image_updated_at: Date | null;
     }>(
       `SELECT
+         s.id,
          s.display_name,
          rs.position,
+         s.profile_image_source,
+         s.profile_image_url,
+         s.profile_image_mime,
+         s.profile_image_focus_x,
+         s.profile_image_focus_y,
+         s.profile_image_crop,
+         s.profile_image_updated_at,
          EXISTS (
            SELECT 1
              FROM queue q
@@ -5758,6 +5729,7 @@ apiRouter.get(
          JOIN singers s ON s.id = rs.singer_id
         WHERE rs.rotation_id = $1
           AND rs.status = 'active'
+          AND s.status = 'active'
         ORDER BY rs.position`,
       [activeRotation.rows[0].id]
     );
@@ -5767,6 +5739,7 @@ apiRouter.get(
         displayName: row.display_name,
         position: row.position,
         hasQueuedSong: row.has_queue,
+        profile: singerProfileFromRow(row),
       }))
     );
   })
@@ -5782,6 +5755,7 @@ apiRouter.get(
     const delay = await getSetting('autoplay.delay');
     res.json({
       enabled: enabled === null ? false : enabled === 'true',
+      rotationAllowsAutoplay: (await getLiveQueueAutoplayState()).allowed,
       delay: delay === null ? 5 : parseInt(delay, 10)
     });
   })
@@ -5807,6 +5781,7 @@ apiRouter.post(
     
     postQueueUpdate('autoplay.settings', {
       enabled: currentEnabled === null ? false : currentEnabled === 'true',
+      rotationAllowsAutoplay: (await getLiveQueueAutoplayState()).allowed,
       delay: currentDelay === null ? 5 : parseInt(currentDelay, 10)
     });
     
@@ -6067,6 +6042,14 @@ apiRouter.put(
       key === 'requests.acceptance' ||
       key === 'requests.local_browse_enabled'
     ) {
+      if (
+        key === 'remote_gateway.url' ||
+        key === 'remote_gateway.enabled' ||
+        key === 'remote_gateway.api_token'
+      ) {
+        remoteGatewayLastProfileSync = null;
+        remoteGatewayLastProfileSingerUuid = null;
+      }
       await syncRemoteGatewayTaskState({ runImmediately: true });
     }
 
@@ -6195,6 +6178,7 @@ apiRouter.get(
 apiRouter.get(
   '/break-music/state',
   ah(async (_req, res) => {
+    const karaokePolicy = await syncBreakMusicForKaraoke();
     const crossfadeSeconds = Number(await getSetting('break_music.crossfade_seconds') ?? 3);
     const volumePercent = Number(await getSetting('break_music.volume_percent') ?? 100);
     const resumeDelayRaw = await getSetting('break_music.resume_delay');
@@ -6216,6 +6200,7 @@ apiRouter.get(
     const remainingSec = durationSec != null ? Math.max(0, durationSec - elapsed) : null;
 
     res.json({
+      ...karaokePolicy,
       paused: resolved.state.paused,
       crossfadeSeconds: Number.isFinite(crossfadeSeconds) ? crossfadeSeconds : 3,
       volumePercent: Number.isFinite(volumePercent) ? Math.max(0, Math.min(100, Math.round(volumePercent))) : 100,
@@ -6238,8 +6223,12 @@ apiRouter.post(
     const hasCrossfadeSeconds = req.body?.crossfadeSeconds !== undefined;
     const hasVolumePercent = req.body?.volumePercent !== undefined;
     const hasResumeDelaySec = req.body?.resumeDelaySec !== undefined;
-    if (!hasCrossfadeSeconds && !hasVolumePercent && !hasResumeDelaySec) {
-      return res.status(400).json({ error: 'At least one of crossfadeSeconds, volumePercent, or resumeDelaySec is required' });
+    const hasPauseDuringKaraoke = req.body?.pauseDuringKaraoke !== undefined;
+    if (!hasCrossfadeSeconds && !hasVolumePercent && !hasResumeDelaySec && !hasPauseDuringKaraoke) {
+      return res.status(400).json({ error: 'At least one break-music setting is required' });
+    }
+    if (hasPauseDuringKaraoke && typeof req.body.pauseDuringKaraoke !== 'boolean') {
+      return res.status(400).json({ error: 'pauseDuringKaraoke must be a boolean' });
     }
 
     if (hasCrossfadeSeconds) {
@@ -6264,6 +6253,10 @@ apiRouter.post(
         return res.status(400).json({ error: 'resumeDelaySec must be between 0 and 30' });
       }
       await setSetting('break_music.resume_delay', Math.round(resumeDelaySec));
+    }
+    if (hasPauseDuringKaraoke) {
+      await setSetting('break_music.pause_during_karaoke', req.body.pauseDuringKaraoke);
+      await syncBreakMusicForKaraoke();
     }
 
     postQueueUpdate('break_music.updated');
@@ -6312,6 +6305,7 @@ apiRouter.post(
       return res.status(400).json({ error: 'Invalid action' });
     }
 
+    await syncBreakMusicForKaraoke();
     const resolved = await resolveBreakMusicPlaybackState(0);
     postQueueUpdate('break_music.updated');
     res.json({ ok: true, currentTrack: resolved.track });
@@ -6491,5 +6485,6 @@ apiRouter.post(
 // JSON error handler
 apiRouter.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('API error:', err);
-  res.status(500).json({ error: String(err?.message || err) });
+  const status = Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500;
+  res.status(status).json({ error: String(err?.message || err) });
 });

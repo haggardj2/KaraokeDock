@@ -120,6 +120,20 @@ function migrate(db: GatewayDb) {
 
     CREATE INDEX IF NOT EXISTS idx_history_items_requester ON history_items(LOWER(requested_by), singer_uuid);
 
+    CREATE TABLE IF NOT EXISTS singer_profiles (
+      singer_uuid TEXT PRIMARY KEY,
+      requested_by TEXT NOT NULL,
+      image_mime TEXT,
+      image_data BLOB,
+      image_url TEXT,
+      crop TEXT,
+      focus_x REAL NOT NULL DEFAULT 50,
+      focus_y REAL NOT NULL DEFAULT 50,
+      updated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_singer_profiles_name ON singer_profiles(LOWER(requested_by));
+
     CREATE TABLE IF NOT EXISTS gateway_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -132,6 +146,12 @@ function migrate(db: GatewayDb) {
   }
   if (!trackColumns.some((column) => column.name === 'last_sync_id')) {
     db.exec('ALTER TABLE tracks ADD COLUMN last_sync_id TEXT');
+  }
+  const profileColumns = db.prepare('PRAGMA table_info(singer_profiles)').all() as { name: string }[];
+  for (const column of ['image_url', 'crop']) {
+    if (!profileColumns.some((existing) => existing.name === column)) {
+      db.exec(`ALTER TABLE singer_profiles ADD COLUMN ${column} TEXT`);
+    }
   }
 }
 

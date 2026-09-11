@@ -11,8 +11,12 @@ import {
   eligibleSingers,
   isRoundComplete,
   selectSong,
+  selectNextByPolicy,
 } from './policies.js';
-import { DEFAULT_ROTATION_CONFIG, type SingerSnapshot, type PolicyContext, type RotationConfig } from './types.js';
+import {
+  DEFAULT_ROTATION_CONFIG, normalizeRotationConfig, effectiveRotationType,
+  type SingerSnapshot, type PolicyContext, type RotationConfig,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -99,11 +103,11 @@ describe('strict_round_robin', () => {
     const r3 = strictRoundRobin(singers, ctx);
     expect(r3?.singerId).toEqual(BigInt(3));
 
-    // All have sung — fallback to any active singer (round will advance)
+    // The caller advances the round before selecting again.
     singers[2].lastRoundSang = 1;
     const r4 = strictRoundRobin(singers, ctx);
-    // Falls back to the first active singer (position order)
-    expect(r4?.singerId).toEqual(BigInt(1));
+    expect(r4).toBeNull();
+    expect(strictRoundRobin(singers, { ...ctx, currentRound: 2 })?.singerId).toBe(1n);
   });
 
   it('returns null when there are no eligible singers', () => {
@@ -138,13 +142,9 @@ describe('strict_round_robin', () => {
     const r1 = strictRoundRobin(singers, ctx);
     expect(r1?.singerId).toEqual(BigInt(1));
 
-    // After singer 1 has sung this round, neither singer is eligible in the
-    // current-round pool (singer 1 already sang, singer 2 joins next round).
-    // The fallback includes all active+pending singers; singer 1 has position 0
-    // so it is selected again (the caller will advance the round counter).
     singers[0].lastRoundSang = 1;
     const r2 = strictRoundRobin(singers, ctx);
-    expect(r2?.singerId).toEqual(BigInt(1));
+    expect(r2).toBeNull();
   });
 });
 
@@ -297,14 +297,8 @@ describe('songQueueOnly', () => {
 // ---------------------------------------------------------------------------
 
 describe('manual mode', () => {
-  it('no policy function auto-selects in manual mode (all return null for empty lists)', () => {
-    // The actual "manual" gate is in getNextTurn (DB layer), not in policy functions.
-    // We verify that an empty singer list always returns null across all policies.
-    const ctx = makeCtx();
-    expect(strictRoundRobin([], ctx)).toBeNull();
-    expect(leastRecentlySung([], ctx)).toBeNull();
-    expect(signupOrder([], ctx)).toBeNull();
-    expect(songQueueOnly([], ctx)).toBeNull();
+  it('does not automatically select an eligible singer', () => {
+    expect(selectNextByPolicy([makeSinger(1)], makeCtx({ config: makeConfig({ type: 'manual' }) }))).toBeNull();
   });
 });
 
@@ -320,7 +314,7 @@ describe('hybrid base policy', () => {
       makeSinger(2, { position: 1 }),
     ];
     const ctx = makeCtx({ config: makeConfig({ type: 'hybrid', basePolicy: 'strict_round_robin' }) });
-    const result = strictRoundRobin(singers, ctx); // simulate hybrid dispatching to base
+    const result = selectNextByPolicy(singers, ctx);
     expect(result?.singerId).toEqual(BigInt(1));
   });
 
@@ -330,7 +324,7 @@ describe('hybrid base policy', () => {
       makeSinger(2, { lastSangAt: null }),
     ];
     const ctx = makeCtx({ config: makeConfig({ type: 'hybrid', basePolicy: 'least_recently_sung' }) });
-    const result = leastRecentlySung(singers, ctx);
+    const result = selectNextByPolicy(singers, ctx);
     expect(result?.singerId).toEqual(BigInt(2));
   });
 });
@@ -450,7 +444,7 @@ describe('completed songs are not selected', () => {
     // pendingSongs only contains songs with status=pending, so if completed songs
     // are removed from the list the policy can never pick them.
     const singer = makeSinger(1, { songs: [] });
-    const result = selectSong(singer, makeConfig());
+    const result = selectSong(singer, makeConfig({ songSelectionPolicy: 'highest_priority_first' }));
     expect(result).toBeNull();
   });
 
@@ -508,7 +502,7 @@ describe('round increment detection', () => {
 // ---------------------------------------------------------------------------
 
 describe('selectSong', () => {
-  it('oldest_request_first picks by priority DESC then requestedAt ASC', () => {
+  it('oldest_request_first is chronological regardless of priority', () => {
     const early = new Date(Date.now() - 5000);
     const late = new Date(Date.now() - 1000);
     const singer = makeSinger(1, {
@@ -519,8 +513,7 @@ describe('selectSong', () => {
       ],
     });
     const result = selectSong(singer, makeConfig({ songSelectionPolicy: 'oldest_request_first' }));
-    // priority 5 first
-    expect(result?.id).toEqual(BigInt(3));
+    expect(result?.id).toEqual(BigInt(2));
   });
 
   it('highest_priority_first also sorts by priority DESC then requestedAt ASC', () => {
@@ -547,6 +540,83 @@ describe('banned/inactive singers excluded', () => {
     ];
     const pool = eligibleSingers(singers, makeConfig(), null);
     expect(pool.map((s) => s.singerId)).not.toContain(BigInt(1));
+  });
+
+  describe('configuration validation and full policy dispatch', () => {
+    it.each([
+      ['type', 'random'],
+      ['type', null],
+      ['basePolicy', 'hybrid'],
+      ['basePolicy', 'unknown'],
+      ['newSingerPlacement', 'front'],
+      ['duetPolicy', 'none'],
+      ['skipPolicy', 'cancel'],
+      ['priorityPolicy', 'random'],
+      ['songSelectionPolicy', 'unknown'],
+      ['emptySingerPolicy', 'delete'],
+      ['allowSingerMultipleSongsInQueue', 'false'],
+      ['preventSameSingerBackToBack', 1],
+      ['maxPendingSongsPerSinger', 0],
+      ['maxPendingSongsPerSinger', -1],
+      ['maxPendingSongsPerSinger', 1.5],
+      ['maxPendingSongsPerSinger', '5'],
+      ['maxPendingSongsPerSinger', null],
+      ['maxPendingSongsPerSinger', NaN],
+      ['maxPendingSongsPerSinger', Infinity],
+      ['maxPendingSongsPerSinger', 2147483648],
+    ])('rejects invalid %s = %s rather than silently selecting another policy', (key, value) => {
+      expect(() => normalizeRotationConfig({ [key]: value })).toThrow();
+    });
+
+    it('merges defaults without ignoring valid false values', () => {
+      expect(normalizeRotationConfig({ preventSameSingerBackToBack: false })).toEqual({
+        ...DEFAULT_ROTATION_CONFIG, preventSameSingerBackToBack: false,
+      });
+      expect(effectiveRotationType(normalizeRotationConfig({ type: 'hybrid', basePolicy: 'song_queue_only' }))).toBe('song_queue_only');
+      expect(effectiveRotationType(normalizeRotationConfig({ type: 'manual' }))).toBe('manual');
+    });
+
+    it.each(['strict_round_robin', 'least_recently_sung', 'signup_order', 'song_queue_only', 'manual', 'hybrid'] as const)(
+      'dispatches %s with eligible and ineligible singers', (type) => {
+        const singers = [
+          makeSinger(1, { singerStatus: 'banned' }),
+          makeSinger(2, { rotationStatus: 'absent' }),
+          makeSinger(3),
+        ];
+        expect(selectNextByPolicy(singers, makeCtx({ config: makeConfig({ type }) }))?.singerId ?? null)
+          .toBe(type === 'manual' ? null : 3n);
+      });
+
+    it('never selects a future singer even when every current-round singer is empty', () => {
+      expect(strictRoundRobin([
+        makeSinger(1, { songs: [] }), makeSinger(2, { currentRoundJoined: 4 }),
+      ], makeCtx())).toBeNull();
+      expect(isRoundComplete([makeSinger(1, { songs: [] }), makeSinger(2, { currentRoundJoined: 4 })], 1)).toBe(true);
+    });
+
+    it('does not let an empty singer prevent round completion', () => {
+      expect(isRoundComplete([makeSinger(1, { lastRoundSang: 1 }), makeSinger(2, { songs: [] })], 1)).toBe(true);
+    });
+
+    it('distinguishes oldest, highest priority, selected-next and manual song selection', () => {
+      const singer = makeSinger(1, { songs: [
+        makeSong(1, 1, { requestedAt: new Date(0) }),
+        makeSong(2, 1, { requestedAt: new Date(100), priority: 5 }),
+      ] });
+      expect(selectSong(singer, makeConfig())?.id).toBe(1n);
+      expect(selectSong(singer, makeConfig({ songSelectionPolicy: 'highest_priority_first' }))?.id).toBe(2n);
+      expect(selectSong(singer, makeConfig({ songSelectionPolicy: 'singer_selected_next' }))?.id).toBe(2n);
+      expect(selectSong(singer, makeConfig({ songSelectionPolicy: 'manual_host_selection' }))).toBeNull();
+    });
+
+    it('uses stable IDs to break equal song timestamps without mutating snapshots', () => {
+      const singer = makeSinger(1, { songs: [
+        makeSong(2, 1, { requestedAt: new Date(0) }),
+        makeSong(1, 1, { requestedAt: new Date(0) }),
+      ] });
+      expect(selectSong(singer, makeConfig())?.id).toBe(1n);
+      expect(singer.pendingSongs.map((song) => song.id)).toEqual([2n, 1n]);
+    });
   });
 
   it('inactive singer is not in eligible pool', () => {

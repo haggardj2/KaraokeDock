@@ -164,7 +164,8 @@ const globalLimiter = rateLimit({
 
 // Apply global rate limiter to all routes (after CORS)
 app.use(globalLimiter);
-app.use(express.json({ limit: '1mb' })); // Limit request body size to prevent DoS
+app.use('/api/history', express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '1mb' })); // Limit other request bodies to prevent DoS
 
 // Log IP addresses for all requests (except frequent/internal endpoints)
 app.use((req, _res, next) => {

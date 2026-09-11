@@ -3,7 +3,9 @@
 // and handle operations that span the flat queue and the rotation tables.
 
 import { query } from './db.js';
-import { recalculateSingerStats } from './singerStats.js';
+import { singerProfileFromRow, type SingerProfileResponse } from './singerProfile.js';
+import { setLiveQueueStatus, writeQueueOrder } from './rotation/liveQueue.js';
+import { withQueueTransaction } from './rotation/queueTransaction.js';
 
 // ---------------------------------------------------------------------------
 // Types returned by this module
@@ -38,6 +40,7 @@ export interface QueueSinger {
   completedSongs: QueueSong[];
   completedSongsCount: number;
   queuedSongsCount: number;
+  profile: SingerProfileResponse;
 }
 
 export interface ActiveRotationInfo {
@@ -63,6 +66,7 @@ export interface SingerHistory {
     status: string;
     totalSongsSung: number;
     lastSangAt: string | null;
+    profile: SingerProfileResponse;
   };
   queuedSongs: QueueSong[];
   completedSongs: QueueSong[];
@@ -157,7 +161,9 @@ export async function getQueueState(): Promise<QueueState> {
   // Collect all unique singer_ids referenced in the queue
   const singerIdSet = new Set<string>();
   for (const r of allRows) {
-    if (r.singer_id != null) singerIdSet.add(String(r.singer_id));
+    if (r.singer_id != null && (r.status === 'queued' || r.status === 'playing')) {
+      singerIdSet.add(String(r.singer_id));
+    }
   }
   // Also include singers present in the active rotation even if they have no queue entries
   if (rotRow) {
@@ -174,8 +180,10 @@ export async function getQueueState(): Promise<QueueState> {
   if (singerIds.length > 0) {
     const sRes = await query<any>(
       `SELECT s.id, s.public_uuid, s.display_name, s.normalized_name, s.status,
-              s.last_sang_at, s.total_songs_sung,
-              rs.position AS rotation_position
+              s.last_sang_at, s.total_songs_sung, s.profile_image_source,
+              s.profile_image_url, s.profile_image_mime, s.profile_image_focus_x,
+              s.profile_image_focus_y, s.profile_image_crop, s.profile_image_updated_at,
+              rs.position AS rotation_position, rs.status AS rotation_status
          FROM singers s
          LEFT JOIN rotation_singers rs ON rs.singer_id = s.id
                                       AND rs.rotation_id = $1
@@ -221,7 +229,7 @@ export async function getQueueState(): Promise<QueueState> {
       singerId: sid,
       publicUuid: sRow.public_uuid ?? null,
       displayName: sRow.display_name,
-      status: sRow.status,
+      status: sRow.status === 'active' ? sRow.rotation_status ?? sRow.status : sRow.status,
       rotationPosition: sRow.rotation_position != null ? Number(sRow.rotation_position) : null,
       lastSangAt: sRow.last_sang_at ? new Date(sRow.last_sang_at).toISOString() : null,
       totalSongsSung: Number(sRow.total_songs_sung ?? 0),
@@ -230,6 +238,7 @@ export async function getQueueState(): Promise<QueueState> {
       completedSongs: completed,
       completedSongsCount: completed.length,
       queuedSongsCount: queued.filter((s) => s.status === 'queued').length,
+      profile: singerProfileFromRow(sRow),
     });
   }
 
@@ -244,7 +253,9 @@ export async function getQueueState(): Promise<QueueState> {
 
 export async function getSingerHistory(singerId: bigint): Promise<SingerHistory | null> {
   const sRes = await query<any>(
-    `SELECT id, display_name, normalized_name, status, last_sang_at, total_songs_sung
+    `SELECT id, display_name, normalized_name, status, last_sang_at, total_songs_sung,
+            profile_image_source, profile_image_url, profile_image_mime,
+            profile_image_focus_x, profile_image_focus_y, profile_image_crop, profile_image_updated_at
        FROM singers
       WHERE id = $1`,
     [singerId],
@@ -278,6 +289,7 @@ export async function getSingerHistory(singerId: bigint): Promise<SingerHistory 
       status: sRow.status,
       totalSongsSung: Number(sRow.total_songs_sung ?? 0),
       lastSangAt: sRow.last_sang_at ? new Date(sRow.last_sang_at).toISOString() : null,
+      profile: singerProfileFromRow(sRow),
     },
     queuedSongs,
     completedSongs,
@@ -295,45 +307,10 @@ export async function getSingerHistory(singerId: bigint): Promise<SingerHistory 
  * Change a queue row's status from done/skipped/removed back to 'queued'.
  * Clears finished_at. Appends it at the end of the singer's queued songs.
  * Does NOT increment totalSongsSung (that only happens on completion).
- * Caller is responsible for re-sorting and broadcasting.
+ * Caller is responsible for broadcasting.
  */
 export async function restoreCompletedSongToQueue(queueId: number): Promise<boolean> {
-  // Load current row
-  const cur = await query<any>(
-    `SELECT id, status, singer_id, position FROM queue WHERE id = $1`,
-    [queueId],
-  );
-  if (cur.rows.length === 0) return false;
-  const row = cur.rows[0];
-
-  if (row.status === 'queued' || row.status === 'playing') {
-    // Already queued, nothing to do
-    return true;
-  }
-
-  // Place after the singer's last queued song, or at the end of the queue
-  const posRes = await query<{ max_pos: number | null }>(
-    row.singer_id
-      ? `SELECT MAX(position) AS max_pos FROM queue WHERE status = 'queued' AND singer_id = $1`
-      : `SELECT MAX(position) AS max_pos FROM queue WHERE status = 'queued'`,
-    row.singer_id ? [row.singer_id] : [],
-  );
-  let newPos = (posRes.rows[0].max_pos ?? -1) + 1;
-  // Make sure it's truly at the end overall
-  const globalMax = await query<{ max_pos: number | null }>(
-    `SELECT MAX(position) AS max_pos FROM queue WHERE status = 'queued'`,
-  );
-  newPos = Math.max(newPos, (globalMax.rows[0].max_pos ?? -1) + 1);
-
-  await query(
-    `UPDATE queue
-        SET status = 'queued',
-            finished_at = NULL,
-            position = $1
-      WHERE id = $2`,
-    [newPos, queueId],
-  );
-  return true;
+  return setLiveQueueStatus(queueId, 'queued');
 }
 
 // ---------------------------------------------------------------------------
@@ -351,49 +328,23 @@ export async function reorderSingerQueue(
   queueIds: number[],
 ): Promise<{ ok: boolean; error?: string }> {
   if (queueIds.length === 0) return { ok: true };
-
-  // Validate ownership and status
-  const owned = await query<{ id: string }>(
-    `SELECT id FROM queue
-      WHERE singer_id = $1
-        AND status = 'queued'
-        AND id = ANY($2::bigint[])`,
-    [singerId, queueIds],
-  );
-  const ownedIds = new Set(owned.rows.map((r) => Number(r.id)));
-  for (const id of queueIds) {
-    if (!ownedIds.has(id)) {
-      return { ok: false, error: `Queue item ${id} does not belong to singer ${singerId} or is not queued` };
+  if (new Set(queueIds).size !== queueIds.length) return { ok: false, error: 'Queue order contains duplicate songs' };
+  return withQueueTransaction(async (client) => {
+    const owned = await client.query<{ id: string; position: number }>(
+      `SELECT id, position FROM queue WHERE singer_id = $1 AND status = 'queued' ORDER BY position, id FOR UPDATE`,
+      [singerId],
+    );
+    const ownedIds = new Set(owned.rows.map((row) => Number(row.id)));
+    for (const id of queueIds) {
+      if (!ownedIds.has(id)) {
+        return { ok: false, error: `Queue item ${id} does not belong to singer ${singerId} or is not queued` };
+      }
     }
-  }
-
-  // Get current positions of queued songs for this singer in order
-  const curRes = await query<{ id: string; position: number }>(
-    `SELECT id, position FROM queue
-      WHERE singer_id = $1
-        AND status = 'queued'
-      ORDER BY position`,
-    [singerId],
-  );
-  const currentPositions = curRes.rows.map((r) => r.position);
-
-  // Assign the provided order to the existing positions (preserve relative position in queue)
-  const sorted = currentPositions.sort((a, b) => a - b);
-  const TEMP_OFFSET = 2_000_000;
-  await query('BEGIN');
-  try {
-    for (let i = 0; i < queueIds.length && i < sorted.length; i++) {
-      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [TEMP_OFFSET + i, queueIds[i]]);
-    }
-    for (let i = 0; i < queueIds.length && i < sorted.length; i++) {
-      await query(`UPDATE queue SET position = $1 WHERE id = $2`, [sorted[i], queueIds[i]]);
-    }
-    await query('COMMIT');
-  } catch (e) {
-    await query('ROLLBACK');
-    throw e;
-  }
-  return { ok: true };
+    const specified = new Set(queueIds);
+    const order = [...queueIds, ...owned.rows.map((row) => Number(row.id)).filter((id) => !specified.has(id))];
+    await writeQueueOrder(client, order, owned.rows.map((row) => row.position), true);
+    return { ok: true };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -401,48 +352,13 @@ export async function reorderSingerQueue(
 // ---------------------------------------------------------------------------
 
 /**
- * Update a queue item's status.  When moving to 'queued' from a terminal
- * state, calls restoreCompletedSongToQueue.
+ * Update a queue item's status and rotation bookkeeping atomically.
  */
 export async function updateQueueItemStatus(
   queueId: number,
   newStatus: 'queued' | 'done' | 'removed' | 'skipped',
 ): Promise<{ ok: boolean; error?: string }> {
-  const cur = await query<any>(`SELECT id, status, singer_id FROM queue WHERE id = $1`, [queueId]);
-  if (cur.rows.length === 0) return { ok: false, error: 'Queue item not found' };
-
-  const singerId: string | null = cur.rows[0].singer_id ?? null;
-
-  if (newStatus === 'queued') {
-    await restoreCompletedSongToQueue(queueId);
-    // Recalculate stats since we removed a "done" row from the tally
-    if (singerId) {
-      await recalculateSingerStats(singerId).catch((err) =>
-        console.error('Failed to recalculate singer stats after restore for singer', singerId, err),
-      );
-    }
-    return { ok: true };
-  }
-
-  if (newStatus === 'done') {
-    await query(
-      `UPDATE queue SET status = $1, finished_at = NOW() WHERE id = $2`,
-      [newStatus, queueId],
-    );
-  } else {
-    await query(
-      `UPDATE queue SET status = $1, finished_at = NULL WHERE id = $2`,
-      [newStatus, queueId],
-    );
-  }
-
-  // Recalculate singer stats whenever a non-queued status is assigned
-  // (covers 'done', 'removed', 'skipped' — all terminal states)
-  if (singerId) {
-    await recalculateSingerStats(singerId).catch((err) =>
-      console.error('Failed to recalculate singer stats after status change for singer', singerId, err),
-    );
-  }
-
-  return { ok: true };
+  return await setLiveQueueStatus(queueId, newStatus)
+    ? { ok: true }
+    : { ok: false, error: 'Queue item not found' };
 }

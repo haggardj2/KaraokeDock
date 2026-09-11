@@ -1,6 +1,6 @@
-import React, { useEffect, useState, createContext, useContext } from 'react'
+import React, { useCallback, useEffect, useRef, useState, createContext, useContext } from 'react'
 import { api } from './api'
-import { clearStoredSessionToken, readStoredSessionToken, writeStoredSessionToken } from './session-token'
+import { readStoredSessionToken, subscribeToStoredSessionToken, writeStoredSessionToken } from './session-token'
 
 type AuthProfile = {
   username: string
@@ -56,6 +56,8 @@ type AuthContextType = {
   setProfile: (profile: Partial<AuthProfile>) => void
   clearProfile: () => void
   handleLogout: () => Promise<void>
+  sessionError: string
+  retrySessionValidation: () => void
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
@@ -74,13 +76,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isDefaultPassword, setIsDefaultPassword] = useState(false)
   const [role, setRole] = useState('user')
   const [profile, setProfileState] = useState<AuthProfile>(() => readStoredAuthProfile())
+  const [sessionError, setSessionError] = useState('')
+  const [validationAttempt, setValidationAttempt] = useState(0)
+  const currentToken = useRef(sessionTokenState)
 
   const isAdmin = role === 'admin'
 
-  const setSessionToken = (token: string) => {
+  const adoptSessionToken = useCallback((token: string) => {
+    if (currentToken.current === token) return
+    currentToken.current = token
     setSessionTokenState(token)
+    setIsLoggedIn(false)
+    setIsDefaultPassword(false)
+    setRole('user')
+    setProfileState(emptyProfile())
+    setSessionError('')
+    if (!token) clearStoredAuthProfile()
+  }, [])
+
+  const setSessionToken = useCallback((token: string) => {
     writeStoredSessionToken(token)
-  }
+    adoptSessionToken(token)
+  }, [adoptSessionToken])
+
+  const retrySessionValidation = useCallback(() => setValidationAttempt((attempt) => attempt + 1), [])
+
+  useEffect(() => {
+    const unsubscribe = subscribeToStoredSessionToken(adoptSessionToken)
+    const refreshSession = () => adoptSessionToken(readStoredSessionToken())
+    refreshSession()
+    window.addEventListener('focus', refreshSession)
+    window.addEventListener('pageshow', refreshSession)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('focus', refreshSession)
+      window.removeEventListener('pageshow', refreshSession)
+    }
+  }, [adoptSessionToken])
 
   const setProfile = (nextProfile: Partial<AuthProfile>) => {
     setProfileState((current) => {
@@ -99,11 +131,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!sessionTokenState) return
 
     let cancelled = false
+    setSessionError('')
+    const isCurrentSession = () => !cancelled && currentToken.current === sessionTokenState &&
+      readStoredSessionToken() === sessionTokenState
     api('/api/auth/validate', {
       headers: { 'x-session-token': sessionTokenState }
     })
       .then((result) => {
-        if (cancelled) return
+        if (!isCurrentSession()) return
         if (result.valid) {
           setIsLoggedIn(true)
           setRole(result.role || 'user')
@@ -115,26 +150,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setProfileState(profile)
           writeStoredAuthProfile(profile)
         } else {
-          setSessionTokenState('')
-          clearStoredSessionToken()
-          setIsLoggedIn(false)
-          setRole('user')
-          clearProfile()
+          setSessionToken('')
         }
       })
-      .catch(() => {
-        if (cancelled) return
-        setSessionTokenState('')
-        clearStoredSessionToken()
+      .catch((error) => {
+        if (!isCurrentSession()) return
+        console.error('Could not validate sign-in session:', error)
         setIsLoggedIn(false)
         setRole('user')
-        clearProfile()
+        setSessionError('Could not verify your sign-in. Check your connection and retry.')
       })
 
     return () => {
       cancelled = true
     }
-  }, [sessionTokenState])
+  }, [sessionTokenState, validationAttempt, setSessionToken])
 
   const handleLogout = async () => {
     try {
@@ -145,12 +175,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.error('Logout error:', err)
     } finally {
-      setSessionToken('')
-      clearStoredSessionToken()
-      setIsLoggedIn(false)
-      setIsDefaultPassword(false)
-      setRole('user')
-      clearProfile()
+      if (readStoredSessionToken() === sessionTokenState) setSessionToken('')
     }
   }
 
@@ -168,7 +193,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       profile,
       setProfile,
       clearProfile,
-      handleLogout
+      handleLogout,
+      sessionError,
+      retrySessionValidation
     }}>
       {children}
     </AuthContext.Provider>

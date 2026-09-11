@@ -30,6 +30,7 @@ import {
   getRotationState,
 } from '../rotation/rotationService.js';
 import { validateSessionInfo } from '../db.js';
+import { RotationValidationError } from '../rotation/types.js';
 import { applyManualSingerQueueOrder, resortQueueByRotation, broadcastQueueUpdate } from './api.js';
 
 export const rotationRouter = express.Router();
@@ -41,7 +42,15 @@ export const rotationRouter = express.Router();
 const ah =
   (fn: express.RequestHandler): express.RequestHandler =>
   (req, res, next) =>
-    Promise.resolve(fn(req, res, next)).catch(next);
+    Promise.resolve(fn(req, res, next)).catch((error) => {
+      if (error instanceof RotationValidationError) res.status(400).json({ error: error.message });
+      else next(error);
+    });
+
+async function refreshQueue(): Promise<void> {
+  await resortQueueByRotation();
+  broadcastQueueUpdate('queue.updated');
+}
 
 // Session guard (any authenticated user)
 const sessionGuard: express.RequestHandler = async (req, res, next) => {
@@ -82,6 +91,7 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
 /** Parse an ID parameter to BigInt, returning 400 on failure. */
 function parseBigInt(value: string, res: express.Response): bigint | null {
   try {
+    if (!/^[1-9]\d*$/.test(String(value))) throw new Error('Invalid ID');
     return BigInt(value);
   } catch {
     res.status(400).json({ error: `Invalid ID: ${value}` });
@@ -133,6 +143,7 @@ rotationRouter.post('/rotations', adminGuard, ah(async (req, res) => {
     return;
   }
   const rotation = await createRotation({ name, config });
+  await refreshQueue();
   res.status(201).json(jsonSafe(rotation));
 }));
 
@@ -153,12 +164,7 @@ rotationRouter.patch('/rotations/:id/config', adminGuard, ah(async (req, res) =>
   if (!rotation) { res.status(404).json({ error: 'Rotation not found' }); return; }
   // Re-sort the queue to reflect the new rotation policy before responding so
   // clients immediately see the updated order.
-  try {
-    await resortQueueByRotation();
-    broadcastQueueUpdate('queue.updated');
-  } catch (err) {
-    console.error('resortQueueByRotation after config update failed:', err);
-  }
+  await refreshQueue();
   res.json(jsonSafe(rotation));
 }));
 
@@ -167,6 +173,7 @@ rotationRouter.post('/rotations/:id/pause', adminGuard, ah(async (req, res) => {
   const id = parseBigInt(req.params.id, res);
   if (id === null) return;
   await pauseRotation(id);
+  await refreshQueue();
   res.json({ ok: true });
 }));
 
@@ -175,6 +182,7 @@ rotationRouter.post('/rotations/:id/resume', adminGuard, ah(async (req, res) => 
   const id = parseBigInt(req.params.id, res);
   if (id === null) return;
   await resumeRotation(id);
+  await refreshQueue();
   res.json({ ok: true });
 }));
 
@@ -214,6 +222,7 @@ rotationRouter.patch('/singers/:id/status', adminGuard, ah(async (req, res) => {
   const parsed = parseSingerStatus(status, res);
   if (parsed === null) return;
   await setSingerStatus(id, parsed);
+  await refreshQueue();
   res.json({ ok: true });
 }));
 
@@ -233,6 +242,7 @@ rotationRouter.post('/rotations/:id/singers', sessionGuard, ah(async (req, res) 
   const sid = parseBigInt(singerId, res);
   if (sid === null) return;
   const rs = await addSingerToRotation(rotationId, sid);
+  await refreshQueue();
   res.status(201).json(jsonSafe(rs));
 }));
 
@@ -243,6 +253,7 @@ rotationRouter.delete('/rotations/:id/singers/:singerId', adminGuard, ah(async (
   const singerId = parseBigInt(req.params.singerId, res);
   if (singerId === null) return;
   await removeSingerFromRotation(rotationId, singerId);
+  await refreshQueue();
   res.json({ ok: true });
 }));
 
@@ -260,6 +271,7 @@ rotationRouter.patch('/rotations/:id/singers/:singerId/status', adminGuard, ah(a
   const parsed = parseRotationSingerStatus(status, res);
   if (parsed === null) return;
   await setRotationSingerStatus(rotationId, singerId, parsed);
+  await refreshQueue();
   res.json({ ok: true });
 }));
 
@@ -305,6 +317,7 @@ rotationRouter.patch('/rotations/:id/singers/reorder', adminGuard, ah(async (req
 
   await reorderSingers(rotationId, parsedSingerIds);
   await applyManualSingerQueueOrder(parsedSingerIds.map((id) => id.toString()));
+  await resortQueueByRotation();
   broadcastQueueUpdate('queue.updated');
   res.json({ ok: true });
 }));
@@ -316,6 +329,7 @@ rotationRouter.post('/rotations/:id/singers/:singerId/insert-next', adminGuard, 
   const singerId = parseBigInt(req.params.singerId, res);
   if (singerId === null) return;
   await insertSingerNext(rotationId, singerId);
+  await refreshQueue();
   res.json({ ok: true });
 }));
 
@@ -348,7 +362,16 @@ rotationRouter.post('/song-requests', sessionGuard, ah(async (req, res) => {
   const sid = parseBigInt(singerId, res);
   if (sid === null) return;
 
-  const participantIds = (participantSingerIds ?? []).map((id) => BigInt(id));
+  if (participantSingerIds !== undefined && !Array.isArray(participantSingerIds)) {
+    res.status(400).json({ error: 'participantSingerIds must be an array' });
+    return;
+  }
+  const participantIds: bigint[] = [];
+  for (const value of participantSingerIds ?? []) {
+    const id = parseBigInt(value, res);
+    if (id === null) return;
+    participantIds.push(id);
+  }
 
   const sr = await addSongRequest({
     singerId: sid,
@@ -436,6 +459,7 @@ rotationRouter.post('/rotations/:id/overrides', adminGuard, ah(async (req, res) 
     songRequestId: srId ?? undefined,
     expiresAfterTurn,
   });
+  await refreshQueue();
   res.status(201).json(jsonSafe(override));
 }));
 
@@ -444,5 +468,6 @@ rotationRouter.delete('/rotations/:id/overrides', adminGuard, ah(async (req, res
   const rotationId = parseBigInt(req.params.id, res);
   if (rotationId === null) return;
   await clearManualOverrides(rotationId);
+  await refreshQueue();
   res.json({ ok: true });
 }));

@@ -1,1092 +1,602 @@
-// server/src/rotation/rotationService.ts
-// DB-aware service that orchestrates the karaoke rotation.
-// All scheduling policy logic lives in policies.ts; this module handles
-// database reads/writes and ties everything together.
-
-import { query } from '../db.js';
+// Database scheduling and lifecycle operations share one transaction and lock
+// the rotation before changing its next turn.
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { PoolClient, QueryResultRow } from 'pg';
+import { query as poolQuery, withTransaction } from '../db.js';
+import { normalizeSingerName } from '../queueIdentity.js';
+import { isRoundComplete, selectNextByPolicy, selectSong } from './policies.js';
 import {
-  strictRoundRobin,
-  leastRecentlySung,
-  signupOrder,
-  songQueueOnly,
-  isRoundComplete,
-} from './policies.js';
-import {
-  DEFAULT_ROTATION_CONFIG,
-  type Rotation,
-  type RotationConfig,
-  type RotationSinger,
-  type RotationTurn,
-  type ManualOverride,
-  type Singer,
-  type SongRequest,
-  type SingerSnapshot,
-  type SongRequestSnapshot,
-  type PolicyContext,
-  type PolicyResult,
-  type RotationState,
+  effectiveRotationType, normalizeRotationConfig, RotationValidationError,
+  type Rotation, type RotationConfig, type RotationSinger, type RotationTurn,
+  type ManualOverride, type Singer, type SongRequest, type SingerSnapshot,
+  type PolicyResult, type RotationState,
 } from './types.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const transactions = new AsyncLocalStorage<PoolClient>();
 
-/** Merge a partial config on top of the defaults. */
-function mergeConfig(partial: Partial<RotationConfig> = {}): RotationConfig {
-  return { ...DEFAULT_ROTATION_CONFIG, ...partial };
+async function query<T extends QueryResultRow = any>(sql: string, params?: any[]) {
+  const client = transactions.getStore();
+  return client ? client.query<T>(sql, params) : poolQuery<T>(sql, params);
 }
 
-/** Convert DB row numbers/strings to bigint safely. */
-function toBigInt(v: unknown): bigint {
-  if (v === null || v === undefined) throw new Error(`Expected bigint, got ${v === null ? 'null' : 'undefined'}`);
-  return BigInt(v as string | number);
+async function atomic<T>(work: () => Promise<T>): Promise<T> {
+  if (transactions.getStore()) return work();
+  return withTransaction((client) => transactions.run(client, work));
 }
 
-function toOptBigInt(v: unknown): bigint | null {
-  if (v === null || v === undefined) return null;
-  return BigInt(v as string | number);
+const toBigInt = (value: unknown): bigint => BigInt(value as string);
+const optionalId = (value: unknown): bigint | null => value == null ? null : toBigInt(value);
+const turnRow = (row: any): RotationTurn => ({
+  ...row, id: toBigInt(row.id), rotation_id: toBigInt(row.rotation_id),
+  singer_id: toBigInt(row.singer_id), song_request_id: optionalId(row.song_request_id),
+});
+const overrideRow = (row: any): ManualOverride => ({
+  ...row, id: toBigInt(row.id), rotation_id: toBigInt(row.rotation_id),
+  singer_id: toBigInt(row.singer_id), song_request_id: optionalId(row.song_request_id),
+});
+const rotationRow = (row: any): Rotation => ({
+  ...row, id: toBigInt(row.id), current_turn_id: optionalId(row.current_turn_id),
+  config: normalizeRotationConfig({ type: row.type, basePolicy: row.base_policy, ...row.config }),
+});
+const membershipRow = (row: any): RotationSinger => ({
+  ...row, id: toBigInt(row.id), rotation_id: toBigInt(row.rotation_id), singer_id: toBigInt(row.singer_id),
+});
+
+export async function getRotation(rotationId: bigint): Promise<Rotation | null> {
+  const result = await query('SELECT * FROM rotations WHERE id = $1', [rotationId]);
+  return result.rows[0] ? rotationRow(result.rows[0]) : null;
 }
 
-/** Build a SingerSnapshot from joined DB rows. */
-function buildSnapshot(
-  rs: RotationSinger & { singer_status: string; singer_display_name: string; singer_joined_at: Date; singer_last_sang_at: Date | null },
-  songs: SongRequest[],
-): SingerSnapshot {
+async function lockRotation(rotationId: bigint): Promise<Rotation | null> {
+  const result = await query('SELECT * FROM rotations WHERE id = $1 FOR UPDATE', [rotationId]);
+  return result.rows[0] ? rotationRow(result.rows[0]) : null;
+}
+
+async function requireRotation(rotationId: bigint): Promise<Rotation> {
+  const rotation = await lockRotation(rotationId);
+  if (!rotation) throw new RotationValidationError(`Rotation ${rotationId} not found`);
+  return rotation;
+}
+
+async function snapshots(rotationId: bigint, releasedSongId?: bigint | null): Promise<SingerSnapshot[]> {
+  const memberships = await query(
+    `SELECT rs.*, s.status AS singer_status, s.display_name,
+       CASE WHEN r.config->>'skipPolicy' = 'move_to_end' THEN
+         (SELECT MAX(rt.completed_at) FROM rotation_turns rt WHERE rt.rotation_id = rs.rotation_id
+           AND rt.singer_id = rs.singer_id AND rt.status = 'skipped') END AS last_skipped_at
+       FROM rotation_singers rs JOIN singers s ON s.id = rs.singer_id
+       JOIN rotations r ON r.id = rs.rotation_id
+      WHERE rs.rotation_id = $1 ORDER BY rs.position, rs.id`, [rotationId]);
+  if (!memberships.rows.length) return [];
+  const songs = await query(
+    `SELECT sr.*, CASE WHEN r.config->>'skipPolicy' = 'move_to_end' THEN
+        (SELECT MAX(rt.completed_at) FROM rotation_turns rt WHERE rt.rotation_id = r.id
+          AND rt.song_request_id = sr.id AND rt.status = 'skipped') END AS last_skipped_at
+       FROM song_requests sr CROSS JOIN rotations r
+      WHERE r.id = $2 AND sr.singer_id = ANY($1::bigint[])
+        AND (sr.status = 'pending' OR (sr.id = $3 AND sr.status = 'queued'))
+      ORDER BY sr.requested_at, sr.id`, [memberships.rows.map((row) => row.singer_id), rotationId, releasedSongId ?? null]);
+  return memberships.rows.map((row) => ({
+    singerId: toBigInt(row.singer_id), displayName: row.display_name,
+    singerStatus: row.singer_status, rotationStatus: row.status, position: row.position,
+    joinedAt: row.joined_at, currentRoundJoined: row.current_round_joined,
+    lastRoundSang: row.last_round_sang, lastSangAt: row.last_sang_at, lastSkippedAt: row.last_skipped_at,
+    pendingSongs: songs.rows.filter((song) => String(song.singer_id) === String(row.singer_id)).map((song) => ({
+      id: toBigInt(song.id), singerId: toBigInt(song.singer_id), title: song.title, artist: song.artist,
+      priority: song.priority, requestedAt: song.requested_at, lastSkippedAt: song.last_skipped_at,
+      participantSingerIds: (song.participant_singer_ids ?? []).map(toBigInt),
+    })),
+  }));
+}
+
+async function pendingOverrides(rotationId: bigint): Promise<ManualOverride[]> {
+  const result = await query(
+    `SELECT * FROM manual_overrides WHERE rotation_id = $1 AND status = 'pending'
+      ORDER BY position, created_at, id`, [rotationId]);
+  return result.rows.map(overrideRow);
+}
+
+async function openTurn(rotationId: bigint): Promise<RotationTurn | null> {
+  const result = await query(
+    `SELECT * FROM rotation_turns WHERE rotation_id = $1 AND status IN ('scheduled', 'active')
+      ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at, id LIMIT 1`, [rotationId]);
+  return result.rows[0] ? turnRow(result.rows[0]) : null;
+}
+
+async function isScheduledTurnEligible(turn: RotationTurn): Promise<boolean> {
+  const rotation = await getRotation(turn.rotation_id);
+  if (!rotation) return false;
+  const result = await query(
+    `SELECT 1 FROM rotation_singers rs
+       JOIN singers s ON s.id = rs.singer_id
+       JOIN song_requests sr ON sr.id = $3 AND sr.singer_id = s.id
+      WHERE rs.rotation_id = $1 AND rs.singer_id = $2
+        AND rs.status = 'active' AND s.status = 'active' AND sr.status = 'queued'
+        AND ($5::boolean = false OR rs.current_round_joined <= $4)`,
+    [turn.rotation_id, turn.singer_id, turn.song_request_id, turn.round_number,
+      effectiveRotationType(rotation.config) === 'strict_round_robin']);
+  return result.rows.length > 0;
+}
+
+async function cancelScheduled(rotationId: bigint, singerId?: bigint): Promise<void> {
+  const result = await query(
+    `UPDATE rotation_turns SET status = 'skipped'
+      WHERE rotation_id = $1 AND status = 'scheduled' AND ($2::bigint IS NULL OR singer_id = $2)
+      RETURNING id, song_request_id`, [rotationId, singerId ?? null]);
+  for (const turn of result.rows) {
+    await query(`UPDATE song_requests SET status = 'pending' WHERE id = $1 AND status = 'queued'`, [turn.song_request_id]);
+  }
+  await query(
+    `UPDATE rotations SET current_turn_id = NULL, updated_at = NOW()
+      WHERE id = $1 AND current_turn_id = ANY($2::bigint[])`, [rotationId, result.rows.map((turn) => turn.id)]);
+}
+
+interface Selection {
+  result: PolicyResult | null;
+  round: number;
+  source: RotationTurn['source'];
+  invalidOverrideIds: bigint[];
+}
+
+async function nextSelection(rotation: Rotation, singers: SingerSnapshot[], overrides: ManualOverride[]): Promise<Selection> {
+  const invalidOverrideIds: bigint[] = [];
+  const mode = effectiveRotationType(rotation.config);
+  let round = rotation.current_round;
+  const active = singers.filter((s) => s.singerStatus === 'active' && s.rotationStatus === 'active' && s.pendingSongs.length);
+  if (mode === 'strict_round_robin' && active.length &&
+      !active.some((s) => s.currentRoundJoined <= round && (s.lastRoundSang === null || s.lastRoundSang < round))) {
+    round = Math.max(round + 1, Math.min(...active.map((s) =>
+      Math.max(s.currentRoundJoined, (s.lastRoundSang ?? 0) + 1))));
+  }
+  for (const override of overrides) {
+    const singer = singers.find((s) => s.singerId === override.singer_id &&
+      s.singerStatus === 'active' && s.rotationStatus === 'active');
+    if (!singer) { invalidOverrideIds.push(override.id); continue; }
+    if (mode === 'strict_round_robin' && singer.currentRoundJoined > round) continue;
+    const song = override.song_request_id
+      ? singer.pendingSongs.find((s) => s.id === override.song_request_id)
+      : selectSong(singer, { ...rotation.config, songSelectionPolicy:
+        rotation.config.songSelectionPolicy === 'manual_host_selection' ? 'oldest_request_first' : rotation.config.songSelectionPolicy });
+    if (!song) {
+      // A singer-only persistent override can wait for another request.
+      if (override.song_request_id || override.expires_after_turn) invalidOverrideIds.push(override.id);
+      continue;
+    }
+    return { result: { singerId: singer.singerId, songRequestId: song.id }, round, source: 'manual_override', invalidOverrideIds };
+  }
+  const previous = await query(
+    `SELECT singer_id FROM rotation_turns WHERE rotation_id = $1 AND status = 'completed'
+      ORDER BY completed_at DESC, id DESC LIMIT 1`, [rotation.id]);
+  const result = selectNextByPolicy(singers, {
+    currentRound: round, lastCompletedSingerId: optionalId(previous.rows[0]?.singer_id), config: rotation.config,
+  });
+  const priority = result && singers.flatMap((s) => s.pendingSongs).find((s) => s.id === result.songRequestId)?.priority;
   return {
-    singerId: rs.singer_id,
-    displayName: rs.singer_display_name,
-    singerStatus: rs.singer_status as any,
-    rotationStatus: rs.status,
-    position: rs.position,
-    joinedAt: rs.joined_at,
-    currentRoundJoined: rs.current_round_joined,
-    lastRoundSang: rs.last_round_sang ?? null,
-    lastSangAt: rs.last_sang_at ?? null,
-    pendingSongs: songs
-      .filter((sr) => sr.singer_id === rs.singer_id)
-      .map(
-        (sr): SongRequestSnapshot => ({
-          id: sr.id,
-          singerId: sr.singer_id,
-          title: sr.title,
-          artist: sr.artist,
-          priority: sr.priority,
-          requestedAt: sr.requested_at,
-          participantSingerIds: sr.participant_singer_ids ?? [],
-        }),
-      ),
+    result, round, invalidOverrideIds,
+    source: priority && priority > 0 && ['weighted', 'vip_next'].includes(rotation.config.priorityPolicy) ? 'priority' : 'automatic',
   };
 }
 
-// ---------------------------------------------------------------------------
-// Read helpers
-// ---------------------------------------------------------------------------
+export async function getNextTurn(rotationId: bigint): Promise<RotationTurn | null> {
+  return atomic(async () => {
+    const rotation = await lockRotation(rotationId);
+    if (!rotation || rotation.status !== 'active') return null;
+    const existing = await openTurn(rotationId);
+    if (existing?.status === 'active') return existing;
+    if (existing && await isScheduledTurnEligible(existing)) return existing;
+    if (existing) await cancelScheduled(rotationId);
 
-export async function getRotation(rotationId: bigint): Promise<Rotation | null> {
-  const res = await query<any>(
-    'SELECT * FROM rotations WHERE id = $1 LIMIT 1',
-    [rotationId],
-  );
-  if (res.rows.length === 0) return null;
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    current_turn_id: toOptBigInt(row.current_turn_id),
-    config: mergeConfig(row.config ?? {}),
-  } as Rotation;
-}
-
-async function getRotationSingersWithSnapshots(rotationId: bigint): Promise<SingerSnapshot[]> {
-  // Join rotation_singers with singers
-  const rsRes = await query<any>(
-    `SELECT rs.*,
-            s.status AS singer_status,
-            s.display_name AS singer_display_name,
-            s.joined_at AS singer_joined_at,
-            s.last_sang_at AS singer_last_sang_at
-       FROM rotation_singers rs
-       JOIN singers s ON s.id = rs.singer_id
-      WHERE rs.rotation_id = $1
-      ORDER BY rs.position ASC`,
-    [rotationId],
-  );
-
-  if (rsRes.rows.length === 0) return [];
-
-  // Get all pending songs for these singers in one query
-  const singerIds = rsRes.rows.map((r: any) => r.singer_id);
-  const songRes = await query<any>(
-    `SELECT * FROM song_requests
-      WHERE singer_id = ANY($1::bigint[])
-        AND status = 'pending'
-      ORDER BY priority DESC, requested_at ASC`,
-    [singerIds],
-  );
-
-  const songs: SongRequest[] = songRes.rows.map((r: any) => ({
-    ...r,
-    id: toBigInt(r.id),
-    singer_id: toBigInt(r.singer_id),
-    participant_singer_ids: (r.participant_singer_ids ?? []).map(toBigInt),
-  }));
-
-  return rsRes.rows.map((rs: any) => {
-    const typedRs: RotationSinger & any = {
-      ...rs,
-      id: toBigInt(rs.id),
-      rotation_id: toBigInt(rs.rotation_id),
-      singer_id: toBigInt(rs.singer_id),
-    };
-    return buildSnapshot(typedRs, songs);
+    // A song may also be requested by a different rotation. The conditional
+    // reservation, not just the snapshot, decides who owns it.
+    for (;;) {
+      const selected = await nextSelection(rotation, await snapshots(rotationId), await pendingOverrides(rotationId));
+      if (selected.invalidOverrideIds.length) await query(
+        `UPDATE manual_overrides SET status = 'cancelled' WHERE id = ANY($1::bigint[]) AND status = 'pending'`,
+        [selected.invalidOverrideIds]);
+      if (!selected.result) return null;
+      const { singerId, songRequestId } = selected.result;
+      const reserved = await query(
+        `UPDATE song_requests SET status = 'queued' WHERE id = $1 AND singer_id = $2 AND status = 'pending' RETURNING id`,
+        [songRequestId, singerId]);
+      if (!reserved.rows.length) continue;
+      const result = await query(
+        `INSERT INTO rotation_turns (rotation_id, singer_id, song_request_id, round_number, source)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`, [rotationId, singerId, songRequestId, selected.round, selected.source]);
+      const turn = turnRow(result.rows[0]);
+      await query(
+        `UPDATE rotations SET current_turn_id = $1, current_round = $2, updated_at = NOW() WHERE id = $3`,
+        [turn.id, selected.round, rotationId]);
+      return turn;
+    }
   });
 }
 
-async function getNextManualOverride(rotationId: bigint): Promise<ManualOverride | null> {
-  const res = await query<any>(
-    `SELECT mo.*
-       FROM manual_overrides mo
-      WHERE mo.rotation_id = $1
-        AND mo.status = 'pending'
-      ORDER BY mo.position ASC, mo.created_at ASC
-      LIMIT 1`,
-    [rotationId],
-  );
-  if (res.rows.length === 0) return null;
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    rotation_id: toBigInt(row.rotation_id),
-    singer_id: toBigInt(row.singer_id),
-    song_request_id: toOptBigInt(row.song_request_id),
-  } as ManualOverride;
+async function lockedTurn(turnId: bigint): Promise<{ turn: RotationTurn; rotation: Rotation } | null> {
+  const id = await query('SELECT rotation_id FROM rotation_turns WHERE id = $1', [turnId]);
+  if (!id.rows.length) return null;
+  const rotation = await lockRotation(toBigInt(id.rows[0].rotation_id));
+  if (!rotation) return null;
+  const result = await query('SELECT * FROM rotation_turns WHERE id = $1 FOR UPDATE', [turnId]);
+  return result.rows[0] ? { turn: turnRow(result.rows[0]), rotation } : null;
 }
 
-async function getLastCompletedSingerId(rotationId: bigint): Promise<bigint | null> {
-  const res = await query<any>(
-    `SELECT singer_id FROM rotation_turns
-      WHERE rotation_id = $1 AND status = 'completed'
-      ORDER BY completed_at DESC NULLS LAST
-      LIMIT 1`,
-    [rotationId],
-  );
-  if (res.rows.length === 0) return null;
-  return toBigInt(res.rows[0].singer_id);
-}
-
-// ---------------------------------------------------------------------------
-// Turn creation
-// ---------------------------------------------------------------------------
-
-async function createTurn(
-  rotationId: bigint,
-  singerId: bigint,
-  songRequestId: bigint | null,
-  roundNumber: number,
-  source: 'automatic' | 'manual_override' | 'priority',
-): Promise<RotationTurn> {
-  const res = await query<any>(
-    `INSERT INTO rotation_turns (rotation_id, singer_id, song_request_id, round_number, source)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING *`,
-    [rotationId, singerId, songRequestId, roundNumber, source],
-  );
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    rotation_id: toBigInt(row.rotation_id),
-    singer_id: toBigInt(row.singer_id),
-    song_request_id: toOptBigInt(row.song_request_id),
-  } as RotationTurn;
-}
-
-// ---------------------------------------------------------------------------
-// getNextTurn — main scheduler entry point
-// ---------------------------------------------------------------------------
-
-export async function getNextTurn(rotationId: bigint): Promise<RotationTurn | null> {
-  const rotation = await getRotation(rotationId);
-  if (!rotation || rotation.status !== 'active') return null;
-
-  // Check for an existing scheduled or active turn (don't create a duplicate)
-  const activeTurnRes = await query<any>(
-    `SELECT * FROM rotation_turns
-      WHERE rotation_id = $1
-        AND status IN ('scheduled', 'active')
-      ORDER BY created_at ASC
-      LIMIT 1`,
-    [rotationId],
-  );
-  if (activeTurnRes.rows.length > 0) {
-    const r = activeTurnRes.rows[0];
-    return {
-      ...r,
-      id: toBigInt(r.id),
-      rotation_id: toBigInt(r.rotation_id),
-      singer_id: toBigInt(r.singer_id),
-      song_request_id: toOptBigInt(r.song_request_id),
-    } as RotationTurn;
-  }
-
-  // Manual overrides take priority over all automatic policies
-  const override = await getNextManualOverride(rotationId);
-  if (override) {
-    return buildTurnFromOverride(rotation, override);
-  }
-
-  const { config } = rotation;
-
-  // Manual mode: host drives everything, no automatic scheduling
-  if (config.type === 'manual') return null;
-
-  const singers = await getRotationSingersWithSnapshots(rotationId);
-  const lastCompletedSingerId = await getLastCompletedSingerId(rotationId);
-
-  const ctx: PolicyContext = {
-    currentRound: rotation.current_round,
-    lastCompletedSingerId,
-    config,
-  };
-
-  let result: PolicyResult | null = null;
-  let roundAdvanced = false;
-
-  switch (config.type) {
-    case 'strict_round_robin': {
-      result = strictRoundRobin(singers, ctx);
-      // If the scheduler fell back to next-round singers it means the round is complete
-      if (result) {
-        const currentRoundPool = singers.filter(
-          (s) =>
-            s.singerStatus === 'active' &&
-            s.rotationStatus === 'active' &&
-            s.pendingSongs.length > 0 &&
-            (s.lastRoundSang === null || s.lastRoundSang < rotation.current_round) &&
-            s.currentRoundJoined <= rotation.current_round,
-        );
-        if (currentRoundPool.length === 0) {
-          // All eligible singers already sang this round → advance round
-          await advanceRound(rotationId, rotation.current_round + 1);
-          roundAdvanced = true;
-          ctx.currentRound = rotation.current_round + 1;
-          result = strictRoundRobin(singers, ctx);
-        }
-      }
-      break;
-    }
-    case 'least_recently_sung':
-      result = leastRecentlySung(singers, ctx);
-      break;
-    case 'signup_order':
-      result = signupOrder(singers, ctx);
-      break;
-    case 'song_queue_only':
-      result = songQueueOnly(singers, ctx);
-      break;
-    case 'hybrid':
-      result = getNextResultUsingBasePolicy(singers, ctx, config.basePolicy);
-      break;
-    default:
-      throw new Error(`Unsupported rotation type: ${config.type}`);
-  }
-
-  if (!result) return null;
-
-  const round = roundAdvanced ? rotation.current_round + 1 : rotation.current_round;
-  const turn = await createTurn(rotationId, result.singerId, result.songRequestId, round, 'automatic');
-
-  // Update rotation.current_turn_id
-  await query('UPDATE rotations SET current_turn_id = $1, updated_at = NOW() WHERE id = $2', [
-    turn.id,
-    rotationId,
-  ]);
-
-  // Mark song as 'queued' so it cannot be double-booked
-  if (result.songRequestId) {
-    await query(
-      `UPDATE song_requests SET status = 'queued' WHERE id = $1 AND status = 'pending'`,
-      [result.songRequestId],
-    );
-  }
-
-  return turn;
-}
-
-/** Choose next result using the configured basePolicy (used by hybrid). */
-function getNextResultUsingBasePolicy(
-  singers: SingerSnapshot[],
-  ctx: PolicyContext,
-  basePolicy: string,
-): PolicyResult | null {
-  switch (basePolicy) {
-    case 'strict_round_robin':
-      return strictRoundRobin(singers, ctx);
-    case 'least_recently_sung':
-      return leastRecentlySung(singers, ctx);
-    case 'signup_order':
-      return signupOrder(singers, ctx);
-    default:
-      return strictRoundRobin(singers, ctx);
+async function consumeOverride(turn: RotationTurn): Promise<void> {
+  if (turn.source !== 'manual_override') return;
+  const overrides = await pendingOverrides(turn.rotation_id);
+  const override = overrides.find((o) => o.singer_id === turn.singer_id &&
+    (o.song_request_id === null || o.song_request_id === turn.song_request_id));
+  if (override?.expires_after_turn) {
+    await query(`UPDATE manual_overrides SET status = 'consumed' WHERE id = $1 AND status = 'pending'`, [override.id]);
   }
 }
-
-/** Build a RotationTurn from a manual override and consume the override. */
-async function buildTurnFromOverride(
-  rotation: Rotation,
-  override: ManualOverride,
-): Promise<RotationTurn> {
-  let songRequestId = override.song_request_id;
-
-  // If override has no specific song, select the singer's next eligible song
-  if (!songRequestId) {
-    const songRes = await query<any>(
-      `SELECT id FROM song_requests
-        WHERE singer_id = $1 AND status = 'pending'
-        ORDER BY priority DESC, requested_at ASC
-        LIMIT 1`,
-      [override.singer_id],
-    );
-    if (songRes.rows.length > 0) {
-      songRequestId = toBigInt(songRes.rows[0].id);
-    }
-  }
-
-  const turn = await createTurn(
-    rotation.id,
-    override.singer_id,
-    songRequestId,
-    rotation.current_round,
-    'manual_override',
-  );
-
-  // Consume the override if expires_after_turn
-  if (override.expires_after_turn) {
-    await query(
-      `UPDATE manual_overrides SET status = 'consumed' WHERE id = $1`,
-      [override.id],
-    );
-  }
-
-  // Update current_turn_id
-  await query('UPDATE rotations SET current_turn_id = $1, updated_at = NOW() WHERE id = $2', [
-    turn.id,
-    rotation.id,
-  ]);
-
-  // Mark song as queued
-  if (songRequestId) {
-    await query(
-      `UPDATE song_requests SET status = 'queued' WHERE id = $1 AND status = 'pending'`,
-      [songRequestId],
-    );
-  }
-
-  return turn;
-}
-
-// ---------------------------------------------------------------------------
-// startTurn
-// ---------------------------------------------------------------------------
 
 export async function startTurn(turnId: bigint): Promise<RotationTurn | null> {
-  const res = await query<any>(
-    `UPDATE rotation_turns
-        SET status = 'active', started_at = NOW()
-      WHERE id = $1 AND status = 'scheduled'
-      RETURNING *`,
-    [turnId],
-  );
-  if (res.rows.length === 0) return null;
-
-  // Mark song as 'singing'
-  const row = res.rows[0];
-  if (row.song_request_id) {
-    await query(
-      `UPDATE song_requests SET status = 'singing' WHERE id = $1`,
-      [row.song_request_id],
-    );
-  }
-
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    rotation_id: toBigInt(row.rotation_id),
-    singer_id: toBigInt(row.singer_id),
-    song_request_id: toOptBigInt(row.song_request_id),
-  } as RotationTurn;
+  return atomic(async () => {
+    const locked = await lockedTurn(turnId);
+    if (!locked) return null;
+    const { turn, rotation } = locked;
+    if (turn.status === 'active') return turn;
+    if (turn.status !== 'scheduled' || rotation.status !== 'active') return null;
+    if (!await isScheduledTurnEligible(turn)) { await cancelScheduled(rotation.id, turn.singer_id); return null; }
+    const song = await query(
+      `UPDATE song_requests SET status = 'singing' WHERE id = $1 AND status = 'queued' RETURNING id`, [turn.song_request_id]);
+    if (!song.rows.length) { await cancelScheduled(rotation.id, turn.singer_id); return null; }
+    const started = await query(
+      `UPDATE rotation_turns SET status = 'active', started_at = NOW() WHERE id = $1 RETURNING *`, [turnId]);
+    await consumeOverride(turn);
+    await query(`UPDATE rotations SET current_turn_id = $1, updated_at = NOW() WHERE id = $2`, [turnId, rotation.id]);
+    return turnRow(started.rows[0]);
+  });
 }
 
-// ---------------------------------------------------------------------------
-// completeTurn
-// ---------------------------------------------------------------------------
+async function moveToEnd(rotationId: bigint, singerId: bigint): Promise<void> {
+  await query(
+    `UPDATE rotation_singers SET position =
+       (SELECT COALESCE(MAX(position), -1) + 1 FROM rotation_singers WHERE rotation_id = $1)
+      WHERE rotation_id = $1 AND singer_id = $2`, [rotationId, singerId]);
+}
+
+async function finishBookkeeping(rotation: Rotation, turn: RotationTurn): Promise<void> {
+  await query(`UPDATE rotations SET current_turn_id = NULL, updated_at = NOW() WHERE id = $1 AND current_turn_id = $2`,
+    [rotation.id, turn.id]);
+  if (effectiveRotationType(rotation.config) === 'strict_round_robin' &&
+      isRoundComplete(await snapshots(rotation.id), rotation.current_round)) {
+    await query(`UPDATE rotations SET current_round = current_round + 1, updated_at = NOW() WHERE id = $1`, [rotation.id]);
+  }
+}
 
 export async function completeTurn(turnId: bigint): Promise<RotationTurn | null> {
-  const turnRes = await query<any>(
-    `UPDATE rotation_turns
-        SET status = 'completed', completed_at = NOW()
-      WHERE id = $1 AND status IN ('scheduled','active')
-      RETURNING *`,
-    [turnId],
-  );
-  if (turnRes.rows.length === 0) return null;
-
-  const turnRow = turnRes.rows[0];
-  const turn: RotationTurn = {
-    ...turnRow,
-    id: toBigInt(turnRow.id),
-    rotation_id: toBigInt(turnRow.rotation_id),
-    singer_id: toBigInt(turnRow.singer_id),
-    song_request_id: toOptBigInt(turnRow.song_request_id),
-  };
-
-  // Mark song as completed
-  if (turn.song_request_id) {
-    await query(
-      `UPDATE song_requests SET status = 'completed', completed_at = NOW() WHERE id = $1`,
-      [turn.song_request_id],
-    );
-  }
-
-  // Determine participant singer IDs for duet policy
-  let participantIds: bigint[] = [turn.singer_id];
-  if (turn.song_request_id) {
-    const srRes = await query<any>('SELECT participant_singer_ids FROM song_requests WHERE id = $1', [
-      turn.song_request_id,
-    ]);
-    if (srRes.rows.length > 0) {
-      const ids: bigint[] = (srRes.rows[0].participant_singer_ids ?? []).map(toBigInt);
-      participantIds = Array.from(new Set([...participantIds, ...ids].map(String))).map(BigInt);
-    }
-  }
-
-  // Load the rotation config to apply duetPolicy
-  const rotation = await getRotation(turn.rotation_id);
-  const duetPolicy = rotation?.config.duetPolicy ?? 'all_participants';
-
-  const singersToUpdate: bigint[] =
-    duetPolicy === 'all_participants'
-      ? participantIds
-      : duetPolicy === 'primary_only'
-      ? [turn.singer_id]
-      : [turn.singer_id]; // group_as_singer treats the primary as the group
-
-  // Update singer stats
-  for (const sid of singersToUpdate) {
-    await query(
-      `UPDATE singers SET last_sang_at = NOW(), total_songs_sung = total_songs_sung + 1 WHERE id = $1`,
-      [sid],
-    );
-    // Update rotation_singer stats
-    await query(
-      `UPDATE rotation_singers
-          SET last_sang_at = NOW(),
-              last_round_sang = $2,
-              total_songs_sung = total_songs_sung + 1
-        WHERE rotation_id = $3 AND singer_id = $1`,
-      [sid, turn.round_number, turn.rotation_id],
-    );
-  }
-
-  // Apply signup_order post-completion behaviour
-  if (rotation?.config.type === 'signup_order' || rotation?.config.basePolicy === 'signup_order') {
-    await applySignupOrderPostCompletion(turn.rotation_id, turn.singer_id, rotation.config);
-  }
-
-  // Clear current_turn_id if it points to this turn
-  await query(
-    `UPDATE rotations SET current_turn_id = NULL, updated_at = NOW()
-      WHERE id = $1 AND current_turn_id = $2`,
-    [turn.rotation_id, turn.id],
-  );
-
-  // For strict_round_robin: check if the round is now complete
-  if (
-    rotation &&
-    (rotation.config.type === 'strict_round_robin' ||
-      (rotation.config.type === 'hybrid' && rotation.config.basePolicy === 'strict_round_robin'))
-  ) {
-    const singers = await getRotationSingersWithSnapshots(turn.rotation_id);
-    if (isRoundComplete(singers, rotation.current_round)) {
-      await advanceRound(turn.rotation_id, rotation.current_round + 1);
-    }
-  }
-
-  return turn;
-}
-
-/** Move singer to end or mark absent after their turn, per signup_order. */
-async function applySignupOrderPostCompletion(
-  rotationId: bigint,
-  singerId: bigint,
-  config: RotationConfig,
-): Promise<void> {
-  // Check if singer still has pending songs
-  const songRes = await query<any>(
-    `SELECT COUNT(*) AS c FROM song_requests WHERE singer_id = $1 AND status = 'pending'`,
-    [singerId],
-  );
-  const hasPending = Number(songRes.rows[0].c) > 0;
-
-  if (hasPending) {
-    // Move to end: set position to max + 1
-    await query(
-      `UPDATE rotation_singers rs
-          SET position = (
-            SELECT COALESCE(MAX(position), 0) + 1
-              FROM rotation_singers
-             WHERE rotation_id = $1
-          )
-        WHERE rs.rotation_id = $1 AND rs.singer_id = $2`,
-      [rotationId, singerId],
-    );
-  } else {
-    if (config.emptySingerPolicy === 'remove_from_rotation') {
+  return atomic(async () => {
+    const locked = await lockedTurn(turnId);
+    if (!locked) return null;
+    const { turn, rotation } = locked;
+    if (turn.status === 'completed') return turn;
+    if (turn.status !== 'active') return null;
+    const song = await query(
+      `UPDATE song_requests SET status = 'completed', completed_at = NOW()
+        WHERE id = $1 AND status = 'singing' RETURNING participant_singer_ids`, [turn.song_request_id]);
+    if (!song.rows.length) return null;
+    const updated = await query(
+      `UPDATE rotation_turns SET status = 'completed', completed_at = NOW() WHERE id = $1 RETURNING *`, [turnId]);
+    const participants = rotation.config.duetPolicy === 'all_participants'
+      ? [turn.singer_id, ...(song.rows[0].participant_singer_ids ?? []).map(toBigInt)] : [turn.singer_id];
+    for (const singerId of new Set<bigint>(participants)) {
+      await query(`UPDATE singers SET last_sang_at = NOW(), total_songs_sung = total_songs_sung + 1 WHERE id = $1`, [singerId]);
       await query(
-        `UPDATE rotation_singers SET status = 'inactive' WHERE rotation_id = $1 AND singer_id = $2`,
-        [rotationId, singerId],
-      );
+        `UPDATE rotation_singers SET last_sang_at = NOW(), last_round_sang = GREATEST(COALESCE(last_round_sang, 0), $2),
+           total_songs_sung = total_songs_sung + 1 WHERE rotation_id = $3 AND singer_id = $1`,
+        [singerId, turn.round_number, rotation.id]);
+      if (effectiveRotationType(rotation.config) === 'signup_order') await moveToEnd(rotation.id, singerId);
+      if (rotation.config.emptySingerPolicy === 'remove_from_rotation') await query(
+        `UPDATE rotation_singers SET status = 'inactive' WHERE rotation_id = $1 AND singer_id = $2
+          AND NOT EXISTS (SELECT 1 FROM song_requests WHERE singer_id = $2 AND status = 'pending')`, [rotation.id, singerId]);
     }
-    // keep_active_without_song: leave the singer active even without songs
-  }
+    if (turn.source === 'manual_override') await query(
+      `UPDATE manual_overrides SET status = 'consumed' WHERE rotation_id = $1 AND song_request_id = $2
+        AND status = 'pending' AND expires_after_turn = false`, [rotation.id, turn.song_request_id]);
+    await finishBookkeeping(rotation, turn);
+    return turnRow(updated.rows[0]);
+  });
 }
-
-// ---------------------------------------------------------------------------
-// skipTurn
-// ---------------------------------------------------------------------------
 
 export async function skipTurn(turnId: bigint): Promise<RotationTurn | null> {
-  const turnRes = await query<any>(
-    `UPDATE rotation_turns
-        SET status = 'skipped'
-      WHERE id = $1 AND status IN ('scheduled','active')
-      RETURNING *`,
-    [turnId],
-  );
-  if (turnRes.rows.length === 0) return null;
-
-  const turnRow = turnRes.rows[0];
-  const turn: RotationTurn = {
-    ...turnRow,
-    id: toBigInt(turnRow.id),
-    rotation_id: toBigInt(turnRow.rotation_id),
-    singer_id: toBigInt(turnRow.singer_id),
-    song_request_id: toOptBigInt(turnRow.song_request_id),
-  };
-
-  // Revert song back to pending
-  if (turn.song_request_id) {
-    await query(
-      `UPDATE song_requests SET status = 'pending' WHERE id = $1 AND status IN ('queued','singing')`,
-      [turn.song_request_id],
-    );
-  }
-
-  // Apply skip policy
-  const rotation = await getRotation(turn.rotation_id);
-  const skipPolicy = rotation?.config.skipPolicy ?? 'move_to_end';
-
-  if (skipPolicy === 'move_to_end') {
-    await query(
-      `UPDATE rotation_singers rs
-          SET position = (
-            SELECT COALESCE(MAX(position), 0) + 1
-              FROM rotation_singers
-             WHERE rotation_id = $1
-          )
-        WHERE rs.rotation_id = $1 AND rs.singer_id = $2`,
-      [turn.rotation_id, turn.singer_id],
-    );
-  } else if (skipPolicy === 'remove_until_reactivated') {
-    await query(
-      `UPDATE rotation_singers SET status = 'absent' WHERE rotation_id = $1 AND singer_id = $2`,
-      [turn.rotation_id, turn.singer_id],
-    );
-  }
-  // keep_position: do nothing
-
-  // Clear current_turn_id
-  await query(
-    `UPDATE rotations SET current_turn_id = NULL, updated_at = NOW()
-      WHERE id = $1 AND current_turn_id = $2`,
-    [turn.rotation_id, turn.id],
-  );
-
-  return turn;
-}
-
-// ---------------------------------------------------------------------------
-// Round management
-// ---------------------------------------------------------------------------
-
-async function advanceRound(rotationId: bigint, newRound: number): Promise<void> {
-  await query(
-    `UPDATE rotations SET current_round = $1, updated_at = NOW() WHERE id = $2`,
-    [newRound, rotationId],
-  );
-}
-
-// ---------------------------------------------------------------------------
-// CRUD — Rotations
-// ---------------------------------------------------------------------------
-
-export async function createRotation(params: {
-  name: string;
-  config?: Partial<RotationConfig>;
-}): Promise<Rotation> {
-  const config = mergeConfig(params.config);
-  const res = await query<any>(
-    `INSERT INTO rotations (name, type, base_policy, config)
-     VALUES ($1, $2, $3, $4)
-     RETURNING *`,
-    [params.name, config.type, config.basePolicy, JSON.stringify(config)],
-  );
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    current_turn_id: toOptBigInt(row.current_turn_id),
-    config: mergeConfig(row.config),
-  } as Rotation;
-}
-
-export async function updateRotationConfig(
-  rotationId: bigint,
-  config: Partial<RotationConfig>,
-): Promise<Rotation | null> {
-  const current = await getRotation(rotationId);
-  if (!current) return null;
-  const merged = mergeConfig({ ...current.config, ...config });
-  const res = await query<any>(
-    `UPDATE rotations
-        SET config = $1, type = $2, base_policy = $3, updated_at = NOW()
-      WHERE id = $4
-      RETURNING *`,
-    [JSON.stringify(merged), merged.type, merged.basePolicy, rotationId],
-  );
-  if (res.rows.length === 0) return null;
-
-  // Cancel any pending scheduled turns so the new policy picks the next singer
-  // fresh. Active turns (currently being sung) are intentionally left alone.
-  const scheduledRes = await query<{ id: string; song_request_id: string | null }>(
-    `SELECT id::text, song_request_id::text FROM rotation_turns
-      WHERE rotation_id = $1 AND status = 'scheduled'`,
-    [rotationId],
-  );
-  for (const turn of scheduledRes.rows) {
-    if (turn.song_request_id) {
+  return atomic(async () => {
+    const locked = await lockedTurn(turnId);
+    if (!locked) return null;
+    const { turn, rotation } = locked;
+    if (turn.status === 'skipped') return turn;
+    if (!['scheduled', 'active'].includes(turn.status)) return null;
+    const updated = await query(
+      `UPDATE rotation_turns SET status = 'skipped', completed_at = NOW() WHERE id = $1 RETURNING *`, [turnId]);
+    await query(`UPDATE song_requests SET status = 'pending' WHERE id = $1 AND status IN ('queued', 'singing')`, [turn.song_request_id]);
+    if (turn.status === 'scheduled') await consumeOverride(turn);
+    if (rotation.config.skipPolicy === 'move_to_end') {
+      await moveToEnd(rotation.id, turn.singer_id);
+      if (effectiveRotationType(rotation.config) === 'strict_round_robin') await query(
+        `UPDATE rotation_singers SET last_round_sang = GREATEST(COALESCE(last_round_sang, 0), $3)
+          WHERE rotation_id = $1 AND singer_id = $2`, [rotation.id, turn.singer_id, turn.round_number]);
+    } else if (rotation.config.skipPolicy === 'remove_until_reactivated') {
+      await query(`UPDATE rotation_singers SET status = 'absent' WHERE rotation_id = $1 AND singer_id = $2`, [rotation.id, turn.singer_id]);
       await query(
-        `UPDATE song_requests SET status = 'pending' WHERE id = $1 AND status = 'queued'`,
-        [BigInt(turn.song_request_id)],
-      );
+        `UPDATE manual_overrides SET status = 'cancelled' WHERE rotation_id = $1 AND singer_id = $2 AND status = 'pending'`,
+        [rotation.id, turn.singer_id]);
     }
-  }
-  if (scheduledRes.rows.length > 0) {
-    const scheduledIds = scheduledRes.rows.map((t) => BigInt(t.id));
-    await query(
-      `UPDATE rotation_turns SET status = 'skipped' WHERE rotation_id = $1 AND status = 'scheduled'`,
-      [rotationId],
-    );
-    // Clear current_turn_id if it pointed to one of the now-cancelled turns
-    await query(
-      `UPDATE rotations SET current_turn_id = NULL, updated_at = NOW()
-        WHERE id = $1 AND current_turn_id = ANY($2::bigint[])`,
-      [rotationId, scheduledIds],
-    );
-  }
+    await finishBookkeeping(rotation, turn);
+    return turnRow(updated.rows[0]);
+  });
+}
 
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    current_turn_id: toOptBigInt(row.current_turn_id),
-    config: mergeConfig(row.config),
-  } as Rotation;
+export async function createRotation(params: { name: string; config?: Partial<RotationConfig> }): Promise<Rotation> {
+  if (typeof params.name !== 'string' || !params.name.trim()) throw new RotationValidationError('name is required');
+  const config = normalizeRotationConfig(params.config);
+  const result = await query(
+    `INSERT INTO rotations (name, type, base_policy, config) VALUES ($1, $2, $3, $4) RETURNING *`,
+    [params.name.trim(), config.type, config.basePolicy, JSON.stringify(config)]);
+  return rotationRow(result.rows[0]);
+}
+
+export async function updateRotationConfig(rotationId: bigint, config: Partial<RotationConfig>): Promise<Rotation | null> {
+  return atomic(async () => {
+    const rotation = await lockRotation(rotationId);
+    if (!rotation) return null;
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw new RotationValidationError('Rotation config must be an object');
+    const merged = normalizeRotationConfig({ ...rotation.config, ...config });
+    await cancelScheduled(rotationId);
+    const result = await query(
+      `UPDATE rotations SET config = $1, type = $2, base_policy = $3, updated_at = NOW() WHERE id = $4 RETURNING *`,
+      [JSON.stringify(merged), merged.type, merged.basePolicy, rotationId]);
+    return rotationRow(result.rows[0]);
+  });
 }
 
 export async function pauseRotation(rotationId: bigint): Promise<void> {
-  await query(
-    `UPDATE rotations SET status = 'paused', updated_at = NOW() WHERE id = $1`,
-    [rotationId],
-  );
+  await query(`UPDATE rotations SET status = 'paused', updated_at = NOW() WHERE id = $1`, [rotationId]);
 }
-
 export async function resumeRotation(rotationId: bigint): Promise<void> {
-  await query(
-    `UPDATE rotations SET status = 'active', updated_at = NOW() WHERE id = $1`,
-    [rotationId],
-  );
+  await query(`UPDATE rotations SET status = 'active', updated_at = NOW() WHERE id = $1`, [rotationId]);
 }
-
 export async function listRotations(): Promise<Rotation[]> {
-  const res = await query<any>('SELECT * FROM rotations ORDER BY created_at DESC');
-  return res.rows.map((row: any) => ({
-    ...row,
-    id: toBigInt(row.id),
-    current_turn_id: toOptBigInt(row.current_turn_id),
-    config: mergeConfig(row.config),
-  }));
+  return (await query('SELECT * FROM rotations ORDER BY created_at DESC, id DESC')).rows.map(rotationRow);
 }
-
-// ---------------------------------------------------------------------------
-// CRUD — Singers
-// ---------------------------------------------------------------------------
-
 export async function createSinger(displayName: string): Promise<Singer> {
-  const res = await query<any>(
-    `INSERT INTO singers (display_name) VALUES ($1) RETURNING *`,
-    [displayName],
-  );
-  const row = res.rows[0];
-  return { ...row, id: toBigInt(row.id) } as Singer;
+  if (typeof displayName !== 'string' || !displayName.trim()) throw new RotationValidationError('displayName is required');
+  const result = await query(
+    `INSERT INTO singers (display_name, normalized_name) VALUES ($1, $2)
+     ON CONFLICT (normalized_name) DO UPDATE SET normalized_name = EXCLUDED.normalized_name RETURNING *`,
+    [displayName.trim(), normalizeSingerName(displayName)]);
+  return { ...result.rows[0], id: toBigInt(result.rows[0].id) };
 }
 
-export async function setSingerStatus(
-  singerId: bigint,
-  status: Singer['status'],
-): Promise<void> {
-  await query(`UPDATE singers SET status = $1 WHERE id = $2`, [status, singerId]);
+async function lockSingerRotations(singerId: bigint): Promise<bigint[]> {
+  const result = await query(
+    `SELECT r.id FROM rotations r JOIN rotation_singers rs ON rs.rotation_id = r.id
+      WHERE rs.singer_id = $1 ORDER BY r.id FOR UPDATE OF r`, [singerId]);
+  return result.rows.map((row) => toBigInt(row.id));
 }
 
-// ---------------------------------------------------------------------------
-// CRUD — RotationSingers
-// ---------------------------------------------------------------------------
-
-export async function addSingerToRotation(
-  rotationId: bigint,
-  singerId: bigint,
-): Promise<RotationSinger> {
-  const rotation = await getRotation(rotationId);
-  if (!rotation) throw new Error(`Rotation ${rotationId} not found`);
-
-  // Compute join round based on newSingerPlacement
-  const placement = rotation.config.newSingerPlacement;
-  let joinRound = rotation.current_round;
-  if (placement === 'next_round') {
-    joinRound = rotation.current_round + 1;
-  }
-  // next_available / end_of_current_round: join the current round
-  // (end_of_current_round: position will be after existing current-round singers)
-
-  // Get current max position
-  const posRes = await query<any>(
-    `SELECT COALESCE(MAX(position), -1) AS max_pos FROM rotation_singers WHERE rotation_id = $1`,
-    [rotationId],
-  );
-  const position = Number(posRes.rows[0].max_pos) + 1;
-
-  const res = await query<any>(
-    `INSERT INTO rotation_singers
-       (rotation_id, singer_id, position, current_round_joined)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (rotation_id, singer_id) DO UPDATE
-       SET status = 'active'
-     RETURNING *`,
-    [rotationId, singerId, position, joinRound],
-  );
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    rotation_id: toBigInt(row.rotation_id),
-    singer_id: toBigInt(row.singer_id),
-  } as RotationSinger;
-}
-
-export async function removeSingerFromRotation(
-  rotationId: bigint,
-  singerId: bigint,
-): Promise<void> {
-  await query(
-    `UPDATE rotation_singers SET status = 'inactive' WHERE rotation_id = $1 AND singer_id = $2`,
-    [rotationId, singerId],
-  );
-}
-
-export async function moveSinger(
-  rotationId: bigint,
-  singerId: bigint,
-  newPosition: number,
-): Promise<void> {
-  // Shift other singers to make room
-  await query(
-    `UPDATE rotation_singers
-        SET position = position + 1
-      WHERE rotation_id = $1 AND position >= $2 AND singer_id != $3`,
-    [rotationId, newPosition, singerId],
-  );
-  // Update existing row, or insert if singer is not yet in this rotation
-  const updated = await query<{ id: string }>(
-    `UPDATE rotation_singers SET position = $1 WHERE rotation_id = $2 AND singer_id = $3 RETURNING id`,
-    [newPosition, rotationId, singerId],
-  );
-  if (updated.rows.length === 0) {
-    const roundRes = await query<{ current_round: number }>(
-      `SELECT current_round FROM rotations WHERE id = $1`,
-      [rotationId],
-    );
-    const currentRound = roundRes.rows[0]?.current_round ?? 1;
-    await query(
-      `INSERT INTO rotation_singers (rotation_id, singer_id, status, position, current_round_joined)
-       VALUES ($1, $2, 'active', $3, $4)
-       ON CONFLICT (rotation_id, singer_id) DO UPDATE SET position = EXCLUDED.position, status = 'active'`,
-      [rotationId, singerId, newPosition, currentRound],
-    );
-  }
-}
-
-export async function reorderSingers(
-  rotationId: bigint,
-  orderedSingerIds: bigint[],
-): Promise<void> {
-  if (orderedSingerIds.length === 0) return;
-
-  const existing = await query<{ singer_id: string; position: number }>(
-    `SELECT singer_id, position
-       FROM rotation_singers
-      WHERE rotation_id = $1
-        AND status = 'active'
-      ORDER BY position`,
-    [rotationId],
-  );
-  if (existing.rows.length === 0) return;
-
-  const existingById = new Map(existing.rows.map((row) => [String(row.singer_id), row.position]));
-  const requestedIds = orderedSingerIds.map((id) => id.toString()).filter((id) => existingById.has(id));
-  if (requestedIds.length === 0) return;
-
-  const seen = new Set<string>();
-  const nextOrder = requestedIds.filter((id) => {
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
+export async function setSingerStatus(singerId: bigint, status: Singer['status']): Promise<void> {
+  if (!['active', 'inactive', 'absent', 'skipped', 'banned'].includes(status)) throw new RotationValidationError('Invalid singer status');
+  await atomic(async () => {
+    const rotations = await lockSingerRotations(singerId);
+    await query('UPDATE singers SET status = $1 WHERE id = $2', [status, singerId]);
+    if (status !== 'active') for (const id of rotations) {
+      await cancelScheduled(id, singerId);
+      await query(`UPDATE manual_overrides SET status = 'cancelled' WHERE rotation_id = $1 AND singer_id = $2 AND status = 'pending'`, [id, singerId]);
+    }
   });
-  for (const row of existing.rows) {
-    const id = String(row.singer_id);
-    if (!seen.has(id)) nextOrder.push(id);
-  }
+}
 
-  const positions = existing.rows.map((row) => Number(row.position)).sort((a, b) => a - b);
-  const TEMP_OFFSET = 1_000_000;
+export async function addSingerToRotation(rotationId: bigint, singerId: bigint): Promise<RotationSinger> {
+  return atomic(async () => {
+    const rotation = await requireRotation(rotationId);
+    const singer = await query(`SELECT status FROM singers WHERE id = $1`, [singerId]);
+    if (!singer.rows.length || singer.rows[0].status !== 'active') throw new RotationValidationError('Singer must be active');
+    const existing = await query('SELECT * FROM rotation_singers WHERE rotation_id = $1 AND singer_id = $2', [rotationId, singerId]);
+    if (existing.rows[0]?.status === 'active') return membershipRow(existing.rows[0]);
+    let round = rotation.current_round;
+    const mode = effectiveRotationType(rotation.config);
+    if (mode === 'strict_round_robin' && rotation.config.newSingerPlacement === 'next_round') round++;
+    const maximum = await query('SELECT COALESCE(MAX(position), -1) AS max_pos FROM rotation_singers WHERE rotation_id = $1', [rotationId]);
+    let position = Number(maximum.rows[0].max_pos) + 1;
+    if (mode === 'strict_round_robin' && rotation.config.newSingerPlacement === 'next_available') {
+      const current = await openTurn(rotationId);
+      const member = current && await query('SELECT position FROM rotation_singers WHERE rotation_id = $1 AND singer_id = $2', [rotationId, current.singer_id]);
+      position = member?.rows[0] ? Number(member.rows[0].position) + 1 : 0;
+      await query('UPDATE rotation_singers SET position = position + 1 WHERE rotation_id = $1 AND position >= $2', [rotationId, position]);
+    }
+    const result = await query(
+      `INSERT INTO rotation_singers (rotation_id, singer_id, position, current_round_joined) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (rotation_id, singer_id) DO UPDATE SET status = 'active', position = EXCLUDED.position,
+         current_round_joined = EXCLUDED.current_round_joined RETURNING *`, [rotationId, singerId, position, round]);
+    await cancelScheduled(rotationId);
+    return membershipRow(result.rows[0]);
+  });
+}
 
-  await query('BEGIN');
-  try {
-    for (let i = 0; i < nextOrder.length; i++) {
-      await query(
-        `UPDATE rotation_singers
-            SET position = $1
-          WHERE rotation_id = $2
-            AND singer_id = $3`,
-        [TEMP_OFFSET + i, rotationId, nextOrder[i]],
-      );
-    }
-    for (let i = 0; i < nextOrder.length; i++) {
-      await query(
-        `UPDATE rotation_singers
-            SET position = $1
-          WHERE rotation_id = $2
-            AND singer_id = $3`,
-        [positions[i] ?? i, rotationId, nextOrder[i]],
-      );
-    }
-    await query('COMMIT');
-  } catch (e) {
-    await query('ROLLBACK');
-    throw e;
+export async function removeSingerFromRotation(rotationId: bigint, singerId: bigint): Promise<void> {
+  await setRotationSingerStatus(rotationId, singerId, 'inactive');
+}
+
+export async function setRotationSingerStatus(rotationId: bigint, singerId: bigint, status: RotationSinger['status']): Promise<void> {
+  if (!['active', 'inactive', 'absent', 'skipped'].includes(status)) throw new RotationValidationError('Invalid rotation singer status');
+  await atomic(async () => {
+    await requireRotation(rotationId);
+    if (status === 'active') { await addSingerToRotation(rotationId, singerId); return; }
+    await query('UPDATE rotation_singers SET status = $1 WHERE rotation_id = $2 AND singer_id = $3', [status, rotationId, singerId]);
+    await cancelScheduled(rotationId, singerId);
+    await query(`UPDATE manual_overrides SET status = 'cancelled' WHERE rotation_id = $1 AND singer_id = $2 AND status = 'pending'`, [rotationId, singerId]);
+  });
+}
+
+export async function moveSinger(rotationId: bigint, singerId: bigint, newPosition: number): Promise<void> {
+  if (!Number.isSafeInteger(newPosition) || newPosition < 0 || newPosition > 2147483646) {
+    throw new RotationValidationError('position must be a nonnegative integer');
   }
+  await atomic(async () => {
+    await requireRotation(rotationId);
+    const members = (await query('SELECT singer_id FROM rotation_singers WHERE rotation_id = $1 ORDER BY position, id', [rotationId])).rows;
+    if (!members.some((row) => toBigInt(row.singer_id) === singerId)) await addSingerToRotation(rotationId, singerId);
+    const ids = members.map((row) => toBigInt(row.singer_id)).filter((id) => id !== singerId);
+    ids.splice(Math.min(newPosition, ids.length), 0, singerId);
+    for (const [position, id] of ids.entries()) await query(
+      'UPDATE rotation_singers SET position = $1 WHERE rotation_id = $2 AND singer_id = $3', [position, rotationId, id]);
+    await cancelScheduled(rotationId);
+  });
+}
+
+export async function reorderSingers(rotationId: bigint, orderedSingerIds: bigint[]): Promise<void> {
+  if (!orderedSingerIds.length) return;
+  await atomic(async () => {
+    const rotation = await requireRotation(rotationId);
+    const existing = (await query(
+      `SELECT singer_id, position FROM rotation_singers WHERE rotation_id = $1 AND status = 'active' ORDER BY position, id`, [rotationId])).rows;
+    const known = new Set(existing.map((row) => toBigInt(row.singer_id)));
+    const ids = [...new Set(orderedSingerIds.filter((id) => known.has(id)))];
+    if (!ids.length) return;
+    const requested = [...ids];
+    for (const row of existing) if (!ids.includes(toBigInt(row.singer_id))) ids.push(toBigInt(row.singer_id));
+    for (const [index, id] of ids.entries()) await query(
+      'UPDATE rotation_singers SET position = $1 WHERE rotation_id = $2 AND singer_id = $3', [existing[index].position, rotationId, id]);
+    await cancelScheduled(rotationId);
+    if (rotation.config.type === 'hybrid') {
+      await query(
+        `UPDATE manual_overrides SET status = 'cancelled'
+          WHERE rotation_id = $1 AND status = 'pending' AND song_request_id IS NULL
+            AND expires_after_turn = true AND singer_id = ANY($2::bigint[])`, [rotationId, requested]);
+      const minimum = await query(
+        `SELECT COALESCE(MIN(position), 0) AS position FROM manual_overrides WHERE rotation_id = $1 AND status = 'pending'`,
+        [rotationId]);
+      let position = Number(minimum.rows[0].position) - requested.length;
+      for (const singerId of requested) await query(
+        `INSERT INTO manual_overrides (rotation_id, singer_id, position, expires_after_turn)
+         SELECT $1, s.id, $3, true FROM singers s WHERE s.id = $2 AND s.status = 'active'`,
+        [rotationId, singerId, position++]);
+    }
+  });
 }
 
 export async function insertSingerNext(rotationId: bigint, singerId: bigint): Promise<void> {
-  // Find the position right after the current active turn's singer
-  const rotation = await getRotation(rotationId);
-  let insertAt = 0;
-  if (rotation?.current_turn_id) {
-    const turnRes = await query<any>(
-      `SELECT rs.position
-         FROM rotation_turns rt
-         JOIN rotation_singers rs ON rs.singer_id = rt.singer_id AND rs.rotation_id = rt.rotation_id
-        WHERE rt.id = $1`,
-      [rotation.current_turn_id],
-    );
-    if (turnRes.rows.length > 0) {
-      insertAt = Number(turnRes.rows[0].position) + 1;
+  await atomic(async () => {
+    await requireRotation(rotationId);
+    const current = await openTurn(rotationId);
+    const members = (await query('SELECT singer_id FROM rotation_singers WHERE rotation_id = $1 ORDER BY position, id', [rotationId])).rows;
+    if (current?.singer_id !== singerId) {
+      const others = members.filter((row) => toBigInt(row.singer_id) !== singerId);
+      const index = current ? others.findIndex((row) => toBigInt(row.singer_id) === current.singer_id) : -1;
+      await moveSinger(rotationId, singerId, index + 1);
     }
-  }
-  await moveSinger(rotationId, singerId, insertAt);
+    const override = await addManualOverride({ rotationId, singerId, expiresAfterTurn: true });
+    await query(
+      `UPDATE manual_overrides SET position =
+        (SELECT COALESCE(MIN(position), 0) - 1 FROM manual_overrides
+          WHERE rotation_id = $1 AND status = 'pending' AND id <> $2)
+        WHERE id = $2`, [rotationId, override.id]);
+  });
 }
-
-export async function setRotationSingerStatus(
-  rotationId: bigint,
-  singerId: bigint,
-  status: RotationSinger['status'],
-): Promise<void> {
-  await query(
-    `UPDATE rotation_singers SET status = $1 WHERE rotation_id = $2 AND singer_id = $3`,
-    [status, rotationId, singerId],
-  );
-}
-
-// ---------------------------------------------------------------------------
-// CRUD — Song Requests
-// ---------------------------------------------------------------------------
 
 export async function addSongRequest(params: {
-  singerId: bigint;
-  title: string;
-  artist?: string;
-  trackId?: number;
-  priority?: number;
-  participantSingerIds?: bigint[];
+  singerId: bigint; title: string; artist?: string; trackId?: number; priority?: number; participantSingerIds?: bigint[];
 }): Promise<SongRequest> {
-  const res = await query<any>(
-    `INSERT INTO song_requests
-       (singer_id, track_id, title, artist, priority, participant_singer_ids)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [
-      params.singerId,
-      params.trackId ?? null,
-      params.title,
-      params.artist ?? null,
-      params.priority ?? 0,
-      params.participantSingerIds ?? [],
-    ],
-  );
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    singer_id: toBigInt(row.singer_id),
-    participant_singer_ids: (row.participant_singer_ids ?? []).map(toBigInt),
-  } as SongRequest;
+  if (typeof params.title !== 'string' || !params.title.trim()) throw new RotationValidationError('title is required');
+  if (params.priority !== undefined && (!Number.isInteger(params.priority) || params.priority < -2147483648 || params.priority > 2147483647)) {
+    throw new RotationValidationError('priority must be a 32-bit integer');
+  }
+  return atomic(async () => {
+    const rotations = await lockSingerRotations(params.singerId);
+    const singer = await query('SELECT status FROM singers WHERE id = $1 FOR UPDATE', [params.singerId]);
+    if (!singer.rows.length || singer.rows[0].status !== 'active') throw new RotationValidationError('Singer must be active');
+    const count = await query(`SELECT COUNT(*) AS c FROM song_requests WHERE singer_id = $1 AND status IN ('pending', 'queued', 'singing')`, [params.singerId]);
+    for (const id of rotations) {
+      const rotation = await getRotation(id);
+      if (!rotation || rotation.status === 'closed') continue;
+      const limit = rotation.config.allowSingerMultipleSongsInQueue ? rotation.config.maxPendingSongsPerSinger : 1;
+      if (Number(count.rows[0].c) >= limit) throw new RotationValidationError(`Singer may have at most ${limit} pending songs`);
+    }
+    const result = await query(
+      `INSERT INTO song_requests (singer_id, track_id, title, artist, priority, participant_singer_ids)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [params.singerId, params.trackId ?? null, params.title.trim(), params.artist ?? null, params.priority ?? 0,
+        [...new Set(params.participantSingerIds ?? [])]]);
+    const row = result.rows[0];
+    return { ...row, id: toBigInt(row.id), singer_id: toBigInt(row.singer_id), participant_singer_ids: row.participant_singer_ids.map(toBigInt) };
+  });
 }
 
 export async function removeSongRequest(songRequestId: bigint): Promise<void> {
-  await query(
-    `UPDATE song_requests SET status = 'removed' WHERE id = $1 AND status IN ('pending','queued')`,
-    [songRequestId],
-  );
+  await atomic(async () => {
+    const song = await query('SELECT singer_id FROM song_requests WHERE id = $1', [songRequestId]);
+    if (!song.rows.length) return;
+    const rotations = await lockSingerRotations(toBigInt(song.rows[0].singer_id));
+    const removed = await query(`UPDATE song_requests SET status = 'removed' WHERE id = $1 AND status IN ('pending', 'queued') RETURNING id`, [songRequestId]);
+    if (!removed.rows.length) return;
+    for (const id of rotations) {
+      const turn = await openTurn(id);
+      if (turn?.status === 'scheduled' && turn.song_request_id === songRequestId) await cancelScheduled(id);
+    }
+    await query(`UPDATE manual_overrides SET status = 'cancelled' WHERE song_request_id = $1 AND status = 'pending'`, [songRequestId]);
+  });
 }
 
-// ---------------------------------------------------------------------------
-// Manual Overrides
-// ---------------------------------------------------------------------------
-
 export async function addManualOverride(params: {
-  rotationId: bigint;
-  singerId: bigint;
-  songRequestId?: bigint;
-  expiresAfterTurn?: boolean;
+  rotationId: bigint; singerId: bigint; songRequestId?: bigint; expiresAfterTurn?: boolean;
 }): Promise<ManualOverride> {
-  // Get next position
-  const posRes = await query<any>(
-    `SELECT COALESCE(MAX(position), -1) AS max_pos FROM manual_overrides WHERE rotation_id = $1 AND status = 'pending'`,
-    [params.rotationId],
-  );
-  const position = Number(posRes.rows[0].max_pos) + 1;
-
-  const res = await query<any>(
-    `INSERT INTO manual_overrides
-       (rotation_id, singer_id, song_request_id, position, expires_after_turn)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING *`,
-    [
-      params.rotationId,
-      params.singerId,
-      params.songRequestId ?? null,
-      position,
-      params.expiresAfterTurn ?? true,
-    ],
-  );
-  const row = res.rows[0];
-  return {
-    ...row,
-    id: toBigInt(row.id),
-    rotation_id: toBigInt(row.rotation_id),
-    singer_id: toBigInt(row.singer_id),
-    song_request_id: toOptBigInt(row.song_request_id),
-  } as ManualOverride;
+  if (params.expiresAfterTurn !== undefined && typeof params.expiresAfterTurn !== 'boolean') {
+    throw new RotationValidationError('expiresAfterTurn must be a boolean');
+  }
+  return atomic(async () => {
+    await requireRotation(params.rotationId);
+    const singer = await query(
+      `SELECT 1 FROM rotation_singers rs JOIN singers s ON s.id = rs.singer_id
+        WHERE rs.rotation_id = $1 AND rs.singer_id = $2 AND rs.status = 'active' AND s.status = 'active'`,
+      [params.rotationId, params.singerId]);
+    if (!singer.rows.length) throw new RotationValidationError('Override singer must be active in this rotation');
+    if (params.songRequestId) {
+      const song = await query(`SELECT status FROM song_requests WHERE id = $1 AND singer_id = $2`, [params.songRequestId, params.singerId]);
+      const scheduled = await openTurn(params.rotationId);
+      if (!song.rows.length || (song.rows[0].status !== 'pending' &&
+          !(song.rows[0].status === 'queued' && scheduled?.status === 'scheduled' && scheduled.song_request_id === params.songRequestId))) {
+        throw new RotationValidationError('Override song must be pending and belong to its singer');
+      }
+    }
+    await cancelScheduled(params.rotationId);
+    const result = await query(
+      `INSERT INTO manual_overrides (rotation_id, singer_id, song_request_id, position, expires_after_turn)
+       VALUES ($1, $2, $3, (SELECT COALESCE(MAX(position), -1) + 1 FROM manual_overrides WHERE rotation_id = $1 AND status = 'pending'), $4)
+       RETURNING *`, [params.rotationId, params.singerId, params.songRequestId ?? null, params.expiresAfterTurn ?? true]);
+    return overrideRow(result.rows[0]);
+  });
 }
 
 export async function clearManualOverrides(rotationId: bigint): Promise<void> {
-  await query(
-    `UPDATE manual_overrides SET status = 'cancelled' WHERE rotation_id = $1 AND status = 'pending'`,
-    [rotationId],
-  );
+  await atomic(async () => {
+    await requireRotation(rotationId);
+    const current = await openTurn(rotationId);
+    if (current?.status === 'scheduled' && current.source === 'manual_override') await cancelScheduled(rotationId);
+    await query(`UPDATE manual_overrides SET status = 'cancelled' WHERE rotation_id = $1 AND status = 'pending'`, [rotationId]);
+  });
 }
 
-// ---------------------------------------------------------------------------
-// getRotationState — full snapshot for UI
-// ---------------------------------------------------------------------------
-
 export async function getRotationState(rotationId: bigint): Promise<RotationState | null> {
-  const rotation = await getRotation(rotationId);
-  if (!rotation) return null;
-
-  const singersInOrder = await getRotationSingersWithSnapshots(rotationId);
-
-  // Current active/scheduled turn
-  let currentTurn: RotationTurn | null = null;
-  if (rotation.current_turn_id) {
-    const ctRes = await query<any>('SELECT * FROM rotation_turns WHERE id = $1 LIMIT 1', [
-      rotation.current_turn_id,
-    ]);
-    if (ctRes.rows.length > 0) {
-      const r = ctRes.rows[0];
-      currentTurn = {
-        ...r,
-        id: toBigInt(r.id),
-        rotation_id: toBigInt(r.rotation_id),
-        singer_id: toBigInt(r.singer_id),
-        song_request_id: toOptBigInt(r.song_request_id),
-      };
+  return atomic(async () => {
+    const rotation = await lockRotation(rotationId);
+    if (!rotation) return null;
+    const existing = await openTurn(rotationId);
+    const currentTurn = existing?.status === 'active' || (existing && await isScheduledTurnEligible(existing)) ? existing : null;
+    const singersInOrder = await snapshots(rotationId, currentTurn ? null : existing?.song_request_id);
+    const manualOverrides = await pendingOverrides(rotationId);
+    const recent = await query(
+      `SELECT * FROM rotation_turns WHERE rotation_id = $1 AND status = 'completed'
+        ORDER BY completed_at DESC, id DESC LIMIT 10`, [rotationId]);
+    let nextTurnPreview: PolicyResult | null = null;
+    if (rotation.status === 'active') {
+      nextTurnPreview = currentTurn?.song_request_id
+        ? { singerId: currentTurn.singer_id, songRequestId: currentTurn.song_request_id }
+        : (await nextSelection(rotation, singersInOrder, manualOverrides)).result;
     }
-  }
-
-  // Recently completed turns
-  const rcRes = await query<any>(
-    `SELECT * FROM rotation_turns
-      WHERE rotation_id = $1 AND status = 'completed'
-      ORDER BY completed_at DESC NULLS LAST
-      LIMIT 10`,
-    [rotationId],
-  );
-  const recentlyCompletedTurns: RotationTurn[] = rcRes.rows.map((r: any) => ({
-    ...r,
-    id: toBigInt(r.id),
-    rotation_id: toBigInt(r.rotation_id),
-    singer_id: toBigInt(r.singer_id),
-    song_request_id: toOptBigInt(r.song_request_id),
-  }));
-
-  // Pending overrides
-  const ovRes = await query<any>(
-    `SELECT * FROM manual_overrides WHERE rotation_id = $1 AND status = 'pending' ORDER BY position ASC`,
-    [rotationId],
-  );
-  const manualOverrides: ManualOverride[] = ovRes.rows.map((r: any) => ({
-    ...r,
-    id: toBigInt(r.id),
-    rotation_id: toBigInt(r.rotation_id),
-    singer_id: toBigInt(r.singer_id),
-    song_request_id: toOptBigInt(r.song_request_id),
-  }));
-
-  // Pending songs grouped by singer
-  const pendingSongsBySinger: Record<string, SongRequestSnapshot[]> = {};
-  for (const s of singersInOrder) {
-    pendingSongsBySinger[String(s.singerId)] = s.pendingSongs;
-  }
-
-  return {
-    rotation,
-    currentTurn,
-    nextTurnPreview: null, // preview omitted to avoid side-effects; use getNextTurn
-    singersInOrder,
-    pendingSongsBySinger,
-    recentlyCompletedTurns,
-    manualOverrides,
-    currentRound: rotation.current_round,
-  };
+    return {
+      rotation, currentTurn, nextTurnPreview, singersInOrder,
+      pendingSongsBySinger: Object.fromEntries(singersInOrder.map((s) => [String(s.singerId), s.pendingSongs])),
+      recentlyCompletedTurns: recent.rows.map(turnRow), manualOverrides, currentRound: rotation.current_round,
+    };
+  });
 }
