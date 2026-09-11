@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -8,6 +9,9 @@ import React, {
 import { API_BASE, api, getWsUrl } from "../api";
 import type { OverlaySettings } from "../components/QueueOverlay";
 import { parseZipMediaRef } from "../zipMediaRef";
+import SingerAvatar, { type SingerProfile } from "../components/SingerAvatar";
+import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, playSingerMedia, prepareSingerIframe, canReportSingerTiming, restoreSingerPosition, type PlayerPlaybackState } from "../playerPlayback";
+import { createBreakMusicPlayback, shouldRunBreakMusic } from "../breakMusicPlayback";
 
 type QItem = {
   id: number | string;
@@ -29,6 +33,8 @@ type QItem = {
 
 type BreakMusicState = {
   paused: boolean;
+  pauseDuringKaraoke: boolean;
+  mutedForKaraoke: boolean;
   crossfadeSeconds: number;
   volumePercent: number;
   elapsedSec: number;
@@ -45,6 +51,7 @@ type RotationScrollerSinger = {
   displayName: string;
   position: number;
   hasQueuedSong: boolean;
+  profile: SingerProfile;
 };
 
 type PlayerBackgroundMode = "default" | "image" | "slideshow";
@@ -180,7 +187,6 @@ function formatSingerName(
   return `${parts[0]} ${parts[parts.length - 1][0]}.`;
 }
 
-const AUTOPLAY_UNMUTE_DELAY_MS = 100; // Delay before unmuting video after autoplay starts
 const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   visible: true,
   height: 90,
@@ -192,6 +198,7 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   keepRotationScrollerSingers: false,
   showRequestsUrl: true,
   showBreakMusicTrack: false,
+  showProfilePictures: true,
 };
 
 const DEFAULT_PLAYER_BACKGROUND_SETTINGS: PlayerBackgroundSettings = {
@@ -256,6 +263,10 @@ function normalizeOverlaySettings(value: unknown): OverlaySettings {
     showBreakMusicTrack: parseBoolean(
       settings.showBreakMusicTrack,
       DEFAULT_OVERLAY_SETTINGS.showBreakMusicTrack,
+    ),
+    showProfilePictures: parseBoolean(
+      settings.showProfilePictures,
+      DEFAULT_OVERLAY_SETTINGS.showProfilePictures,
     ),
   };
 }
@@ -326,13 +337,15 @@ function getBackgroundImageCss(url: string): string {
   return `linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), url("${escapedUrl}")`;
 }
 
-function renderTickerText(text: string, highlightedText: string) {
-  if (!highlightedText || !text.includes(highlightedText)) {
-    return text;
-  }
+function getSingerTickerToken(name: string | null | undefined, short = false): string {
+  if (!name) return "Anonymous";
+  return `[[SINGER:${encodeURIComponent(name)}:${short ? "1" : "0"}]]`;
+}
 
+function renderHighlightedTickerText(text: string, highlightedText: string, keyPrefix: string) {
+  if (!highlightedText || !text.includes(highlightedText)) return text;
   return text.split(highlightedText).map((part, index) => (
-    <React.Fragment key={`${index}-${part.length}`}>
+    <React.Fragment key={`${keyPrefix}-${index}-${part.length}`}>
       {index > 0 && (
         <span
           style={{
@@ -350,6 +363,46 @@ function renderTickerText(text: string, highlightedText: string) {
   ));
 }
 
+function renderTickerText(
+  text: string,
+  highlightedText: string,
+  singers: RotationScrollerSinger[],
+  showProfilePictures: boolean,
+) {
+  const profileByName = new Map(
+    singers.map((singer) => [singer.displayName.trim().toLocaleLowerCase(), singer.profile]),
+  );
+  const tokenPattern = /\[\[SINGER:([^:\]]+):([01])\]\]/g;
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      const segment = text.slice(lastIndex, match.index);
+      nodes.push(renderHighlightedTickerText(segment, highlightedText, `text-${lastIndex}`));
+    }
+    const fullName = decodeURIComponent(match[1]);
+    const displayName = formatSingerName(fullName, match[2] === "1");
+    const profile = profileByName.get(fullName.trim().toLocaleLowerCase());
+    nodes.push(
+      <span
+        key={`singer-${match.index}-${fullName}`}
+        style={{ display: "inline-flex", alignItems: "center", gap: "0.38em", verticalAlign: "middle" }}
+      >
+        {showProfilePictures && profile?.imageUrl && <SingerAvatar name={fullName} profile={profile} size="1.7em" />}
+        <span>{displayName}</span>
+      </span>,
+    );
+    lastIndex = tokenPattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(renderHighlightedTickerText(text.slice(lastIndex), highlightedText, `text-${lastIndex}`));
+  }
+  return nodes.length > 0 ? nodes : renderHighlightedTickerText(text, highlightedText, "text");
+}
+
 export default function Player() {
   const [queue, setQueue] = useState<QItem[]>([]);
   const [now, setNow] = useState<QItem | null>(null);
@@ -357,8 +410,15 @@ export default function Player() {
   const [showControls, setShowControls] = useState(false);
   const [needsUserInteraction, setNeedsUserInteraction] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isYouTube, setIsYouTube] = useState(false);
-  const [youtubeVideoId, setYoutubeVideoId] = useState<string | null>(null);
+  const youtubeVideoId = now?.external_url ? getYouTubeVideoId(now.external_url) : null;
+  const isYouTube = !!youtubeVideoId;
+  const [playerState, setPlayerState] = useState(DEFAULT_PLAYER_PLAYBACK_STATE);
+  const playerStateRef = useRef(DEFAULT_PLAYER_PLAYBACK_STATE);
+  const currentQueueIdRef = useRef<QItem["id"] | null>(null);
+  const refreshRevisionRef = useRef(0);
+  const localPlaybackRevisionRef = useRef(0);
+  const localPlayRef = useRef<(() => Promise<void>) | null>(null);
+  const singerPaused = isSingerPaused(playerState, now?.id);
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>(
     DEFAULT_OVERLAY_SETTINGS,
   );
@@ -376,6 +436,8 @@ export default function Player() {
   const [manualStop, setManualStop] = useState(false);
   const [breakMusicState, setBreakMusicState] = useState<BreakMusicState>({
     paused: false,
+    pauseDuringKaraoke: true,
+    mutedForKaraoke: false,
     crossfadeSeconds: 3,
     volumePercent: 100,
     elapsedSec: 0,
@@ -388,16 +450,14 @@ export default function Player() {
   const wsRef = useRef<WebSocket | null>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const youtubePlayerRef = useRef<YT.Player | null>(null);
+  const youtubeReadyRef = useRef(false);
   const youtubeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const youtubeFallbackInFlightRef = useRef(false);
   const youtubeFallbackAttemptedRef = useRef<Set<string>>(new Set());
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wsHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const breakTimingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const breakFadeRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const breakShouldPlayRef = useRef(false);
-  const breakTrackIdRef = useRef<number | null>(null);
-  const breakTrackSrcRef = useRef<string>("");
+  const breakPlaybackRef = useRef<ReturnType<typeof createBreakMusicPlayback> | null>(null);
   const hideSingerQueueEnabled = overlaySettings.hideSingerQueue;
   const keepRotationScrollerSingersEnabled =
     hideSingerQueueEnabled && overlaySettings.keepRotationScrollerSingers;
@@ -504,9 +564,8 @@ export default function Player() {
       if (breakTimingRef.current) {
         clearInterval(breakTimingRef.current);
       }
-      if (breakFadeRef.current) {
-        clearInterval(breakFadeRef.current);
-      }
+      breakPlaybackRef.current?.dispose();
+      breakPlaybackRef.current = null;
     };
   }, []);
 
@@ -538,16 +597,8 @@ export default function Player() {
 
   // Handle play button click
   const handlePlayClick = async () => {
-    const v = videoRef.current;
-    if (!v) return;
-
-    try {
-      await v.play();
-      setNeedsUserInteraction(false);
-      setIsPlaying(true);
-    } catch (err) {
-      console.error("Play failed:", err);
-    }
+    if (isSingerPaused(playerStateRef.current, currentQueueIdRef.current)) return;
+    await localPlayRef.current?.();
   };
 
   const renderPlayerBackground = () => {
@@ -611,17 +662,47 @@ export default function Player() {
     );
   };
 
-  // Fetch queue + determine current
+  const applyPlayerState = useCallback((value: Partial<PlayerPlaybackState>) => {
+    const state = normalizePlayerPlaybackState(value, playerStateRef.current);
+    playerStateRef.current = state;
+    setPlayerState(state);
+    setManualStop(state.manualStop);
+    if (state.queueId != null) {
+      void breakPlaybackRef.current?.prepareForKaraoke();
+    }
+    if (isSingerPaused(state, currentQueueIdRef.current)) {
+      videoRef.current?.pause();
+      if (youtubeReadyRef.current) youtubePlayerRef.current?.pauseVideo();
+    }
+  }, []);
+
+  // Load pause state with the queue so freshly bound media never starts a paused singer.
   const refresh = useCallback(async () => {
-    const [q, rotationSingers] = await Promise.all([
+    const revision = ++refreshRevisionRef.current;
+    const [q, rotationSingers, autoplaySettings, playback] = await Promise.all([
       api("/api/queue") as Promise<QItem[]>,
       api("/api/overlay/rotation-singers")
         .then((rows: RotationScrollerSinger[]) => rows)
         .catch(() => [] as RotationScrollerSinger[]),
+      api("/api/autoplay/settings") as Promise<{ enabled: boolean; delay: number; rotationAllowsAutoplay?: boolean }>,
+      api("/api/player/state") as Promise<PlayerPlaybackState>,
     ]);
+    if (revision !== refreshRevisionRef.current) return;
+    const cur = q.find((x) => x.status === "playing") || null;
+    if (!cur || String(cur.id) !== String(currentQueueIdRef.current)) {
+      videoRef.current?.pause();
+      if (youtubeReadyRef.current) youtubePlayerRef.current?.pauseVideo();
+    }
+    currentQueueIdRef.current = cur?.id ?? null;
+    applyPlayerState(playback);
+    breakPlaybackRef.current?.confirmKaraokeActive(!!cur || playback.queueId != null);
+    if (cur) {
+      void breakPlaybackRef.current?.prepareForKaraoke();
+    }
     setQueue(q);
     setRotationScrollerSingers(rotationSingers);
-    const cur = q.find((x) => x.status === "playing") || null;
+    setAutoPlay(autoplaySettings.enabled && autoplaySettings.rotationAllowsAutoplay !== false);
+    setAutoPlayDelay(autoplaySettings.delay);
     setNow((prev) => {
       // No change: nothing was playing, nothing is playing now
       if (!prev && !cur) return null;
@@ -638,13 +719,15 @@ export default function Player() {
       // that could restart the video
       return prev;
     });
-  }, []);
+  }, [applyPlayerState]);
 
   const refreshBreakMusicState = useCallback(async () => {
     try {
       const state = await api("/api/break-music/state");
       setBreakMusicState({
         paused: !!state.paused,
+        pauseDuringKaraoke: state.pauseDuringKaraoke !== false,
+        mutedForKaraoke: !!state.mutedForKaraoke,
         crossfadeSeconds:
           typeof state.crossfadeSeconds === "number"
             ? state.crossfadeSeconds
@@ -664,14 +747,6 @@ export default function Player() {
   useEffect(() => {
     refresh();
     refreshBreakMusicState();
-    // Fetch player state to initialize manualStop (handles page reload after stop was selected)
-    api("/api/player/state")
-      .then((state: { manualStop: boolean }) => {
-        setManualStop(state.manualStop);
-      })
-      .catch(() => {
-        // Use default (false) on error
-      });
   }, []);
 
   // Fetch initial overlay settings
@@ -710,24 +785,6 @@ export default function Player() {
       });
   }, []);
 
-  // Fetch initial autoplay settings
-  useEffect(() => {
-    api("/api/autoplay/settings")
-      .then((settings: { enabled: boolean; delay: number }) => {
-        setAutoPlay(settings.enabled);
-        // Only update delay if it's different from current value
-        setAutoPlayDelay((prevDelay) => {
-          if (prevDelay !== settings.delay) {
-            return settings.delay;
-          }
-          return prevDelay;
-        });
-      })
-      .catch(() => {
-        // Use defaults on error
-      });
-  }, []);
-
   // WebSocket live updates
   useEffect(() => {
     function connect() {
@@ -742,10 +799,22 @@ export default function Player() {
               msg.type === "player.updated" ||
               msg.type === "player.play" ||
               msg.type === "player.next" ||
+              msg.type === "player.pause" ||
+              msg.type === "player.resume" ||
               msg.type === "player.stop"
             ) {
+              if (msg.type === "player.pause" || msg.type === "player.resume") {
+                applyPlayerState(msg);
+              }
+              if (msg.type === "player.play" || msg.type === "player.next") {
+                void breakPlaybackRef.current?.prepareForKaraoke();
+              }
               refresh();
+              refreshBreakMusicState();
               if (msg.type === "player.stop") {
+                currentQueueIdRef.current = null;
+                videoRef.current?.pause();
+                if (youtubeReadyRef.current) youtubePlayerRef.current?.pauseVideo();
                 setManualStop(true);
               } else if (
                 msg.type === "player.play" ||
@@ -761,16 +830,14 @@ export default function Player() {
             if (msg.type === "overlay.settings") {
               const settings = normalizeOverlaySettings(msg);
               setOverlaySettings(settings);
-              if (!settings.keepRotationScrollerSingers) {
-                setRotationScrollerSingers([]);
-              } else {
+              if (settings.keepRotationScrollerSingers) {
                 refresh();
               }
             }
             // Handle autoplay settings updates
             if (msg.type === "autoplay.settings") {
               if (typeof msg.enabled === "boolean") {
-                setAutoPlay(msg.enabled);
+                setAutoPlay(msg.enabled && msg.rotationAllowsAutoplay !== false);
               }
               if (typeof msg.delay === "number") {
                 // Only update delay if it actually changed to avoid resetting countdown
@@ -806,13 +873,8 @@ export default function Player() {
         };
         wsRef.current.onopen = () => {
           console.log("WebSocket connected");
-          // Re-fetch player state on reconnect to restore manualStop
-          // (handles WS disconnect that occurred while stop was selected)
-          api("/api/player/state")
-            .then((state: { manualStop: boolean }) => {
-              setManualStop(state.manualStop);
-            })
-            .catch(() => {});
+          refresh().catch(() => {});
+          refreshBreakMusicState();
           // Start heartbeat - send a message every 45 seconds to keep connection alive
           // This is in addition to server's ping/pong mechanism
           wsHeartbeatRef.current = setInterval(() => {
@@ -833,31 +895,7 @@ export default function Player() {
       }
       wsRef.current?.close();
     };
-  }, [refresh, refreshBreakMusicState]);
-
-  useEffect(() => {
-    if (!now) {
-      setIsYouTube(false);
-      setYoutubeVideoId(null);
-      if (youtubePlayerRef.current) {
-        try {
-          youtubePlayerRef.current.stopVideo();
-        } catch (err) {
-          console.warn("Failed to stop YouTube player:", err);
-        }
-        youtubePlayerRef.current = null;
-      }
-      if (youtubeTimerRef.current) {
-        clearInterval(youtubeTimerRef.current);
-        youtubeTimerRef.current = null;
-      }
-      return;
-    }
-
-    const videoId = now.external_url ? getYouTubeVideoId(now.external_url) : null;
-    setIsYouTube(Boolean(videoId));
-    setYoutubeVideoId(videoId);
-  }, [now?.id, now?.external_url]);
+  }, [refresh, refreshBreakMusicState, applyPlayerState]);
 
   // Build the media URL - pure computation, no side effects
   const mediaSrc = useMemo(() => {
@@ -924,52 +962,69 @@ export default function Player() {
     now?.key_adjustment,
   ]);
 
-  // Load video when mediaSrc changes or YouTube video changes
+  // Source binding is independent of pause/resume; never reload to toggle playback.
   useEffect(() => {
-    // Reset states when source changes
     setNeedsUserInteraction(false);
     setIsPlaying(false);
-
-    if (isYouTube && youtubeVideoId) {
-      setIsPlaying(true);
-      return;
-    }
-
-    // Handle regular video element
     const v = videoRef.current;
-    if (!v || !mediaSrc) return;
+    if (!v || !mediaSrc || isYouTube || !now) return;
+    let disposed = false;
+    const state = playerStateRef.current;
 
     v.src = mediaSrc;
     v.load();
+    const clearRestorePosition = restoreSingerPosition(
+      v,
+      String(state.queueId) === String(now.id) ? state.positionSec : 0,
+    );
 
-    // Try to play automatically
     const playVideo = async () => {
-      try {
-        // Try with muted first (usually works)
-        v.muted = true;
-        await v.play();
-        setIsPlaying(true);
-
-        // Wait for video to actually start playing before unmuting
-        // This prevents browsers from blocking autoplay after unmute
-        await new Promise((resolve) =>
-          setTimeout(resolve, AUTOPLAY_UNMUTE_DELAY_MS),
-        );
-
-        v.muted = false;
-      } catch (err) {
-        // If even muted play fails, we need user interaction
-        v.muted = false;
-        setNeedsUserInteraction(true);
-      }
+      const revision = ++localPlaybackRevisionRef.current;
+      const result = await playSingerMedia(
+        v,
+        () => !disposed && revision === localPlaybackRevisionRef.current &&
+          String(currentQueueIdRef.current) === String(now.id),
+        () => isSingerPaused(playerStateRef.current, now.id),
+        undefined,
+        () => breakPlaybackRef.current?.prepareForKaraoke() ?? Promise.resolve(),
+      );
+      if (result === "stale") return;
+      setIsPlaying(result === "playing");
+      setNeedsUserInteraction(result === "blocked");
     };
+    localPlayRef.current = playVideo;
+    void playVideo();
+    return () => {
+      disposed = true;
+      localPlaybackRevisionRef.current += 1;
+      localPlayRef.current = null;
+      clearRestorePosition();
+      v.pause();
+    };
+  }, [mediaSrc, isYouTube, now?.id, now?.track_id]);
 
-    playVideo();
-  }, [mediaSrc, isYouTube, youtubeVideoId]);
+  useEffect(() => {
+    if (!now) return;
+    if (isYouTube) {
+      if (!youtubeReadyRef.current || !youtubePlayerRef.current) return;
+      const player = youtubePlayerRef.current;
+      void prepareSingerIframe(
+        player, now.id, () => playerStateRef.current,
+        () => youtubePlayerRef.current === player && String(currentQueueIdRef.current) === String(now.id),
+        () => breakPlaybackRef.current?.prepareForKaraoke() ?? Promise.resolve(),
+      ).catch((err) => console.error("Error controlling YouTube playback:", err));
+    } else if (singerPaused) {
+      videoRef.current?.pause();
+    } else if (videoRef.current?.paused) {
+      void localPlayRef.current?.();
+    }
+  }, [singerPaused, isYouTube, now?.id]);
 
   // Helper function to send timing updates
   const sendTimingUpdate = useCallback(
     (currentTime: number, duration: number, queueId: number | string) => {
+      if (breakPlaybackRef.current?.isPreparingForKaraoke()) return;
+      if (!canReportSingerTiming(playerStateRef.current, currentQueueIdRef.current, queueId)) return;
       if (isValidDuration(duration)) {
         api("/api/player/timing", {
           method: "POST",
@@ -1016,55 +1071,22 @@ export default function Player() {
     [now?.id, now?.external_url, refresh],
   );
 
-  const fadeBreakAudioTo = useCallback(
-    (
-      targetVolume: number,
-      durationSeconds: number,
-      onComplete?: () => void,
-    ) => {
-      const audio = breakAudioRef.current;
-      if (!audio) return;
-
-      if (breakFadeRef.current) {
-        clearInterval(breakFadeRef.current);
-        breakFadeRef.current = null;
-      }
-
-      const start = audio.volume;
-      const clampedTarget = Math.max(0, Math.min(1, targetVolume));
-      if (durationSeconds <= 0) {
-        audio.volume = clampedTarget;
-        onComplete?.();
-        return;
-      }
-
-      const steps = Math.max(1, Math.floor((durationSeconds * 1000) / 100));
-      let currentStep = 0;
-      breakFadeRef.current = setInterval(() => {
-        currentStep += 1;
-        const t = Math.min(1, currentStep / steps);
-        audio.volume = start + (clampedTarget - start) * t;
-        if (t >= 1) {
-          if (breakFadeRef.current) {
-            clearInterval(breakFadeRef.current);
-            breakFadeRef.current = null;
-          }
-          onComplete?.();
-        }
-      }, 100);
-    },
-    [],
-  );
-
   // Monitor video play/pause state and handle video end
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !now) return;
 
-    const handlePlay = () => setIsPlaying(true);
+    const handlePlay = () => {
+      if (isSingerPaused(playerStateRef.current, now.id)) {
+        v.pause();
+        return;
+      }
+      setIsPlaying(true);
+    };
     const handlePause = () => setIsPlaying(false);
     const handleEnded = () => {
       setIsPlaying(false);
+      if (isSingerPaused(playerStateRef.current, now.id)) return;
 
       // Send final timing update when video ends
       // Prioritize database duration when:
@@ -1127,6 +1149,7 @@ export default function Player() {
 
     // Send timing updates every 1 second
     const intervalId = setInterval(() => {
+      if (isSingerPaused(playerStateRef.current, now.id) || v.paused) return;
       const currentTime = v.currentTime || 0;
 
       // Prioritize database duration over video element duration when:
@@ -1176,11 +1199,15 @@ export default function Player() {
   useEffect(() => {
     if (!now || !isYouTube || !youtubeVideoId) return;
 
-    const playerId = "youtube-player-" + youtubeVideoId;
+    const playerId = `youtube-player-${now.id}-${youtubeVideoId}`;
+    let disposed = false;
+    let instance: YT.Player | null = null;
+    let initTimer: ReturnType<typeof setTimeout>;
     const initPlayer = () => {
+      if (disposed) return;
       const YT = (window as any).YT;
       if (!YT?.Player) {
-        setTimeout(initPlayer, 100);
+        initTimer = setTimeout(initPlayer, 100);
         return;
       }
 
@@ -1189,18 +1216,29 @@ export default function Player() {
       }
 
       try {
-        youtubePlayerRef.current = new YT.Player(playerId, {
+        instance = new YT.Player(playerId, {
           events: {
             onReady: (event: any) => {
-              try {
-                event.target.playVideo();
-                event.target.unMute();
-                event.target.setVolume(100);
-              } catch (err) {
-                console.error("Error starting YouTube iframe playback:", err);
+              if (disposed || String(currentQueueIdRef.current) !== String(now.id)) {
+                event.target.stopVideo();
+                return;
               }
+              youtubeReadyRef.current = true;
+              void prepareSingerIframe(
+                event.target, now.id, () => playerStateRef.current,
+                () => !disposed && String(currentQueueIdRef.current) === String(now.id),
+                () => breakPlaybackRef.current?.prepareForKaraoke() ?? Promise.resolve(),
+                true,
+              ).then(() => {
+                if (!disposed && String(currentQueueIdRef.current) === String(now.id) &&
+                    !isSingerPaused(playerStateRef.current, now.id)) {
+                  event.target.unMute();
+                  event.target.setVolume(100);
+                }
+              }).catch((err) => console.error("Error starting YouTube iframe playback:", err));
 
               youtubeTimerRef.current = setInterval(() => {
+                if (disposed || isSingerPaused(playerStateRef.current, now.id)) return;
                 try {
                   const currentTime = event.target.getCurrentTime();
                   const duration = event.target.getDuration();
@@ -1213,6 +1251,15 @@ export default function Player() {
               }, 1000);
             },
             onStateChange: (event: any) => {
+              if (disposed) return;
+              if (String(currentQueueIdRef.current) !== String(now.id) ||
+                  isSingerPaused(playerStateRef.current, now.id) ||
+                  breakPlaybackRef.current?.isPreparingForKaraoke()) {
+                if (event.data === 1) event.target.pauseVideo();
+                setIsPlaying(false);
+                return;
+              }
+              setIsPlaying(event.data === 1);
               if (event.data === 1) {
                 try {
                   if (event.target.isMuted()) {
@@ -1238,6 +1285,7 @@ export default function Player() {
               }
             },
             onError: (event: any) => {
+              if (disposed) return;
               console.error("YouTube iframe error:", {
                 code: event.data,
                 message: describeYouTubeIframeError(event.data),
@@ -1251,119 +1299,63 @@ export default function Player() {
             },
           },
         });
+        youtubePlayerRef.current = instance;
       } catch (err) {
         console.error("Failed to initialize YouTube iframe player:", err);
       }
     };
 
-    const initTimer = setTimeout(initPlayer, 500);
+    initTimer = setTimeout(initPlayer, 500);
 
     return () => {
+      disposed = true;
+      youtubeReadyRef.current = false;
       clearTimeout(initTimer);
       if (youtubeTimerRef.current) {
         clearInterval(youtubeTimerRef.current);
         youtubeTimerRef.current = null;
       }
-      if (youtubePlayerRef.current) {
+      if (instance) {
         try {
-          youtubePlayerRef.current.stopVideo();
+          instance.stopVideo();
         } catch (err) {
           console.warn("Failed to stop YouTube iframe player:", err);
         }
-        youtubePlayerRef.current = null;
+        if (youtubePlayerRef.current === instance) youtubePlayerRef.current = null;
       }
     };
   }, [
-    now,
+    now?.id,
+    now?.track_id,
     isYouTube,
     youtubeVideoId,
     sendTimingUpdate,
     fallbackYouTubeToDownloadedTrack,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const audio = breakAudioRef.current;
     if (!audio) return;
-
+    if (!breakPlaybackRef.current) {
+      breakPlaybackRef.current = createBreakMusicPlayback(audio);
+    }
     const track = breakMusicState.currentTrack;
-    const shouldPlayBreak =
-      !now && !breakMusicState.paused && !!track?.file_path;
-    const fadeDuration = Math.max(0, breakMusicState.crossfadeSeconds || 0);
-    const targetVolume = Math.max(
-      0,
-      Math.min(1, (breakMusicState.volumePercent ?? 100) / 100),
-    );
-    const trackId = track?.id ?? null;
-
-    if (!shouldPlayBreak) {
-      breakShouldPlayRef.current = false;
-      breakTrackIdRef.current = trackId;
-      // Reset the src reference so the next resume always calls audio.load() before
-      // audio.play(). Without this, browsers that suspend idle media elements would
-      // silently fail to produce audio on resume even though play() appears to succeed.
-      breakTrackSrcRef.current = "";
-      const pauseTrackId = trackId;
-      fadeBreakAudioTo(0, fadeDuration, () => {
-        if (
-          !breakShouldPlayRef.current &&
-          breakTrackIdRef.current === pauseTrackId
-        ) {
-          audio.pause();
-        }
-      });
-      return;
-    }
-
-    const src = `${API_BASE}/media/file?path=${encodeURIComponent(track.file_path)}`;
-    const elementSrc = audio.getAttribute("src") || "";
-    const srcChanged = breakTrackSrcRef.current !== src || elementSrc !== src;
-    if (srcChanged) {
-      audio.src = src;
-      audio.load();
-      breakTrackSrcRef.current = src;
-    }
-    if (
-      breakMusicState.elapsedSec > 0 &&
-      (srcChanged ||
-        Math.abs((audio.currentTime || 0) - breakMusicState.elapsedSec) > 2)
-    ) {
-      audio.currentTime = breakMusicState.elapsedSec;
-    }
-
-    const run = async () => {
-      try {
-        const shouldRestartPlayback =
-          srcChanged ||
-          audio.paused ||
-          !breakShouldPlayRef.current ||
-          breakTrackIdRef.current !== trackId;
-
-        if (shouldRestartPlayback) {
-          audio.volume = 0;
-          audio.muted = true;
-          await audio.play();
-          audio.muted = false;
-          fadeBreakAudioTo(targetVolume, fadeDuration);
-        } else if (Math.abs(audio.volume - targetVolume) > 0.01) {
-          fadeBreakAudioTo(targetVolume, Math.min(1, fadeDuration || 0.5));
-        }
-      } catch {
-        audio.muted = false;
-        // ignore autoplay block for break audio
-      }
-    };
-    breakShouldPlayRef.current = true;
-    breakTrackIdRef.current = trackId;
-    run();
+    void breakPlaybackRef.current.update({
+      ...breakMusicState,
+      src: track?.file_path ? `${API_BASE}/media/file?path=${encodeURIComponent(track.file_path)}` : "",
+      karaokeActive: !!now,
+    });
   }, [
     now,
+    playerState,
     breakMusicState.paused,
+    breakMusicState.pauseDuringKaraoke,
+    breakMusicState.mutedForKaraoke,
     breakMusicState.crossfadeSeconds,
     breakMusicState.volumePercent,
     breakMusicState.elapsedSec,
     breakMusicState.currentTrack?.id,
     breakMusicState.currentTrack?.file_path,
-    fadeBreakAudioTo,
   ]);
 
   useEffect(() => {
@@ -1371,7 +1363,11 @@ export default function Player() {
       clearInterval(breakTimingRef.current);
       breakTimingRef.current = null;
     }
-    if (now || breakMusicState.paused || !breakMusicState.currentTrack?.id)
+    if (!shouldRunBreakMusic({
+      ...breakMusicState,
+      src: breakMusicState.currentTrack?.file_path || "",
+      karaokeActive: !!now,
+    }))
       return;
 
     breakTimingRef.current = setInterval(() => {
@@ -1384,7 +1380,14 @@ export default function Player() {
         breakTimingRef.current = null;
       }
     };
-  }, [breakMusicState.currentTrack?.id, breakMusicState.paused, now]);
+  }, [
+    breakMusicState.currentTrack?.id,
+    breakMusicState.paused,
+    breakMusicState.pauseDuringKaraoke,
+    breakMusicState.mutedForKaraoke,
+    now,
+    refreshBreakMusicState,
+  ]);
 
   // Get next up singers
   const upNext = queue
@@ -1443,7 +1446,7 @@ export default function Player() {
     !now &&
     !breakMusicState.paused &&
     breakMusicState.currentTrack
-      ? `${breakMusicState.currentTrack.artist || "Unknown Artist"} — ${breakMusicState.currentTrack.title}`
+      ? `${breakMusicState.currentTrack.artist || "Unknown Artist"} - ${breakMusicState.currentTrack.title}`
       : "";
   const breakMusicTickerText = breakMusicTrackText
     ? `Now Playing: ${breakMusicTrackText}`
@@ -1455,8 +1458,8 @@ export default function Player() {
       .slice(0, 8)
       .map((singer, idx) =>
         singer.hasQueuedSong
-          ? `${idx + 1}. ${singer.displayName}`
-          : `${idx + 1}. ${singer.displayName} (waiting)`,
+          ? `${idx + 1}. ${getSingerTickerToken(singer.displayName)}`
+          : `${idx + 1}. ${getSingerTickerToken(singer.displayName)} (waiting)`,
       )
       .join(" • ");
     // If nothing is playing
@@ -1487,7 +1490,7 @@ export default function Player() {
           : upNext
               .slice(0, 5)
               .map((item, idx) => {
-                const singer = formatSingerName(item.requested_by, true);
+                const singer = getSingerTickerToken(item.requested_by, true);
                 return `${idx + 1}. ${singer}`;
               })
               .join(" • ");
@@ -1511,10 +1514,10 @@ export default function Player() {
     // Current singer is playing - always show who is singing
     const current = hideSingerQueueEnabled
       ? now.requested_by
-        ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)}`
+        ? `🎤 NOW SINGING: ${getSingerTickerToken(now.requested_by)}`
         : `🎤 NOW PLAYING`
       : now.requested_by
-        ? `🎤 NOW SINGING: ${formatSingerName(now.requested_by)}: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
+        ? `🎤 NOW SINGING: ${getSingerTickerToken(now.requested_by)}: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
         : `🎤 NOW PLAYING: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`;
 
     // Build queue list
@@ -1524,7 +1527,7 @@ export default function Player() {
         : upNext
             .slice(0, 5)
             .map((item, idx) => {
-              const singer = formatSingerName(item.requested_by, true);
+              const singer = getSingerTickerToken(item.requested_by, true);
               return `${idx + 1}. ${singer}`;
             })
             .join(" • ");
@@ -1657,7 +1660,7 @@ export default function Player() {
                   letterSpacing: "0.5px",
                 }}
               >
-                {renderTickerText(tickerText, breakMusicTrackText)}
+                {renderTickerText(tickerText, breakMusicTrackText, rotationScrollerSingers, overlaySettings.showProfilePictures)}
               </div>
             </div>
           )}
@@ -1964,10 +1967,10 @@ export default function Player() {
         {renderPlayerBackground()}
         {isYouTube && youtubeVideoId ? (
           <iframe
-            key={youtubeVideoId}
-            id={`youtube-player-${youtubeVideoId}`}
+            key={`${now.id}-${youtubeVideoId}`}
+            id={`youtube-player-${now.id}-${youtubeVideoId}`}
             ref={iframeRef}
-            src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=1&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&widget_referrer=${encodeURIComponent(window.location.href)}`}
+            src={`https://www.youtube.com/embed/${youtubeVideoId}?autoplay=0&mute=1&controls=0&showinfo=0&rel=0&modestbranding=1&fs=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&widget_referrer=${encodeURIComponent(window.location.href)}`}
             referrerPolicy="strict-origin-when-cross-origin"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
             allowFullScreen
@@ -1984,7 +1987,6 @@ export default function Player() {
         ) : (
           <video
             ref={videoRef}
-            autoPlay
             playsInline
             onError={() => {
               if (now?.external_url && getYouTubeVideoId(now.external_url)) {
@@ -2004,7 +2006,7 @@ export default function Player() {
         )}
 
         {/* Play button overlay when autoplay is blocked (only for video element) */}
-        {needsUserInteraction && !isPlaying && (
+        {needsUserInteraction && !isPlaying && !singerPaused && (
           <div className="play-button-overlay" onClick={handlePlayClick}>
             <div className="play-icon" />
           </div>

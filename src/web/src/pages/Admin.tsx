@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, API_BASE } from "../api";
 import { useAuth } from "../auth-context";
 import { parseBooleanSetting } from "../utils/settings";
-import { clearStoredSessionToken, readStoredSessionToken, writeStoredSessionToken } from "../session-token";
 
 type LibraryParseMode =
   | 'discid-artist-title'
@@ -347,7 +346,6 @@ export default function Admin() {
 
         if (result.ok && result.sessionToken) {
           auth.setSessionToken(result.sessionToken);
-          writeStoredSessionToken(result.sessionToken);
           auth.setIsLoggedIn(true);
           auth.setRole(result.role || 'admin');
           auth.setIsDefaultPassword(result.isDefaultPassword || false);
@@ -491,36 +489,6 @@ export default function Admin() {
     `;
 
     refreshLibs();
-
-    // Check if we have a stored session token and validate it.
-    // The localStorage value is written before this effect by the OIDC session handler in main.tsx.
-    const storedSessionToken = readStoredSessionToken();
-    if (storedSessionToken) {
-      auth.setSessionToken(storedSessionToken);
-      api("/api/auth/validate", {
-        headers: { "x-session-token": storedSessionToken },
-      })
-        .then((result) => {
-          if (result.valid) {
-            auth.setIsLoggedIn(true);
-            auth.setRole(result.role || 'admin');
-            auth.setProfile({
-              username: result.username || "",
-              displayName: result.displayName || "",
-              picture: result.picture || "",
-            });
-          } else {
-            auth.setIsLoggedIn(false);
-            auth.clearProfile();
-            clearStoredSessionToken();
-          }
-        })
-        .catch(() => {
-          auth.setIsLoggedIn(false);
-          auth.clearProfile();
-          clearStoredSessionToken();
-        });
-    }
 
     // Show OIDC error from URL param if present
     const params = new URLSearchParams(window.location.search);
@@ -1933,11 +1901,6 @@ export default function Admin() {
             {renderStatusMessage(banner)}
           </div>
         )}
-
-        <div className="header">
-          <h1 className="header-title">Admin Dashboard</h1>
-          <p className="header-subtitle">Manage your karaoke system settings and media libraries</p>
-        </div>
 
         {! auth.isLoggedIn ?  (
           <div className="card login-card">

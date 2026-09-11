@@ -3,6 +3,7 @@
 // done-song count in the queue table.
 
 import { query } from './db.js';
+import type { PoolClient } from 'pg';
 
 /**
  * Recalculate and persist singer stats (total_songs_sung, last_sang_at) for
@@ -15,14 +16,15 @@ import { query } from './db.js';
  * Edge case: when a singer has no done songs (e.g. all songs restored to
  * queued), total_songs_sung will be set to 0 and last_sang_at will be NULL.
  */
-export async function recalculateSingerStats(singerId: string): Promise<void> {
-  const countRes = await query<{ cnt: number }>(
+export async function recalculateSingerStats(singerId: string, client?: PoolClient): Promise<void> {
+  const runQuery = client ? client.query.bind(client) : query;
+  const countRes = await runQuery<{ cnt: number }>(
     `SELECT COUNT(*)::int AS cnt FROM queue WHERE singer_id = $1 AND status = 'done'`,
     [singerId],
   );
   const totalSungCount = countRes.rows[0]?.cnt ?? 0;
 
-  await query(
+  await runQuery(
     `UPDATE singers
         SET total_songs_sung = $1,
             last_sang_at = (
@@ -35,7 +37,7 @@ export async function recalculateSingerStats(singerId: string): Promise<void> {
     [totalSungCount, singerId],
   );
 
-  await query(
+  await runQuery(
     `UPDATE rotation_singers rs
         SET total_songs_sung = $1,
             last_sang_at = (

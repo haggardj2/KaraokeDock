@@ -19,6 +19,7 @@ export type OverlaySettings = {
   keepRotationScrollerSingers: boolean
   showRequestsUrl: boolean
   showBreakMusicTrack: boolean
+  showProfilePictures: boolean
 }
 
 export const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
@@ -31,7 +32,8 @@ export const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   hideSingerQueue: false,
   keepRotationScrollerSingers: false,
   showRequestsUrl: true,
-  showBreakMusicTrack: false
+  showBreakMusicTrack: false,
+  showProfilePictures: true
 }
 
 export default function QueueOverlay({

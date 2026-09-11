@@ -1,0 +1,61 @@
+# Root build context, including builds using dev/Dockerfile.
+# Component-local builds use the .dockerignore in that component.
+.git
+# The root image only builds src/web and src/server.
+Gateway
+Station
+docs
+dev
+**/node_modules
+**/dist
+**/build
+**/out
+**/.build
+**/release
+**/*.tsbuildinfo
+
+# Generated web JavaScript must not shadow the TypeScript source in Vite.
+src/web/src/**/*.js
+src/web/src/**/*.js.map
+src/web/src/**/*.d.ts.map
+
+# Local configuration, data, and media
+**/.env
+**/.env.*
+**/*.log
+**/logs
+**/*.pid
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.db
+**/*.db-*
+db
+media
+
+# Test artifacts and local caches (keep test source and fixtures)
+**/coverage
+**/.nyc_output
+**/test-results
+**/playwright-report
+**/blob-report
+**/junit*.xml
+**/coverage-final.json
+**/*.lcov
+**/.cache
+**/.vite
+**/.fallow
+**/.idea
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+**/*~
+
+# Desktop packages
+**/*.AppImage
+**/*.snap
+**/*.flatpak
+**/*.deb
+**/*.rpm

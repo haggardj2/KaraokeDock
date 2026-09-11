@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:session": "node --experimental-strip-types --test tests/session-token.test.mjs",
     "preview": "vite preview --port 5173 --strictPort",
     "start": "node server.js"
   },
   "dependencies": {
+    "croppie": "2.6.5",
     "express": "^5.2.1",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.6",
@@ -17,6 +19,7 @@
     "react-router-dom": "^7.15.1"
   },
   "devDependencies": {
+    "@types/croppie": "^2.6.4",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",

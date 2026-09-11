@@ -1,0 +1,32 @@
+# Paths are relative to the src/web build context.
+.git
+**/node_modules
+**/dist
+**/build
+**/out
+**/*.tsbuildinfo
+
+# Keep server.js and inject-config.sh; only src contains generated JavaScript.
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts.map
+
+**/.env
+**/.env.*
+**/*.log
+**/logs
+**/*.pid
+**/coverage
+**/.nyc_output
+**/test-results
+**/playwright-report
+**/blob-report
+**/.cache
+**/.vite
+**/.fallow
+**/.idea
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+**/*~

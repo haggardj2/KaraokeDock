@@ -6,6 +6,8 @@ declare namespace YT {
     destroy(): void;
     stopVideo(): void;
     pauseVideo(): void;
+    playVideo(): void;
+    seekTo(seconds: number, allowSeekAhead: boolean): void;
     isMuted(): boolean;
     unMute(): void;
     setVolume(vol: number): void;

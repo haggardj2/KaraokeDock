@@ -1,0 +1,37 @@
+# Paths are relative to the src/server build context.
+.git
+**/node_modules
+**/dist
+**/build
+**/out
+**/*.tsbuildinfo
+
+# Local configuration and runtime data
+**/.env
+**/.env.*
+**/*.log
+**/logs
+**/*.pid
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.db
+**/*.db-*
+db
+media
+
+# Keep migrations, scripts, and test sources.
+**/coverage
+**/.nyc_output
+**/test-results
+**/playwright-report
+**/blob-report
+**/.cache
+**/.fallow
+**/.idea
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+**/*~

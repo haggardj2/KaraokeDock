@@ -5,18 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Karaoke Requests</title>
     <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="stylesheet" href="/vendor/croppie/croppie.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="requests-closed">
     <main class="requests-page">
       <div class="top-actions">
-        <button id="profileButton" class="profile-button" type="button">👤 <span id="profileButtonName">Profile</span></button>
+        <button id="profileButton" class="profile-button" type="button" aria-label="Profile menu" aria-expanded="false" aria-controls="profileMenu">
+          <span id="profileButtonIcon" aria-hidden="true">?</span>
+        </button>
         <div id="profileMenu" class="profile-menu" hidden>
+          <button id="manageHistoryButton" type="button">Manage History</button>
+          <button id="profileImageButton" type="button">Manage Profile Picture</button>
           <button id="editNameButton" type="button">Edit Name</button>
-          <button id="exportHistoryButton" type="button">Export History</button>
-          <button id="importHistoryButton" type="button">Import History</button>
           <button id="logoutButton" type="button">Logout</button>
-          <input id="historyImportInput" type="file" accept=".kd,.json,application/json" hidden />
         </div>
       </div>
       <section class="container">
@@ -92,6 +94,39 @@
       </div>
     </dialog>
 
+    <dialog id="profileImageDialog" class="app-dialog profile-image-dialog" aria-labelledby="profileImageTitle">
+      <div class="dialog-header">
+        <h2 id="profileImageTitle">Profile Picture</h2>
+        <button id="closeProfileImageDialog" class="secondary" type="button">Cancel</button>
+      </div>
+      <div class="dialog-body profile-image-editor">
+        <p id="profileImageStatus" class="muted" role="status">Choose an image to crop.</p>
+        <div id="profileImagePreview" class="profile-image-preview" hidden></div>
+        <input id="profileImageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+        <div class="profile-image-actions">
+          <button id="uploadProfileImageButton" class="primary" type="button">Upload Image</button>
+          <button id="removeProfileImageButton" class="secondary danger" type="button" hidden>Remove Image</button>
+        </div>
+        <button id="saveProfileCropButton" class="primary" type="button" disabled>Save Crop</button>
+      </div>
+    </dialog>
+
+    <dialog id="manageHistoryDialog" class="app-dialog" aria-labelledby="manageHistoryTitle">
+      <div class="dialog-header">
+        <h2 id="manageHistoryTitle">Manage History</h2>
+        <button id="closeManageHistoryDialog" class="secondary" type="button">Close</button>
+      </div>
+      <div class="dialog-body">
+        <p class="muted">Import or export your song history and profile picture as a KaraokeDock .kd file.</p>
+        <div class="dialog-actions">
+          <button id="exportHistoryButton" class="primary" type="button">Export History</button>
+          <button id="importHistoryButton" class="secondary" type="button">Import History</button>
+        </div>
+        <input id="historyImportInput" type="file" accept=".kd,.json,application/json" hidden />
+        <p id="manageHistoryStatus" class="muted" role="status"></p>
+      </div>
+    </dialog>
+
     <dialog id="queueDialog" class="app-dialog">
       <div class="dialog-header">
         <h2>My Queue</h2>
@@ -138,6 +173,7 @@
       <div id="optionsDialogBody" class="dialog-body"></div>
     </dialog>
 
+    <script src="/vendor/croppie/croppie.js" defer></script>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

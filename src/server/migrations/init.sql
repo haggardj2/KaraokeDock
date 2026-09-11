@@ -160,7 +160,9 @@ CREATE TABLE IF NOT EXISTS queue (
   key_adjustment INT DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at TIMESTAMPTZ,
-  finished_at TIMESTAMPTZ
+  finished_at TIMESTAMPTZ,
+  fifo_order_at TIMESTAMPTZ,
+  fifo_order_id BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_queue_status_pos ON queue(status, position);
@@ -309,6 +311,20 @@ CREATE TABLE IF NOT EXISTS singers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_singers_status ON singers(status);
+
+ALTER TABLE singers
+  ADD COLUMN IF NOT EXISTS profile_image_source TEXT,
+  ADD COLUMN IF NOT EXISTS profile_image_url TEXT,
+  ADD COLUMN IF NOT EXISTS profile_image_mime TEXT,
+  ADD COLUMN IF NOT EXISTS profile_image_data BYTEA,
+  ADD COLUMN IF NOT EXISTS profile_image_focus_x REAL NOT NULL DEFAULT 50,
+  ADD COLUMN IF NOT EXISTS profile_image_focus_y REAL NOT NULL DEFAULT 50,
+  ADD COLUMN IF NOT EXISTS profile_image_crop JSONB,
+  ADD COLUMN IF NOT EXISTS profile_image_admin_override BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS profile_image_updated_at TIMESTAMPTZ;
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS singer_id BIGINT REFERENCES singers(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_singer_id ON users(singer_id) WHERE singer_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS song_requests (
   id                    BIGSERIAL PRIMARY KEY,

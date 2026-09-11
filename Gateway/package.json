@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "dev": "node scripts/build-croppie.mjs && tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json && node scripts/build-croppie.mjs",
     "start": "node dist/index.js"
   },
   "dependencies": {
@@ -13,6 +13,7 @@
     "better-sqlite3": "^12.5.0",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",
+    "croppie": "2.6.5",
     "express": "^5.2.1",
     "helmet": "^8.2.0"
   },

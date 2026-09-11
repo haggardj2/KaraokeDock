@@ -155,3 +155,44 @@ or:
 - `PATCH /api/my-queue/reorder`
 - `DELETE /api/my-queue/:id`
 - `GET /api/requests/:id`
+
+## Singer profiles and history
+
+The round avatar opens a menu with **Manage History**, **Manage Profile Picture**,
+**Edit Name**, and **Logout**. Manage History contains the `.kd` import/export
+controls. Profile pictures use a draggable circular Croppie viewport and zoom
+control; only **Save Crop** writes changes. **Cancel** discards image selection,
+crop, and staged removal. Uploads are resized in the browser to at most 1600 pixels
+on their longest side and 2 MiB before saving (JPEG, or PNG retaining transparency).
+
+- `GET /api/singers/self/profile?name=Alex+L&singerUuid=<uuid>`
+- `POST /api/singers/self/profile/image?name=Alex+L&singerUuid=<uuid>` — raw PNG,
+  JPEG, WebP, or GIF, at most 2 MiB. Replacing an image resets crop and legacy focus.
+- `PATCH /api/singers/self/profile/focus` — JSON body with `name`, `singerUuid`,
+  optional `focusX`/`focusY`, and optional `crop`.
+- `DELETE /api/singers/self/profile/image?name=Alex+L&singerUuid=<uuid>` — clears
+  image and crop, retaining a timestamped tombstone for Station synchronization.
+- `GET /api/history/self/export` and `POST /api/history/self/import` include profile
+  images and crop metadata in version 2 `.kd` files.
+- `GET /api/station/singer-profiles` and
+  `GET /api/station/singer-profiles/:singerUuid` provide profiles and tombstones
+  with image data for token-authenticated Station synchronization. The list accepts
+  `updatedAfter`, `afterSingerUuid`, and `limit` (maximum 10).
+
+`profile.crop` is optional `{ "x": 10, "y": 20, "width": 50, "height": 60 }`,
+where each value is a percentage of the original image's natural dimensions.
+Coordinates must be nonnegative, dimensions positive, and the rectangle must
+remain within the image. Invalid rectangles return HTTP 400. Omitted crop on a
+focus PATCH retains the previous rectangle; explicit `crop: null` is rejected.
+Uploads and image removal reset the rectangle. Legacy
+`focusX`/`focusY` remain supported. Croppie's natural-pixel `get().points` are
+converted to these percentages; existing provider images never use canvas output.
+Imported OIDC images retain valid HTTPS URLs (at most 2048 characters, without
+credentials); invalid URLs are rejected rather than silently clearing the image.
+
+Croppie is pinned in npm and served locally at `/vendor/croppie/`. `npm run build`
+and `npm run dev` generate a local JS copy preserving the upstream license.
+The small, checked build patch makes Croppie 2.6.5 honor `enableCrossOrigin: false`
+(upstream otherwise forces anonymous CORS). The editor disables canvas and EXIF
+processing, so provider images without CORS headers can still be positioned.
+No CDN or image proxy is used.

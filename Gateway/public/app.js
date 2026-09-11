@@ -1,8 +1,13 @@
 const singerNameInput = document.querySelector('#singerName');
 const topActions = document.querySelector('.top-actions');
 const profileButton = document.querySelector('#profileButton');
-const profileButtonName = document.querySelector('#profileButtonName');
+const profileButtonIcon = document.querySelector('#profileButtonIcon');
 const profileMenu = document.querySelector('#profileMenu');
+const profileImageButton = document.querySelector('#profileImageButton');
+const manageHistoryButton = document.querySelector('#manageHistoryButton');
+const manageHistoryDialog = document.querySelector('#manageHistoryDialog');
+const closeManageHistoryDialog = document.querySelector('#closeManageHistoryDialog');
+const manageHistoryStatus = document.querySelector('#manageHistoryStatus');
 const editNameButton = document.querySelector('#editNameButton');
 const logoutButton = document.querySelector('#logoutButton');
 const searchInput = document.querySelector('#searchInput');
@@ -50,6 +55,14 @@ const closeOptionsDialog = document.querySelector('#closeOptionsDialog');
 const exportHistoryButton = document.querySelector('#exportHistoryButton');
 const importHistoryButton = document.querySelector('#importHistoryButton');
 const historyImportInput = document.querySelector('#historyImportInput');
+const profileImageDialog = document.querySelector('#profileImageDialog');
+const closeProfileImageDialog = document.querySelector('#closeProfileImageDialog');
+const profileImagePreview = document.querySelector('#profileImagePreview');
+const profileImageInput = document.querySelector('#profileImageInput');
+const uploadProfileImageButton = document.querySelector('#uploadProfileImageButton');
+const removeProfileImageButton = document.querySelector('#removeProfileImageButton');
+const saveProfileCropButton = document.querySelector('#saveProfileCropButton');
+const profileImageStatus = document.querySelector('#profileImageStatus');
 
 const singerUuidKey = 'karaokedock.gateway.singerUuid';
 const singerNameKey = 'karaokedock.gateway.singerName';
@@ -62,6 +75,13 @@ let currentArtistPrefix = '#';
 let currentSongPrefix = '#';
 let artistListScrollY = 0;
 let activeVersionLyricsTrack = null;
+let singerProfile = null;
+let profileCropper = null;
+let profileDraft = null;
+let profileEditorGeneration = 0;
+let profileEditorLoading = false;
+let profileEditorSaving = false;
+let profileResizeTimer = null;
 let publicSettings = {
   localEnabled: true,
   externalEnabled: true,
@@ -155,12 +175,327 @@ function saveSingerName(name) {
   singerNameInput.value = trimmed;
   localStorage.setItem(singerNameKey, trimmed);
   updateProfileButton();
+  loadSingerProfile().catch(() => {});
   refreshQueue().catch(() => {});
   return true;
 }
 
 function updateProfileButton() {
-  profileButtonName.textContent = singerName() || 'Profile';
+  profileButton.setAttribute('aria-label', `${singerName() || 'Singer'}: profile menu`);
+  renderSingerProfile();
+}
+
+function singerInitials() {
+  return singerName().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => [...part][0]).join('').toUpperCase() || '?';
+}
+
+function renderSingerProfile() {
+  const profile = singerProfile?.profile;
+  const imageUrl = profile?.imageUrl || null;
+  profileButtonIcon.replaceChildren();
+  if (imageUrl) {
+    const buttonImage = document.createElement('img');
+    buttonImage.className = 'profile-button-avatar';
+    buttonImage.src = imageUrl;
+    buttonImage.alt = '';
+    buttonImage.style.objectPosition = `${profile.focusX}% ${profile.focusY}%`;
+    if (profile.crop) {
+      const { x, y, width, height } = profile.crop;
+      Object.assign(buttonImage.style, {
+        position: 'absolute',
+        left: `${-100 * x / width}%`,
+        top: `${-100 * y / height}%`,
+        width: `${10000 / width}%`,
+        height: `${10000 / height}%`,
+        maxWidth: 'none',
+        objectFit: 'fill',
+      });
+    }
+    buttonImage.addEventListener('error', () => {
+      if (buttonImage.parentNode === profileButtonIcon) profileButtonIcon.textContent = singerInitials();
+    });
+    profileButtonIcon.append(buttonImage);
+  } else {
+    profileButtonIcon.textContent = singerInitials();
+  }
+}
+
+async function loadSingerProfile() {
+  const name = singerName();
+  if (!validateSingerName(name).valid) {
+    singerProfile = null;
+    renderSingerProfile();
+    return;
+  }
+  const params = new URLSearchParams({ name, singerUuid: getSingerUuid() });
+  const response = await fetch(`/api/singers/self/profile?${params.toString()}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Could not load profile image');
+  const data = await response.json();
+  if (name !== singerName() || params.get('singerUuid') !== getSingerUuid()) return;
+  singerProfile = data;
+  renderSingerProfile();
+}
+
+function loadProfileImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Could not load this image. Choose another image or try again.'));
+    image.src = url;
+  });
+}
+
+function profileEditorError(error) {
+  return error instanceof Error ? error.message : 'Could not load this image. Choose another image or try again.';
+}
+
+async function prepareProfileUpload(file) {
+  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) throw new Error('Choose a PNG, JPEG, WebP, or GIF image.');
+  if (file.size > 30 * 1024 * 1024) throw new Error('Choose an image smaller than 30 MiB.');
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await loadProfileImage(url);
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+    let width = Math.max(1, Math.round(image.naturalWidth * scale));
+    let height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+    for (let attempt = 0; attempt < 8; attempt++) {
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Image resizing is unavailable in this browser.');
+      if (mime === 'image/jpeg') {
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, width, height);
+      }
+      context.drawImage(image, 0, 0, width, height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, mime, 0.88));
+      if (!blob) throw new Error('Could not prepare this image.');
+      if (blob.size <= 2 * 1024 * 1024) return { blob, width, height };
+      width = Math.max(1, Math.floor(width * 0.8));
+      height = Math.max(1, Math.floor(height * 0.8));
+    }
+    throw new Error('Could not resize this image within the 2 MiB upload limit.');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function updateProfileEditorControls() {
+  const busy = profileEditorLoading || profileEditorSaving;
+  profileImagePreview.inert = busy;
+  uploadProfileImageButton.disabled = busy;
+  removeProfileImageButton.disabled = busy;
+  closeProfileImageDialog.disabled = profileEditorSaving;
+  saveProfileCropButton.disabled = busy || (!profileDraft?.remove && (!profileCropper || profileImagePreview.dataset.ready !== 'true'));
+  removeProfileImageButton.hidden = (!profileDraft?.url && !singerProfile?.profile?.imageUrl) || profileDraft?.remove === true;
+  uploadProfileImageButton.textContent = profileDraft?.url ? 'Change Image' : 'Upload Image';
+}
+
+function destroyProfileCropper() {
+  profileCropper?.destroy();
+  profileCropper = null;
+  profileImagePreview.replaceChildren();
+  profileImagePreview.hidden = true;
+  profileImagePreview.dataset.ready = 'false';
+}
+
+function discardProfileDraft() {
+  profileEditorGeneration++;
+  clearTimeout(profileResizeTimer);
+  destroyProfileCropper();
+  if (profileDraft?.blobUrl) URL.revokeObjectURL(profileDraft.blobUrl);
+  profileDraft = null;
+  profileEditorLoading = false;
+  profileImageInput.value = '';
+}
+
+function profileCropPoints() {
+  if (!profileCropper || !profileDraft) return null;
+  const points = profileCropper.get().points.map(Number);
+  const x1 = Math.max(0, Math.min(profileDraft.width - 1, points[0]));
+  const y1 = Math.max(0, Math.min(profileDraft.height - 1, points[1]));
+  const x2 = Math.min(profileDraft.width, Math.max(x1 + 1, points[2]));
+  const y2 = Math.min(profileDraft.height, Math.max(y1 + 1, points[3]));
+  const x = x1 / profileDraft.width * 100;
+  const y = y1 / profileDraft.height * 100;
+  return {
+    x,
+    y,
+    width: Math.min(100 - x, (x2 - x1) / profileDraft.width * 100),
+    height: Math.min(100 - y, (y2 - y1) / profileDraft.height * 100),
+  };
+}
+
+async function bindProfileCropper(generation) {
+  destroyProfileCropper();
+  if (!profileDraft?.url || !profileImageDialog.open) return;
+  profileImagePreview.hidden = false;
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (generation !== profileEditorGeneration || !profileImageDialog.open) return;
+  const editor = profileImagePreview.parentElement;
+  const sideBySide = window.matchMedia('(max-height: 440px) and (min-width: 420px)').matches;
+  const editorStyle = getComputedStyle(editor);
+  const spacing = parseFloat(editorStyle.paddingTop) + parseFloat(editorStyle.paddingBottom) +
+    4 * parseFloat(editorStyle.gap) + 56;
+  const reserve = profileImageDialog.querySelector('.dialog-header').offsetHeight + (sideBySide
+    ? 80
+    : profileImageStatus.offsetHeight + editor.querySelector('.profile-image-actions').offsetHeight +
+      saveProfileCropButton.offsetHeight + spacing);
+  const availableHeight = (window.visualViewport?.height || window.innerHeight) - reserve;
+  const boundary = Math.max(24, Math.floor(Math.min(profileImagePreview.clientWidth, availableHeight, 360)));
+  const viewport = Math.max(16, Math.floor(boundary * 0.78));
+  const cropper = new window.Croppie(profileImagePreview, {
+    boundary: { width: boundary, height: boundary },
+    viewport: { width: viewport, height: viewport, type: 'circle' },
+    enableCrossOrigin: false,
+    enableExif: false,
+    useCanvas: false,
+    enforceBoundary: true,
+    showZoomer: true,
+  });
+  profileCropper = cropper;
+  const { width, height, crop } = profileDraft;
+  const side = Math.min(width, height);
+  const focusX = singerProfile?.profile?.focusX ?? 50;
+  const focusY = singerProfile?.profile?.focusY ?? 50;
+  const points = crop
+    ? [crop.x * width / 100, crop.y * height / 100, (crop.x + crop.width) * width / 100, (crop.y + crop.height) * height / 100]
+    : [(width - side) * focusX / 100, (height - side) * focusY / 100,
+      (width - side) * focusX / 100 + side, (height - side) * focusY / 100 + side];
+  await cropper.bind({ url: profileDraft.url, points });
+  if (generation !== profileEditorGeneration || profileCropper !== cropper) return;
+  profileImagePreview.dataset.ready = 'true';
+  const zoom = profileImagePreview.querySelector('.cr-slider');
+  zoom?.setAttribute('aria-label', 'Image zoom');
+}
+
+async function openProfileEditor() {
+  if (!requireSingerName()) return;
+  discardProfileDraft();
+  profileImageDialog.showModal();
+  profileEditorLoading = true;
+  profileImageStatus.textContent = 'Loading image…';
+  updateProfileEditorControls();
+  const generation = profileEditorGeneration;
+  try {
+    await loadSingerProfile();
+    if (generation !== profileEditorGeneration) return;
+    const profile = singerProfile?.profile;
+    if (profile?.imageUrl) {
+      const image = await loadProfileImage(profile.imageUrl);
+      if (generation !== profileEditorGeneration) return;
+      profileDraft = { url: profile.imageUrl, width: image.naturalWidth, height: image.naturalHeight, crop: profile.crop };
+      await bindProfileCropper(generation);
+    }
+    if (generation === profileEditorGeneration) {
+      profileImageStatus.textContent = profileDraft ? 'Drag the image and use zoom, then Save Crop.' : 'Choose an image to crop.';
+    }
+  } catch (error) {
+    if (generation === profileEditorGeneration) {
+      destroyProfileCropper();
+      profileImageStatus.textContent = profileEditorError(error);
+    }
+  } finally {
+    if (generation === profileEditorGeneration) {
+      profileEditorLoading = false;
+      updateProfileEditorControls();
+    }
+  }
+}
+
+async function selectProfileImage(file) {
+  if (!file || profileEditorSaving) return;
+  const generation = ++profileEditorGeneration;
+  profileEditorLoading = true;
+  profileImageStatus.textContent = 'Preparing image…';
+  updateProfileEditorControls();
+  try {
+    const upload = await prepareProfileUpload(file);
+    if (generation !== profileEditorGeneration) return;
+    destroyProfileCropper();
+    if (profileDraft?.blobUrl) URL.revokeObjectURL(profileDraft.blobUrl);
+    const blobUrl = URL.createObjectURL(upload.blob);
+    profileDraft = { ...upload, blobUrl, url: blobUrl };
+    await bindProfileCropper(generation);
+    if (generation === profileEditorGeneration) profileImageStatus.textContent = 'Drag the image and use zoom, then Save Crop.';
+  } catch (error) {
+    if (generation === profileEditorGeneration) profileImageStatus.textContent = profileEditorError(error);
+  } finally {
+    if (generation === profileEditorGeneration) {
+      profileEditorLoading = false;
+      profileImageInput.value = '';
+      updateProfileEditorControls();
+    }
+  }
+}
+
+async function profileResponse(response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Could not save profile picture.');
+  return data;
+}
+
+async function saveProfileCrop() {
+  if (profileEditorLoading || profileEditorSaving || !profileDraft) return;
+  const crop = profileDraft.remove ? null : profileCropPoints();
+  if (!profileDraft.remove && !crop) return;
+  profileEditorSaving = true;
+  updateProfileEditorControls();
+  profileImageStatus.textContent = 'Saving…';
+  const name = singerName();
+  const singerUuid = getSingerUuid();
+  const params = new URLSearchParams({ name, singerUuid });
+  try {
+    if (profileDraft.remove) {
+      singerProfile = await profileResponse(await fetch(`/api/singers/self/profile/image?${params}`, { method: 'DELETE' }));
+    } else {
+      if (profileDraft.blob) {
+        singerProfile = await profileResponse(await fetch(`/api/singers/self/profile/image?${params}`, {
+          method: 'POST',
+          headers: { 'Content-Type': profileDraft.blob.type },
+          body: profileDraft.blob,
+        }));
+        profileDraft.blob = null;
+      }
+      singerProfile = await profileResponse(await fetch('/api/singers/self/profile/focus', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, singerUuid, crop, focusX: crop.x + crop.width / 2, focusY: crop.y + crop.height / 2 }),
+      }));
+    }
+    renderSingerProfile();
+    profileImageDialog.close();
+    showToast('Profile picture saved.');
+  } catch (error) {
+    renderSingerProfile();
+    profileImageStatus.textContent = `${profileEditorError(error)} Your crop is still here; try Save Crop again.`;
+  } finally {
+    profileEditorSaving = false;
+    updateProfileEditorControls();
+  }
+}
+
+function resizeProfileEditor() {
+  clearTimeout(profileResizeTimer);
+  profileResizeTimer = setTimeout(async () => {
+    if (!profileImageDialog.open || profileEditorLoading || profileEditorSaving || !profileCropper) return;
+    profileDraft.crop = profileCropPoints();
+    const generation = ++profileEditorGeneration;
+    profileEditorLoading = true;
+    updateProfileEditorControls();
+    try {
+      await bindProfileCropper(generation);
+    } catch (error) {
+      if (generation === profileEditorGeneration) profileImageStatus.textContent = profileEditorError(error);
+    } finally {
+      if (generation === profileEditorGeneration) {
+        profileEditorLoading = false;
+        updateProfileEditorControls();
+      }
+    }
+  }, 150);
 }
 
 function openNameDialog() {
@@ -331,6 +666,7 @@ function logoutProfile() {
   localStorage.removeItem(singerUuidKey);
   singerNameInput.value = '';
   lastQueueItems = [];
+  singerProfile = null;
   updateProfileButton();
   renderQueue();
   updateQueueFooter();
@@ -390,7 +726,7 @@ function updateRequestPageVisibility() {
   topActions.hidden = requestsClosed;
   queueFooter.hidden = requestsClosed;
   if (requestsClosed) {
-    profileMenu.hidden = true;
+    setProfileMenu(false);
     if (queueDialog.open) queueDialog.close();
     if (historyDialog.open) historyDialog.close();
     if (nameDialog.open) nameDialog.close();
@@ -1024,11 +1360,12 @@ async function exportHistory() {
   const params = new URLSearchParams({ name, singerUuid: getSingerUuid() });
   const response = await fetch(`/api/history/self/export?${params.toString()}`);
   if (!response.ok) {
-    setMessage('Could not export singer history.', true);
+    manageHistoryStatus.textContent = 'Could not export singer history.';
     return;
   }
   downloadJsonFile(safeHistoryFilename(name), await response.json());
   setMessage('Singer history exported.');
+  manageHistoryStatus.textContent = 'Singer history exported.';
 }
 
 function readJsonFile(file) {
@@ -1050,17 +1387,24 @@ async function importHistory(file) {
   const name = requireSingerName();
   if (!name || !file) return;
   try {
+    manageHistoryStatus.textContent = 'Importing history…';
     const data = await readJsonFile(file);
     const response = await fetch('/api/history/self/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, singerUuid: getSingerUuid(), data }),
     });
-    if (!response.ok) throw new Error('Import failed');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || 'Could not import singer history.');
+    }
     const result = await response.json();
+    await loadSingerProfile().catch(() => {});
     setMessage(`Imported ${Number(result.imported || 0)} history song${Number(result.imported || 0) === 1 ? '' : 's'}.`);
-  } catch {
-    setMessage('Could not import singer history.', true);
+    manageHistoryStatus.textContent = `Imported ${Number(result.imported || 0)} history songs and updated the profile.`;
+  } catch (error) {
+    manageHistoryStatus.textContent = error.message || 'Could not import singer history.';
+    setMessage(manageHistoryStatus.textContent, true);
   } finally {
     historyImportInput.value = '';
   }
@@ -1099,21 +1443,65 @@ backToArtistsButton.addEventListener('click', () => {
 });
 profileButton.addEventListener('click', (event) => {
   event.stopPropagation();
-  profileMenu.hidden = !profileMenu.hidden;
+  setProfileMenu(profileMenu.hidden);
 });
 editNameButton.addEventListener('click', () => {
-  profileMenu.hidden = true;
+  setProfileMenu(false);
   openNameDialog();
 });
+profileImageButton.addEventListener('click', () => {
+  setProfileMenu(false);
+  openProfileEditor().catch((error) => showToast(error.message));
+});
+closeProfileImageDialog.addEventListener('click', () => {
+  if (!profileEditorSaving) profileImageDialog.close();
+});
+profileImageDialog.addEventListener('cancel', (event) => {
+  if (profileEditorSaving) event.preventDefault();
+});
+profileImageDialog.addEventListener('close', () => {
+  if (!profileImageDialog.open) discardProfileDraft();
+});
+uploadProfileImageButton.addEventListener('click', () => profileImageInput.click());
+profileImageInput.addEventListener('change', () => {
+  selectProfileImage(profileImageInput.files?.[0]).catch((error) => showToast(error.message));
+});
+removeProfileImageButton.addEventListener('click', () => {
+  if (profileEditorLoading || profileEditorSaving) return;
+  discardProfileDraft();
+  profileDraft = { remove: true };
+  profileImageStatus.textContent = 'Save Crop to remove your picture, or Cancel to keep it.';
+  updateProfileEditorControls();
+});
+saveProfileCropButton.addEventListener('click', saveProfileCrop);
+window.addEventListener('resize', resizeProfileEditor);
+window.visualViewport?.addEventListener('resize', resizeProfileEditor);
 logoutButton.addEventListener('click', () => {
-  profileMenu.hidden = true;
+  setProfileMenu(false);
   logoutProfile();
 });
 document.addEventListener('click', (event) => {
   if (!profileMenu.hidden && !profileMenu.contains(event.target) && !profileButton.contains(event.target)) {
-    profileMenu.hidden = true;
+    setProfileMenu(false);
   }
 });
+function setProfileMenu(open) {
+  profileMenu.hidden = !open;
+  profileButton.setAttribute('aria-expanded', String(open));
+}
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !profileMenu.hidden) {
+    setProfileMenu(false);
+    profileButton.focus();
+  }
+});
+manageHistoryButton.addEventListener('click', () => {
+  setProfileMenu(false);
+  if (!requireSingerName()) return;
+  manageHistoryStatus.textContent = '';
+  manageHistoryDialog.showModal();
+});
+closeManageHistoryDialog.addEventListener('click', () => manageHistoryDialog.close());
 queueFooter.addEventListener('click', () => {
   renderQueue();
   queueDialog.showModal();
@@ -1149,17 +1537,16 @@ nameDialog.addEventListener('close', () => {
   }
 });
 exportHistoryButton.addEventListener('click', () => {
-  profileMenu.hidden = true;
-  exportHistory();
+  exportHistory().catch((error) => { manageHistoryStatus.textContent = error.message; });
 });
 importHistoryButton.addEventListener('click', () => {
-  profileMenu.hidden = true;
   historyImportInput.click();
 });
 historyImportInput.addEventListener('change', () => importHistory(historyImportInput.files?.[0]));
 
 singerNameInput.value = localStorage.getItem(singerNameKey) || '';
 updateProfileButton();
+await loadSingerProfile().catch(() => {});
 updateClearSearchVisibility();
 renderEmpty(resultsEl, 'Search for a song to get started.');
 updateRequestPageVisibility();

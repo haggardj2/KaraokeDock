@@ -126,22 +126,43 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--color-border) !important;
-  border-radius: 12px !important;
+  border-radius: 50% !important;
   background: rgba(29, 29, 39, 0.92) !important;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(12px);
   color: var(--color-text-primary) !important;
-  padding: 10px 12px !important;
+  padding: 3px !important;
   line-height: 1.1;
 }
 
-.request-page-gateway-theme .profile-name {
-  max-width: 96px;
-  overflow: hidden;
+.request-profile-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  display: grid;
+  gap: 6px;
+  width: min(230px, calc(100vw - 32px));
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: var(--color-bg-card);
+  box-shadow: 0 16px 48px #0007;
+}
+.request-profile-menu button {
+  display: block;
+  padding: 12px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
   color: var(--color-text-secondary);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.request-profile-menu button:hover, .request-profile-menu button:focus-visible {
+  color: var(--color-text-primary);
+  background: var(--color-bg-secondary);
 }
 
 .request-page-gateway-theme .card {

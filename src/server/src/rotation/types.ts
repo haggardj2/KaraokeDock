@@ -149,6 +149,7 @@ export interface SingerSnapshot {
   currentRoundJoined: number;
   lastRoundSang: number | null;
   lastSangAt: Date | null;
+  lastSkippedAt?: Date | null;
   pendingSongs: SongRequestSnapshot[];
 }
 
@@ -159,6 +160,7 @@ export interface SongRequestSnapshot {
   artist: string | null;
   priority: number;
   requestedAt: Date;
+  lastSkippedAt?: Date | null;
   participantSingerIds: bigint[];
 }
 
@@ -207,3 +209,44 @@ export const DEFAULT_ROTATION_CONFIG: RotationConfig = {
   songSelectionPolicy: 'oldest_request_first',
   emptySingerPolicy: 'keep_active_without_song',
 };
+
+export type EffectiveRotationType = Exclude<RotationType, 'hybrid'>;
+
+export function effectiveRotationType(config: RotationConfig): EffectiveRotationType {
+  return (config.type === 'hybrid' ? config.basePolicy : config.type) as EffectiveRotationType;
+}
+
+export class RotationValidationError extends Error {
+  readonly status = 400;
+}
+
+/** Defaults apply only to missing fields, never to invalid supplied values. */
+export function normalizeRotationConfig(partial: Partial<RotationConfig> = {}): RotationConfig {
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
+    throw new RotationValidationError('Rotation config must be an object');
+  }
+  const config = { ...DEFAULT_ROTATION_CONFIG, ...partial };
+  const values = {
+    type: ['strict_round_robin', 'least_recently_sung', 'signup_order', 'song_queue_only', 'manual', 'hybrid'],
+    basePolicy: ['strict_round_robin', 'least_recently_sung', 'signup_order', 'song_queue_only', 'manual'],
+    newSingerPlacement: ['end_of_current_round', 'next_round', 'next_available'],
+    duetPolicy: ['primary_only', 'all_participants', 'group_as_singer'],
+    skipPolicy: ['move_to_end', 'keep_position', 'remove_until_reactivated'],
+    priorityPolicy: ['none', 'host_override_only', 'weighted', 'vip_next'],
+    songSelectionPolicy: ['oldest_request_first', 'manual_host_selection', 'singer_selected_next', 'highest_priority_first'],
+    emptySingerPolicy: ['remove_from_rotation', 'keep_active_without_song'],
+  } as const;
+  for (const [key, allowed] of Object.entries(values)) {
+    if (!(allowed as readonly unknown[]).includes(config[key as keyof RotationConfig])) {
+      throw new RotationValidationError(`Invalid rotation config: ${key}`);
+    }
+  }
+  for (const key of ['allowSingerMultipleSongsInQueue', 'preventSameSingerBackToBack'] as const) {
+    if (typeof config[key] !== 'boolean') throw new RotationValidationError(`Invalid rotation config: ${key}`);
+  }
+  if (!Number.isSafeInteger(config.maxPendingSongsPerSinger) || config.maxPendingSongsPerSinger < 1 ||
+      config.maxPendingSongsPerSinger > 2147483647) {
+    throw new RotationValidationError('maxPendingSongsPerSinger must be a positive integer');
+  }
+  return config;
+}

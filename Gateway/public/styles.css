@@ -120,10 +120,181 @@ body:not(.requests-closed) #closedPage {
 }
 
 .profile-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 50%;
+  overflow: hidden;
   border: 1px solid var(--color-border);
   background: rgba(29, 29, 39, 0.92);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(12px);
+}
+
+#profileButtonIcon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 50%;
+}
+
+.profile-button-avatar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-image-editor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  gap: 10px;
+}
+
+.profile-image-dialog.app-dialog {
+  width: min(28rem, calc(100% - 16px));
+  max-width: calc(100% - 16px);
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: hidden;
+}
+
+.profile-image-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.profile-image-dialog .dialog-header {
+  flex-shrink: 0;
+  padding: 12px;
+}
+
+.profile-image-dialog .dialog-header h2 {
+  font-size: 18px;
+}
+
+.profile-image-dialog .dialog-body {
+  padding: 12px;
+}
+
+.profile-image-editor > * {
+  flex-shrink: 0;
+}
+
+#profileImageStatus {
+  margin: 0;
+  font-size: 13px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.profile-image-preview {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--color-bg-secondary);
+}
+
+.profile-image-preview.croppie-container {
+  width: 100%;
+  height: auto;
+}
+
+.profile-image-preview:not([data-ready="true"]) .cr-boundary {
+  visibility: hidden;
+}
+
+.profile-image-preview .cr-slider-wrap {
+  width: min(100%, 280px);
+  margin: 10px auto;
+}
+
+.profile-image-preview .cr-slider {
+  width: 100%;
+  max-width: 100%;
+}
+
+.profile-image-preview .cr-viewport {
+  pointer-events: none;
+}
+
+.profile-image-actions {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.profile-image-actions button {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-image-dialog button {
+  padding: 10px 8px;
+  font-size: 14px;
+}
+
+.profile-image-actions .danger {
+  color: var(--color-danger);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+@media (max-height: 440px) {
+  .profile-image-dialog .dialog-header,
+  .profile-image-dialog .dialog-body {
+    padding: 8px;
+  }
+
+  .profile-image-editor {
+    gap: 6px;
+  }
+
+  .profile-image-dialog button {
+    padding: 8px 6px;
+    font-size: 13px;
+  }
+
+  #profileImageStatus {
+    max-height: 2.6em;
+    overflow: auto;
+    font-size: 12px;
+    line-height: 1.3;
+  }
+}
+
+@media (max-height: 440px) and (min-width: 420px) {
+  .profile-image-editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .profile-image-preview {
+    grid-column: 1;
+    grid-row: 1 / 4;
+  }
+
+  #profileImageStatus,
+  .profile-image-actions,
+  #saveProfileCropButton {
+    grid-column: 2;
+  }
+
+  .profile-image-actions {
+    flex-direction: column;
+  }
 }
 
 .profile-menu {
@@ -630,6 +801,9 @@ body:not(.requests-closed) #closedPage {
 
 .app-dialog {
   width: min(44rem, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
   border: 1px solid var(--color-border);
   border-radius: 20px;
   background: var(--color-bg-card);
