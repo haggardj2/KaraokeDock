@@ -17,6 +17,7 @@ import {
   type DirectoryTreeEntry,
 } from './directoryFingerprints.js';
 import { DEFAULT_LIBRARY_PARSE_MODE, type LibraryParseMode } from './parsing.js';
+import path from 'node:path';
 
 type TaskReason = 'startup' | 'settings' | 'scheduled';
 
@@ -211,7 +212,7 @@ async function snapshotMediaLibraryTrees(): Promise<MediaLibraryTreeSnapshot[]> 
   return Promise.all(
     libraries.rows.map(async (library) => ({
       libraryId: library.id,
-      rootPath: library.path,
+      rootPath: path.resolve(library.path),
       parseMode: library.parse_mode ?? DEFAULT_LIBRARY_PARSE_MODE,
       entries: await snapshotDirectoryTree(library.path, {
         recursive: true,
@@ -258,11 +259,11 @@ async function runWhenFingerprintsChange(
   }
 ): Promise<TaskRunResult> {
   if (reason !== 'scheduled') {
+    const beforeScan = await options.takeSnapshot();
     logger.info(`[backgroundTasks] Starting ${options.describeRoots} pass (${reason}).`);
     const result = await options.runScan();
     if (result.started) {
-      const afterScan = await options.takeSnapshot();
-      await persistFingerprints(options.settingKey, afterScan);
+      await persistFingerprints(options.settingKey, beforeScan);
     }
     return result;
   }
@@ -279,8 +280,7 @@ async function runWhenFingerprintsChange(
   logger.info(`[backgroundTasks] Starting ${options.describeRoots} pass (${reason}) after detecting directory changes.`);
   const result = await options.runScan();
   if (result.started) {
-    const afterScan = await options.takeSnapshot();
-    await persistFingerprints(options.settingKey, afterScan);
+    await persistFingerprints(options.settingKey, current);
   }
   return result;
 }
@@ -289,15 +289,12 @@ function getMediaLibraryScanRequests(
   previous: MediaLibraryTreeSnapshot[] | null,
   current: MediaLibraryTreeSnapshot[]
 ): LibraryScanRequest[] {
-  if (!previous) {
-    return [];
-  }
-
-  const previousByLibraryId = new Map(previous.map((snapshot) => [snapshot.libraryId, snapshot]));
+  const previousByLibraryId = new Map((previous ?? []).map((snapshot) => [snapshot.libraryId, snapshot]));
   const scanRequests: LibraryScanRequest[] = [];
 
   for (const snapshot of current) {
-    if (!previousByLibraryId.has(snapshot.libraryId)) {
+    const prior = previousByLibraryId.get(snapshot.libraryId);
+    if (!prior || prior.rootPath !== snapshot.rootPath || prior.parseMode !== snapshot.parseMode) {
       scanRequests.push({
         libraryId: snapshot.libraryId,
         libraryPath: snapshot.rootPath,
@@ -309,7 +306,7 @@ function getMediaLibraryScanRequests(
     }
 
     const changedRoots = detectChangedDirectoryRoots(
-      previousByLibraryId.get(snapshot.libraryId)?.entries ?? null,
+      prior.entries,
       snapshot.entries,
       snapshot.rootPath
     );
@@ -334,14 +331,6 @@ async function runMediaLibraryScanForChanges(reason: TaskReason): Promise<TaskRu
     snapshotMediaLibraryTrees(),
   ]);
 
-  if (!previous) {
-    await persistMediaLibraryTreeSnapshots(current);
-    return {
-      started: false,
-      summary: `Initialized watched directory snapshot for ${current.length} librar${current.length === 1 ? 'y' : 'ies'}.`,
-    };
-  }
-
   const scanRequests = getMediaLibraryScanRequests(previous, current);
   if (scanRequests.length === 0) {
     return { started: false, summary: 'No watched directory changes detected for Media library scan.' };
@@ -353,7 +342,14 @@ async function runMediaLibraryScanForChanges(reason: TaskReason): Promise<TaskRu
 
   try {
     const result = await runLibraryScanRequests(scanRequests);
-    await persistMediaLibraryTreeSnapshots(await snapshotMediaLibraryTrees());
+    const failedLibraries = [...new Set(scanRequests.map(request => request.libraryId))]
+      .filter(id => !result.stats[id] || result.stats[id].error);
+    if (failedLibraries.length) {
+      throw new Error(`Media library scan failed; changes will be retried: ${failedLibraries.map(id =>
+        `${id}: ${result.stats[id]?.error || 'No scan result returned'}`).join('; ')}`);
+    }
+    // A post-scan snapshot could acknowledge files that arrived after their folder was scanned.
+    await persistMediaLibraryTreeSnapshots(current);
     const libraryCount = Object.keys(result.stats || {}).length;
     return {
       started: true,

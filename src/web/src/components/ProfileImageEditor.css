@@ -82,6 +82,21 @@
   color: #fff;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
 }
+.request-social-login { display: grid; gap: 12px; text-align: center; }
+.request-social-login > p:first-child { color: var(--color-text-secondary); font-size: 14px; }
+.request-social-icons { display: flex; justify-content: center; gap: 16px; }
+.profile-dialog .request-social-button {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 2px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+.request-social-button:focus-visible { outline: 3px solid var(--color-accent, #6366f1); outline-offset: 3px; }
+.request-social-button:not(:disabled):hover { box-shadow: 0 0 0 3px var(--color-border-focus, #6366f180); }
 @media (max-height: 500px) {
   .profile-dialog-header { padding: 8px 12px; }
   .profile-dialog-body { padding: 8px 12px; }

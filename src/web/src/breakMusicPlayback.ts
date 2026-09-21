@@ -1,6 +1,7 @@
 export type BreakMusicPlayback = {
   src: string;
   elapsedSec: number;
+  currentStartedAt?: string | null;
   paused: boolean;
   pauseDuringKaraoke: boolean;
   mutedForKaraoke: boolean;
@@ -25,6 +26,7 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
   let state: BreakMusicPlayback | null = null;
   let revision = 0;
   let source = "";
+  let occurrence: string | null = null;
   let mustMute = true;
   let karaokeMuteHeld = false;
   let disposed = false;
@@ -173,13 +175,16 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
       }
 
       const changedSource = source !== next.src;
+      const nextOccurrence = next.currentStartedAt ?? null;
+      const changedOccurrence = nextOccurrence !== null && occurrence !== nextOccurrence;
+      occurrence = nextOccurrence;
       if (changedSource) {
         cancelFade();
         audio.src = next.src;
         audio.load();
         source = next.src;
       }
-      if (changedSource || Math.abs(audio.currentTime - next.elapsedSec) > 2) {
+      if (changedSource || changedOccurrence || Math.abs(audio.currentTime - next.elapsedSec) > 2) {
         seekPosition = Math.max(0, next.elapsedSec);
         seek();
       }

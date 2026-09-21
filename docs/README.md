@@ -88,8 +88,26 @@ The control center for managing the karaoke session.
 - Enable auto-play mode
 - Manually add songs to the queue
 
+#### Install the Host app
+
+Open `/host` using your server's trusted **HTTPS** address and select **Install Host app**. Android uses Chrome's install menu; Windows and Linux support installation through Chrome or Edge. On iPhone/iPad, open `/host` in Safari and select **Share > Add to Home Screen** (enable **Open as Web App** if offered).
+
+The app launches directly into Host in a standalone window. Use the same public origin configured for social/OIDC callbacks. Sign in again if the installed app has separate browser storage. Plain HTTP LAN addresses are not installable; localhost is supported for local testing.
+
+Select **Dismiss** to hide the installation prompt on this browser, including after reloading. You can still install later using the browser's install menu or Safari's **Add to Home Screen**.
+
+The Host app requires a live server connection. It does not cache logins, queue data, media, or offline control actions. An offline launch shows a reconnect page. Installation is available from production builds, not the Vite development server.
+
 #### Manage break music
 ![Break Settings](screenshots/break_mgmt.png)
+
+The manager opens the running playlist; editing it updates playback immediately. Select **New playlist** to build a separate draft without clearing or interrupting the running playlist. Enter a **Playlist name** and select **Save** to store it, then select it under **Saved Playlists** and use **Load** when ready to switch playback. A draft remains available when you close and reopen the manager in the same Host page; save it before reloading the page.
+
+The running playlist keeps the currently playing song at the top. When it finishes or is skipped, it moves to the bottom and the next song takes its place. This rotation does not change saved playlists or independent drafts.
+
+Search matches titles, artists, genres, and full indexed file paths, so entering a folder such as `/music/80s/` limits the library to that location. Enable the **Path** column to see matches. **Add All** adds the filtered results. Saved playlists are stored in the database; if the optional M3U file cannot be written to the configured playlist folder, the manager displays a warning while retaining the saved playlist.
+
+Existing installations need migration `025_break_music_path_search.sql` for the folder-path index; it is included in the normal migration runner (`npm run migrate` from `src/server`).
 
 #### Configure playback settings
 ![Player Settings](screenshots/player_mgmt.png)
@@ -124,6 +142,9 @@ Management interface for system configuration and media libraries.
 - Scan directories for karaoke files & break music
 - User manager
 - OIDC/SSO settings
+- Optional Google/Facebook singer login: [provider setup guide](SOCIAL_LOGIN.md)
+- Host-approved singer merging links social/OIDC/password accounts to existing singer queues and history
+- Public privacy policy (`/privacy`), terms of service (`/terms`), and data-deletion instructions (`/privacy#data-deletion`)
 
 ---
 

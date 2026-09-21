@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import type { PoolClient } from 'pg';
 import { query } from './db.js';
 import { withQueueTransaction } from './rotation/queueTransaction.js';
+import type { SingerProfileRow } from './singerProfile.js';
 import { DEFAULT_ROTATION_CONFIG, effectiveRotationType, normalizeRotationConfig, type RotationConfig, type RotationType } from './rotation/types.js';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ export function normalizeSingerName(name: string): string {
 // Find-or-create singer
 // ---------------------------------------------------------------------------
 
-export interface SingerRow {
+export interface SingerRow extends SingerProfileRow {
   id: bigint;
   public_uuid: string;
   display_name: string;
@@ -49,14 +50,14 @@ async function updateSingerNameIfPossible(singerId: bigint, displayName: string,
   );
   if (conflict.rows.length > 0) {
     await query(
-      `UPDATE singers SET display_name = $1 WHERE id = $2`,
+      `UPDATE singers SET display_name = $1 WHERE id = $2 AND NOT identity_merged`,
       [displayName, singerId],
     );
     return;
   }
 
   await query(
-    `UPDATE singers SET display_name = $1, normalized_name = $2 WHERE id = $3`,
+    `UPDATE singers SET display_name = $1, normalized_name = $2 WHERE id = $3 AND NOT identity_merged`,
     [displayName, normalizedName, singerId],
   );
 }

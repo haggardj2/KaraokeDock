@@ -1,13 +1,13 @@
 import express from 'express';
 import type { Server } from 'node:http';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getSetting, setSetting, getUserById, query, validateSessionInfo, withTransaction } from '../db.js';
+import { getSetting, setSetting, getUserById, listUsers, query, validateSessionInfo, withTransaction } from '../db.js';
 import { ensureAuthenticatedSinger } from '../authenticatedSinger.js';
 import { ensureSingerInActiveRotation, findOrCreateSinger } from '../queueIdentity.js';
 
 vi.mock('../db.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../db.js')>(),
-  query: vi.fn(), getUserById: vi.fn(), validateSessionInfo: vi.fn(), withTransaction: vi.fn(),
+  query: vi.fn(), getUserById: vi.fn(), listUsers: vi.fn(), validateSessionInfo: vi.fn(), withTransaction: vi.fn(),
   ensureHelpfulIndexes: vi.fn().mockResolvedValue(undefined),
   getSetting: vi.fn().mockResolvedValue(null), setSetting: vi.fn(), cleanupExpiredSessions: vi.fn(),
   upsertArtist: vi.fn().mockResolvedValue(1), upsertExternalTrack: vi.fn().mockResolvedValue({ id: 101 }),
@@ -88,6 +88,109 @@ async function request(path: string, body: unknown, method = 'POST', token: stri
     body: method === 'GET' ? undefined : JSON.stringify(body),
   });
 }
+
+describe('Admin User Manager canonical accounts', () => {
+  it('exposes exact singer IDs, canonical presentation and linked credentials without passwords', async () => {
+    vi.mocked(listUsers).mockResolvedValue([
+      { ...user, singer_id: '9007199254740993', singer_display_name: 'Canonical Singer', password_hash: 'private-hash' },
+      { ...user, id: 3, singer_id: null, singer_display_name: null },
+    ] as Awaited<ReturnType<typeof listUsers>>);
+    queryMock.mockImplementation(async (sql, params) => {
+      if (sql.includes('FROM users WHERE canonical_user_id')) return { rows: params?.[0] === 1
+        ? [{ id: 2, username: 'social_google_uuid', provider: 'google', isActive: true }] : [] } as any;
+      if (sql.startsWith('SELECT s.* FROM users')) return { rows: params?.[0] === 1
+        ? [{ id: '9007199254740993', display_name: 'Canonical Singer', profile_image_source: 'oidc', profile_image_url: 'https://images.example/canonical' }]
+        : [] } as any;
+      return { rows: [] } as any;
+    });
+    const response = await request('/admin/users', undefined, 'GET');
+    expect(response.status).toBe(200);
+    const users = await response.json();
+    expect(users).toHaveLength(2);
+    expect(users[0]).toMatchObject({
+      singer_id: '9007199254740993', singer_display_name: 'Canonical Singer', display_name: 'Canonical Singer',
+      picture: 'https://images.example/canonical', role: 'admin',
+      linkedLogins: [{ id: 2, username: 'social_google_uuid', provider: 'google', isActive: true }],
+    });
+    expect(users[1]).toMatchObject({ singer_id: null, singer_display_name: null, linkedLogins: [] });
+    expect(JSON.stringify(users)).not.toContain('private-hash');
+    expect(users[0]).not.toHaveProperty('password_hash');
+  });
+
+  it('does not expose user merge targets to guests or singer-only sessions', async () => {
+    expect((await request('/admin/users', undefined, 'GET', null)).status).toBe(403);
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    vi.mocked(getUserById).mockResolvedValue({ ...user, role: 'user' } as Awaited<ReturnType<typeof getUserById>>);
+    expect((await request('/admin/users', undefined, 'GET', 'singer-token')).status).toBe(403);
+    expect(listUsers).not.toHaveBeenCalled();
+  });
+});
+
+describe('social login API integration boundaries', () => {
+  const socialUser = { ...user, role: 'user', oidc_subject: null, social_provider: 'google', social_subject: 'google-id' };
+
+  it('uses the real admin guard for social settings and never permits singer sessions to administer login', async () => {
+    const guest = await request('/admin/settings/social', undefined, 'GET', null);
+    expect(guest.status).toBe(403);
+    vi.mocked(getUserById).mockResolvedValue(socialUser as any);
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    expect((await request('/admin/settings/social', {}, 'PUT', 'singer-token')).status).toBe(403);
+    expect((await request('/admin/settings/social', undefined, 'GET', 'singer-token')).status).toBe(403);
+  });
+
+  it('masks social secrets in the generic admin settings list and keeps them outside public settings', async () => {
+    const value = {
+      enabled: true, frontendUrl: 'https://web.example',
+      google: { enabled: true, clientId: 'client', clientSecret: 'private-google-secret', redirectUri: '' },
+      facebook: { enabled: false, clientId: '', clientSecret: 'private-facebook-secret', redirectUri: '' },
+    };
+    queryMock.mockResolvedValue({ rows: [{ key: 'social.config', value }] } as any);
+    const admin = await request('/admin/settings', undefined, 'GET');
+    const adminText = await admin.text();
+    expect(admin.status).toBe(200);
+    expect(adminText).not.toContain('private-');
+    expect(JSON.parse(adminText)['social.config'].google.clientSecret).toBe('***');
+    const publicResponse = await request('/settings/public', undefined, 'GET', null);
+    const publicText = await publicResponse.text();
+    expect(publicText).not.toContain('social');
+    expect(publicText).not.toContain('private-');
+    const publicKeys = queryMock.mock.calls.find(([sql]) => sql.includes('WHERE key = ANY'))?.[1]?.[0];
+    expect(publicKeys).not.toContain('social.config');
+  });
+
+  it('prevents generic settings writes from bypassing social URL validation and secret-preservation rules', async () => {
+    expect((await request('/admin/settings/social.config', { value: { enabled: true } }, 'PUT')).status).toBe(400);
+    expect(setSetting).not.toHaveBeenCalled();
+  });
+
+  it('validates a normal social session and disallows replacing its externally managed image', async () => {
+    vi.mocked(getUserById).mockResolvedValue(socialUser as any);
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    expect(await (await request('/auth/validate', undefined, 'GET', 'singer-token')).json()).toMatchObject({ valid: true, role: 'user' });
+    const profile = await request('/singers/self/profile', undefined, 'GET', 'singer-token');
+    expect(await profile.json()).toMatchObject({
+      singerId: '7', canUpload: false, profile: { imageSource: 'oidc', imageUrl: 'https://provider.example/original' },
+    });
+    expect((await request('/singers/self/profile/image', {}, 'POST', 'singer-token')).status).toBe(403);
+    expect((await request('/singers/self/profile/image', {}, 'DELETE', 'singer-token')).status).toBe(403);
+    expect((await request('/singers/self/profile/focus', { crop }, 'PATCH', 'singer-token')).status).toBe(200);
+  });
+
+  it('restores social queue/history solely by singer_id despite a stale browser name or guest UUID', async () => {
+    vi.mocked(getUserById).mockResolvedValue(socialUser as any);
+    const queued = await request('/queue/by-requester?name=Someone%20Else&singerUuid=stale', undefined, 'GET', 'singer-token');
+    expect(queued.status).toBe(200);
+    const queueQuery = queryMock.mock.calls.find(([sql]) => sql.includes("q.status != 'removed'"))!;
+    expect(queueQuery[0]).toContain('q.singer_id = $1');
+    expect(queueQuery[0]).not.toContain('singer_id IS NULL');
+    expect(queueQuery[1]).toEqual([7n]);
+    await request('/history/self/export?name=Someone%20Else', undefined, 'GET', 'singer-token');
+    const historyQuery = queryMock.mock.calls.find(([sql]) => sql.includes('SELECT q.id AS queue_id'))!;
+    expect(historyQuery[0]).toContain('q.singer_id = ANY($1::bigint[])');
+    expect(historyQuery[0]).not.toContain('LOWER(');
+    expect(historyQuery[1]).toEqual([['7']]);
+  });
+});
 
 describe('scroller profile picture settings', () => {
   const broadcast = vi.fn();
@@ -186,6 +289,15 @@ describe.each([
     const response = await request(endpoint, { ...trackBody, singerId: '9', requestAsHost: true });
     expect(response.status).toBe(500);
     expect(queryMock.mock.calls.some(([sql]) => sql.includes('INSERT INTO queue'))).toBe(false);
+  });
+
+  it('reports a retryable conflict if a merge removes the resolved singer before enqueue finishes', async () => {
+    vi.mocked(ensureSingerInActiveRotation).mockRejectedValueOnce(Object.assign(new Error('stale singer reference'), {
+      code: '23503', constraint: 'rotation_singers_singer_id_fkey',
+    }));
+    const response = await request(endpoint, { ...trackBody, singerId: '9', requestAsHost: true });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('Refresh your singer profile and retry') });
   });
 });
 
@@ -444,7 +556,7 @@ describe('profile crop exports', () => {
       const response = await request('/singers/self/name', { name: 'Account Name' });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ singer: { id: '7', uuid: 'host-uuid', displayName: 'Account Name' } });
-      expect(queryMock).toHaveBeenCalledWith('UPDATE users SET display_name = $1 WHERE id = $2', ['Account Name', 1]);
+      expect(queryMock).toHaveBeenCalledWith('UPDATE users SET display_name = $1 WHERE singer_id = $2', ['Account Name', 7n]);
       expect(queryMock).toHaveBeenCalledWith(expect.stringContaining('UPDATE queue SET requested_by'), ['Account Name', 7n]);
       expect(findOrCreateSinger).not.toHaveBeenCalled();
     });

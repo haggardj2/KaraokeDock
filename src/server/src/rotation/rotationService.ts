@@ -2,7 +2,8 @@
 // the rotation before changing its next turn.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PoolClient, QueryResultRow } from 'pg';
-import { query as poolQuery, withTransaction } from '../db.js';
+import { query as poolQuery } from '../db.js';
+import { withQueueTransaction } from './queueTransaction.js';
 import { normalizeSingerName } from '../queueIdentity.js';
 import { isRoundComplete, selectNextByPolicy, selectSong } from './policies.js';
 import {
@@ -21,7 +22,7 @@ async function query<T extends QueryResultRow = any>(sql: string, params?: any[]
 
 async function atomic<T>(work: () => Promise<T>): Promise<T> {
   if (transactions.getStore()) return work();
-  return withTransaction((client) => transactions.run(client, work));
+  return withQueueTransaction((client) => transactions.run(client, work));
 }
 
 const toBigInt = (value: unknown): bigint => BigInt(value as string);

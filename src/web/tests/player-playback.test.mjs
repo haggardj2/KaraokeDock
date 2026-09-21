@@ -199,6 +199,22 @@ const idleBreak = {
 }
 
 describe('break music playback and mute safety', () => {
+  it('restarts adjacent occurrences of the same file even when elapsed drift is under two seconds', async (t) => {
+    const audio = mediaStub()
+    const playback = createBreakMusicPlayback(audio)
+    t.after(() => playback.dispose())
+    await playback.update({ ...idleBreak, elapsedSec: 0, currentStartedAt: '2026-09-11T01:00:00Z' })
+    audio.currentTime = 1.5
+    await playback.update({ ...idleBreak, elapsedSec: 0, currentStartedAt: '2026-09-11T01:00:01Z' })
+    assert.equal(audio.currentTime, 0)
+    assert.equal(audio.loadCalls, 1)
+    audio.currentTime = 1
+    await playback.update({ ...idleBreak, elapsedSec: 0, currentStartedAt: '2026-09-11T01:00:01Z' })
+    assert.equal(audio.currentTime, 1)
+    assert.equal(audio.loadCalls, 1)
+    assert.equal(audio.playCalls, 1)
+  })
+
   it('fades continuing break music over the configured time before starting local singer audio', async (t) => {
     t.mock.timers.enable({ apis: ['setInterval'] })
     const audio = mediaStub()

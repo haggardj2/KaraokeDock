@@ -112,7 +112,7 @@ describe('queue requester identity', () => {
   );
 
   it('preserves guest requests and propagates identity persistence errors', async () => {
-    clientQuery.mockResolvedValueOnce({ rows: [target] }).mockResolvedValueOnce({ rows: [] });
+    clientQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [target] }).mockResolvedValueOnce({ rows: [] });
     expect(await resolveQueueRequester(undefined, { requestedBy: 'Selected Singer' })).toEqual(target);
     vi.mocked(withTransaction).mockRejectedValueOnce(new Error('database unavailable'));
     await expect(resolveQueueRequester('session', {})).rejects.toThrow('database unavailable');
@@ -128,7 +128,7 @@ describe('authenticated self name edits', () => {
       return { rows: [] };
     });
     expect(await renameAuthenticatedSinger(user, ' New   Host ')).toMatchObject({ id: 7n, display_name: 'New Host', public_uuid: host.public_uuid });
-    expect(clientQuery).toHaveBeenCalledWith('UPDATE users SET display_name = $1 WHERE id = $2', ['New Host', 1]);
+    expect(clientQuery).toHaveBeenCalledWith('UPDATE users SET display_name = $1 WHERE singer_id = $2', ['New Host', 7n]);
     expect(clientQuery).toHaveBeenCalledWith(expect.stringContaining("UPDATE queue SET requested_by"), ['New Host', 7n]);
     expect(findOrCreateSinger).not.toHaveBeenCalled();
   });
@@ -146,6 +146,23 @@ describe('authenticated self name edits', () => {
 });
 
 describe('persistent authenticated singer linkage', () => {
+  it('never name-matches or claims legacy name-only queue/history for a social user', async () => {
+    const social = { ...user, oidc_subject: null, social_provider: 'google' as const, social_subject: 'subject' };
+    expect(await ensureAuthenticatedSinger(social)).toMatchObject({ id: 7n, display_name: 'Host' });
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining("WHERE singer_id = $1 AND status IN ('queued', 'playing')"), [7n, 'Host'],
+    );
+    expect(clientQuery.mock.calls.some(([sql]) => sql.includes('normalized_name = ANY') || sql.includes('singer_id IS NULL'))).toBe(false);
+    expect(syncSingerProfileFromOidc).toHaveBeenCalledWith(7n, social);
+  });
+
+  it('fails closed for a social account without an explicit singer link', async () => {
+    clientQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ singer_id: null }] });
+    await expect(ensureAuthenticatedSinger({ ...user, social_provider: 'facebook' })).rejects.toMatchObject({ status: 409 });
+    expect(clientQuery).toHaveBeenCalledTimes(2);
+    expect(syncSingerProfileFromOidc).not.toHaveBeenCalled();
+  });
+
   it('keeps linked identity across display-name changes and synchronizes existing queue rows', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
       if (sql.startsWith('SELECT singer_id FROM users')) return { rows: [{ singer_id: '7' }] };

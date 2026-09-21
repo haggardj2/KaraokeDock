@@ -167,8 +167,12 @@ async function schedule(client: PoolClient, rotation: LiveRotation | null, persi
   return { config, sorted, overrideByQueueId, playing };
 }
 
-export async function resortLiveQueue(): Promise<void> {
-  await withQueueTransaction(async (client) => schedule(client, await getRotation(client)));
+export async function resortLiveQueue(client?: PoolClient): Promise<void> {
+  if (client) {
+    await schedule(client, await getRotation(client));
+  } else {
+    await withQueueTransaction(async (client) => schedule(client, await getRotation(client)));
+  }
 }
 
 export async function getLiveQueueAutoplayState() {

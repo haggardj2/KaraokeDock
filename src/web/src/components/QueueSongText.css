@@ -1,0 +1,44 @@
+.queue-song-text {
+  min-width: 0;
+}
+
+@keyframes queue-song-scroll {
+  0%, 15% { transform: translateX(0); }
+  85%, 100% { transform: translateX(var(--song-scroll-distance)); }
+}
+
+@media (max-width: 640px) {
+  .queue-song-text {
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .queue-song-text-content {
+    display: inline-block;
+    white-space: nowrap;
+  }
+
+  .queue-song-text.overflows .queue-song-text-content {
+    animation: queue-song-scroll var(--song-scroll-duration) linear infinite alternate;
+  }
+
+  .queue-song-text:focus,
+  .queue-song-text:hover {
+    overflow-x: auto;
+  }
+
+  .queue-song-text:focus .queue-song-text-content,
+  .queue-song-text:hover .queue-song-text-content {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-song-text.overflows {
+    overflow-x: auto;
+  }
+
+  .queue-song-text.overflows .queue-song-text-content {
+    animation: none;
+  }
+}
