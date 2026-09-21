@@ -79,6 +79,7 @@
   max-width: 768px;
   min-width: 0;
   margin: 0 auto;
+  padding-top: 64px;
   overflow-x: hidden;
 }
 

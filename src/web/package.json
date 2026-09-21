@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test:session": "node --experimental-strip-types --test tests/session-token.test.mjs",
+    "test:social": "node --experimental-strip-types --test tests/social-login.test.mjs",
+    "test:merge": "node --experimental-strip-types --test tests/singer-merge.test.mjs",
     "preview": "vite preview --port 5173 --strictPort",
     "start": "node server.js"
   },

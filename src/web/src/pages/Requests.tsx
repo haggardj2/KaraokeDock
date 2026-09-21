@@ -12,6 +12,12 @@ import { useAuth } from "../auth-context";
 import SingerAvatar, { type SingerProfile, type ProfileCrop } from "../components/SingerAvatar";
 import ProfileImageEditor from "../components/ProfileImageEditor";
 import ProfileDialog from "../components/ProfileDialog";
+import SocialProviderIcon from "../components/SocialProviderIcon";
+import PublicLegalLinks from "../components/PublicLegalLinks";
+import {
+  exchangeSocialLogin, startSocialLogin, takeSocialLoginCallback, visibleSocialProviders,
+  SOCIAL_PROVIDER_NAMES, type SocialProvider, type SocialPublicConfig,
+} from "../social-login";
 import "./Requests.css";
 
 const MIN_KEY_ADJUSTMENT = -6;
@@ -343,6 +349,11 @@ export default function Requests() {
   const [nameModalOpen, setNameModalOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState(requestedBy);
   const [savingName, setSavingName] = useState(false);
+  const [socialConfig, setSocialConfig] = useState<SocialPublicConfig | null>(null);
+  const [socialBusy, setSocialBusy] = useState(() => new URLSearchParams(window.location.search).has("social_code"));
+  const [socialError, setSocialError] = useState("");
+  const socialCallbackHandled = useRef(false);
+  const socialProviders = isSignedInRequester ? [] : visibleSocialProviders(socialConfig);
   const [singerProfile, setSingerProfile] = useState<SingerProfile | null>(null);
   const [canUploadProfileImage, setCanUploadProfileImage] = useState(true);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -378,6 +389,56 @@ export default function Requests() {
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
   const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const onPageShow = (event: PageTransitionEvent) => { if (event.persisted) setSocialBusy(false); };
+    window.addEventListener("pageshow", onPageShow);
+    api("/api/auth/social/config")
+      .then((config: SocialPublicConfig) => { if (!cancelled) setSocialConfig(config); })
+      .catch((error: unknown) => console.error("Could not load social sign-in options:", error));
+    return () => { cancelled = true; window.removeEventListener("pageshow", onPageShow); };
+  }, []);
+
+  useEffect(() => {
+    if (socialCallbackHandled.current) return;
+    socialCallbackHandled.current = true;
+    const callback = takeSocialLoginCallback();
+    if (!callback) return;
+    if (callback.error) {
+      setSocialError(callback.error);
+      setSocialBusy(false);
+      setNameModalOpen(true);
+      return;
+    }
+    setSocialBusy(true);
+    exchangeSocialLogin(callback.code, api)
+      .then((session) => {
+        auth.setSessionToken(session.sessionToken);
+        auth.setIsLoggedIn(true);
+        auth.setRole(session.role);
+        auth.setProfile({ username: session.username, displayName: session.displayName, picture: session.picture });
+        setSocialError("");
+        setNameModalOpen(false);
+      })
+      .catch((error: unknown) => {
+        setSocialError(error instanceof Error ? error.message : "Could not sign in. Please try again.");
+        setNameModalOpen(true);
+      })
+      .finally(() => setSocialBusy(false));
+  }, []);
+
+  async function signInWithSocial(provider: SocialProvider) {
+    if (socialBusy || savingName) return;
+    setSocialBusy(true);
+    setSocialError("");
+    try {
+      window.location.assign(await startSocialLogin(provider, api));
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : "Could not start sign-in. Please try again.");
+      setSocialBusy(false);
+    }
+  }
 
   useEffect(() => {
     // Close popup when clicking outside
@@ -581,10 +642,13 @@ export default function Requests() {
       if (request === profileLoadRef.current) {
         setSingerProfile(result.profile);
         setCanUploadProfileImage(result.canUpload);
+        setRequestedBy(result.displayName);
+        if (isSignedInRequester && result.displayName !== signedInRequestName) {
+          auth.setProfile({ displayName: result.displayName });
+        }
         if (!isSignedInRequester && typeof result.singerUuid === "string") {
           localStorage.setItem(SINGER_UUID_STORAGE_KEY, result.singerUuid);
           setSingerUuid(result.singerUuid);
-          setRequestedBy(result.displayName);
         }
       }
     } catch (error) {
@@ -593,7 +657,7 @@ export default function Requests() {
     } finally {
       if (request === profileLoadRef.current) setProfileLoading(false);
     }
-  }, [buildRequesterParams, nameConfirmed, requestedBy, requesterHeaders, isSignedInRequester, requesterSessionChanged]);
+  }, [buildRequesterParams, nameConfirmed, requestedBy, requesterHeaders, isSignedInRequester, requesterSessionChanged, signedInRequestName]);
 
   useEffect(() => {
     if (nameModalOpen) return;
@@ -1061,7 +1125,7 @@ export default function Requests() {
   }
 
   async function confirmName() {
-    if (savingName) return;
+    if (savingName || socialBusy) return;
     const name = nameDraft.trim().replace(/\s+/g, " ");
     if (name.split(" ").length < 2) {
       setNameError("Enter your first name and at least a last initial.");
@@ -1082,6 +1146,7 @@ export default function Requests() {
       setRequestedBy(savedName);
       if (isSignedInRequester) auth.setProfile({ displayName: savedName });
       setNameError("");
+      setSocialError("");
       setNameConfirmed(true);
       setNameModalOpen(false);
       setShowNamePrompt(false);
@@ -1758,25 +1823,44 @@ export default function Requests() {
             />}
           </ProfileDialog>
         )}
-        {nameModalOpen && (
+        {(nameModalOpen || socialBusy) && (
           <ProfileDialog title="Who is singing?" className="request-name-dialog"
-            onClose={nameConfirmed && !savingName ? () => setNameModalOpen(false) : undefined}>
+            onClose={nameConfirmed && !savingName && !socialBusy ? () => setNameModalOpen(false) : undefined}>
             <form className="request-name-form" onSubmit={(event) => { event.preventDefault(); void confirmName(); }}>
               <p id="singer-name-help">Enter your first name and at least a last initial so requests and queue edits stay linked to you.</p>
               {showNamePrompt && !requestedBy.trim() && <p className="profile-error">Enter your name to add songs to the queue.</p>}
               <input
                 id="singer-name-input" aria-label="Singer name" aria-describedby="singer-name-help singer-name-error"
                 aria-invalid={Boolean(nameError)} type="text" autoComplete="name" autoCapitalize="words"
-                placeholder="First L or First Last" value={nameDraft} disabled={savingName} autoFocus
+                placeholder="First L or First Last" value={nameDraft} disabled={savingName || socialBusy} autoFocus
                 onChange={(event) => { setNameDraft(event.currentTarget.value); setNameError(""); }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !shouldHandleEnterKey(event)) event.preventDefault();
                 }}
               />
               <p id="singer-name-error" className="profile-error" role="alert">{nameError}</p>
-              <button type="submit" className="request-name-save" disabled={savingName}>
+              <button type="submit" className="request-name-save" disabled={savingName || socialBusy}>
                 {savingName ? "Saving..." : "Continue"}
               </button>
+              {socialProviders.length > 0 && (
+                <div className="request-social-login">
+                  <p>Or connect with a social account</p>
+                  <div className="request-social-icons" role="group" aria-label="Social sign-in services">
+                    {socialProviders.map((provider) => (
+                      <button key={provider} type="button" className="request-social-button"
+                        title={`Sign in with ${SOCIAL_PROVIDER_NAMES[provider]}`}
+                        aria-label={`Sign in with ${SOCIAL_PROVIDER_NAMES[provider]}`}
+                        disabled={savingName || socialBusy} onClick={() => void signInWithSocial(provider)}>
+                        <SocialProviderIcon provider={provider} />
+                      </button>
+                    ))}
+                  </div>
+                  <p className="profile-help">Use your name and profile picture, and restore your queue and history when you sign in again. Your name and picture may appear in public queues and venue displays.</p>
+                </div>
+              )}
+              {!nameConfirmed && !isSignedInRequester && <PublicLegalLinks />}
+              {socialBusy && <p role="status">Signing in...</p>}
+              {socialError && <p className="profile-error" role="alert">{socialError}</p>}
             </form>
           </ProfileDialog>
         )}

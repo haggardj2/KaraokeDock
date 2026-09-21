@@ -2,6 +2,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
+import { getOrderedBreakTracks, isPositiveTrackId, rotateBreakPlaylistToFront, saveBreakMusicPlaylist, validateBreakTrackIds, type BreakMusicTrackRow } from '../breakMusicPlaylists.js';
 import {
   query,
   ensureHelpfulIndexes,
@@ -54,6 +55,8 @@ import { findOrCreateSinger, ensureSingerInActiveRotation, normalizeSingerName, 
 import { parseZipMediaRef } from '../zipMediaRef.js';
 import { buildOidcGrantCallbackUrl } from '../oidcRedirect.js';
 import { getOidcProfileClaims } from '../oidcProfile.js';
+import { createSocialAuthRouter } from './socialAuth.js';
+import { maskSocialConfig, SOCIAL_CONFIG_KEY, type SocialConfig } from '../socialAuthConfig.js';
 import {
   getQueueState,
   getSingerHistory,
@@ -61,14 +64,17 @@ import {
   reorderSingerQueue,
 } from '../queueState.js';
 import { recalculateSingerStats } from '../singerStats.js';
-import { ensureAuthenticatedSinger, getRequestIdentity, renameAuthenticatedSinger, resolveQueueRequester } from '../authenticatedSinger.js';
+import { ensureAuthenticatedSinger, getRequestIdentity, renameAuthenticatedSinger, renameSingerById, resolveQueueRequester } from '../authenticatedSinger.js';
 import { resolveGuestSinger } from '../guestSinger.js';
+import { getSingerMergeCandidates, mergeSingers, parseSingerId } from '../singerMerge.js';
+import { getAccountLinkCandidates, getLinkedLogins, isManagedAccount, linkAccountLogin, parseUserId } from '../accountLinks.js';
 import {
   SINGER_PROFILE_IMAGE_MAX_BYTES,
   applyImportedSingerProfile,
   clearSingerProfileImage,
   detectSingerProfileImageMime,
   getSingerProfileRow,
+  getUserSingerPresentation,
   setSingerProfileFocus,
   setSingerUploadedProfileImage,
   singerProfileFromRow,
@@ -468,6 +474,8 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
     res.status(403).json({ error: 'Forbidden: Authentication error' });
   }
 };
+
+apiRouter.use(createSocialAuthRouter(adminGuard, () => postQueueUpdate('queue.updated')));
 
 const toInt = (v: any): number | null => {
   const n = Number(v);
@@ -1344,7 +1352,7 @@ async function importSingerHistoryKdFile(file: SingerHistoryKdFile, options: {
         singerEntry.singer?.profile,
         { allowOidcUrl: options.allowOidcProfileUrls === true },
       );
-    } else if (singerEntry.singer?.profile?.crop !== undefined) {
+    } else if (!singer.identity_merged && singerEntry.singer?.profile?.crop !== undefined) {
       const profile = singerEntry.singer.profile;
       await setSingerProfileFocus(singer.id, profile.focusX, profile.focusY, profile.crop, { preserveAdminOverride: true });
     }
@@ -1437,15 +1445,6 @@ const findAvailableOidcUsername = async (baseUsername: string, currentUserId?: n
   }
 };
 
-type BreakMusicTrackRow = {
-  id: number;
-  title: string;
-  artist: string | null;
-  genre: string | null;
-  duration_ms: number | null;
-  file_path: string;
-};
-
 type BreakMusicState = {
   paused: boolean;
   autoPaused: boolean;
@@ -1481,14 +1480,14 @@ async function getBreakMusicState(): Promise<BreakMusicState> {
   return {
     paused: paused === true,
     autoPaused: autoPaused === true,
-    currentTrackId: Number.isFinite(Number(currentTrackId)) ? Number(currentTrackId) : null,
+    currentTrackId: isPositiveTrackId(currentTrackId) ? currentTrackId : null,
     currentStartedAt: typeof currentStartedAt === 'string' ? currentStartedAt : null,
     currentPositionSec: Number.isFinite(Number(currentPositionSec)) ? Number(currentPositionSec) : 0,
     playlistTrackIds: Array.isArray(playlistTrackIds)
-      ? playlistTrackIds.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
+      ? playlistTrackIds.filter(isPositiveTrackId)
       : [],
-    playlistIndex: Number.isFinite(Number(playlistIndex)) ? Number(playlistIndex) : 0,
-    activePlaylistId: Number.isFinite(Number(activePlaylistId)) ? Number(activePlaylistId) : null,
+    playlistIndex: Number.isSafeInteger(playlistIndex) && playlistIndex >= 0 ? playlistIndex : 0,
+    activePlaylistId: isPositiveTrackId(activePlaylistId) ? activePlaylistId : null,
   };
 }
 
@@ -1575,23 +1574,13 @@ function sanitizePlaylistFilename(name: string) {
   return reservedNames.has(fallbackSafe.toUpperCase()) ? `${fallbackSafe}-playlist` : fallbackSafe;
 }
 
-async function writeBreakMusicPlaylistFile(name: string, trackIds: number[]) {
+async function writeBreakMusicPlaylistFile(name: string, tracks: BreakMusicTrackRow[]) {
   const playlistsFolder = String(await getSetting('break_music.playlists_folder') || DEFAULT_BREAK_PLAYLISTS_FOLDER).trim() || DEFAULT_BREAK_PLAYLISTS_FOLDER;
   const resolvedFolder = path.resolve(playlistsFolder);
   await fs.mkdir(resolvedFolder, { recursive: true });
 
-  const tracks = trackIds.length
-    ? await query<Pick<BreakMusicTrackRow, 'title' | 'artist' | 'duration_ms' | 'file_path'>>(
-      `SELECT title, artist, duration_ms, file_path
-         FROM break_music_tracks
-        WHERE id = ANY($1)
-        ORDER BY array_position($1::int[], id)`,
-      [trackIds]
-    )
-    : { rows: [] };
-
   const lines = ['#EXTM3U'];
-  for (const track of tracks.rows) {
+  for (const track of tracks) {
     const durationSeconds = track.duration_ms ? Math.max(0, Math.floor(track.duration_ms / 1000)) : 0;
     const displayName = [track.artist, track.title].filter(Boolean).join(' - ') || path.basename(track.file_path);
     lines.push(`#EXTINF:${durationSeconds},${displayName}`);
@@ -1604,17 +1593,35 @@ async function writeBreakMusicPlaylistFile(name: string, trackIds: number[]) {
 }
 
 async function resolveBreakMusicPlaybackState(step: -1 | 0 | 1 = 0) {
+  const resolved = await resolveBreakMusicPlaybackCursor(step);
+  const { state, track } = resolved;
+  if (track && state.playlistTrackIds[state.playlistIndex] === track.id && state.playlistIndex > 0) {
+    state.playlistTrackIds = rotateBreakPlaylistToFront(state.playlistTrackIds, state.playlistIndex);
+    state.playlistIndex = 0;
+    await setBreakMusicState({ playlistTrackIds: state.playlistTrackIds, playlistIndex: 0 });
+  }
+  if (resolved.advanced) postQueueUpdate('break_music.updated');
+  return { state, track };
+}
+
+async function resolveBreakMusicPlaybackCursor(step: -1 | 0 | 1): Promise<{
+  state: BreakMusicState; track: BreakMusicTrackRow | null; advanced?: boolean;
+}> {
   let state = await getBreakMusicState();
   let track = await getBreakTrackById(state.currentTrackId);
 
-  const emptyPlaylistRows = { rows: [] as { id: number }[] };
-  const playlistRows = state.playlistTrackIds.length
-    ? await query<{ id: number }>(
-      `SELECT id FROM break_music_tracks WHERE id = ANY($1) ORDER BY array_position($1::int[], id)`,
-      [state.playlistTrackIds]
-    )
-    : emptyPlaylistRows;
-  const playlist = playlistRows.rows.map(r => r.id);
+  const playlistRows = await getOrderedBreakTracks(state.playlistTrackIds);
+  const playlist = playlistRows.map(r => r.id);
+  const availableIds = new Set(playlist);
+  const retainedIndex = state.playlistTrackIds.slice(0, state.playlistIndex).filter(id => availableIds.has(id)).length;
+  // The cursor identifies an occurrence, not just a track (a playlist can repeat tracks).
+  const activeIndex = track
+    ? playlist[retainedIndex] === track.id ? retainedIndex : playlist.indexOf(track.id)
+    : -1;
+  if (playlist.length !== state.playlistTrackIds.length || (activeIndex >= 0 && activeIndex !== state.playlistIndex)) {
+    state = { ...state, playlistTrackIds: playlist, playlistIndex: activeIndex >= 0 ? activeIndex : Math.min(retainedIndex, Math.max(0, playlist.length - 1)) };
+    await setBreakMusicState({ playlistTrackIds: state.playlistTrackIds, playlistIndex: state.playlistIndex });
+  }
 
   if (step === 0 && track && !state.paused && track.duration_ms && track.duration_ms > 0) {
     let elapsedSec = Math.max(0, state.currentPositionSec || 0);
@@ -1627,7 +1634,6 @@ async function resolveBreakMusicPlaybackState(step: -1 | 0 | 1 = 0) {
 
     const durationSec = Math.max(1, Math.floor(track.duration_ms / 1000));
     if (elapsedSec >= durationSec && playlist.length > 0) {
-      const activeIndex = playlist.indexOf(track.id);
       const nextIndex = (activeIndex >= 0 ? activeIndex + 1 : state.playlistIndex + 1) % playlist.length;
       track = await getBreakTrackById(playlist[nextIndex]);
       const currentStartedAt = track ? new Date().toISOString() : null;
@@ -1646,13 +1652,11 @@ async function resolveBreakMusicPlaybackState(step: -1 | 0 | 1 = 0) {
         playlistTrackIds: state.playlistTrackIds,
         playlistIndex: state.playlistIndex,
       });
-      postQueueUpdate('break_music.updated');
-      return { state, track };
+      return { state, track, advanced: true };
     }
   }
 
   if (step !== 0 && playlist.length > 0) {
-    const activeIndex = track ? playlist.indexOf(track.id) : -1;
     const baseIndex = activeIndex >= 0
       ? activeIndex
       : Math.min(Math.max(state.playlistIndex, 0), playlist.length - 1);
@@ -1758,8 +1762,7 @@ apiRouter.post(
         isDefaultPassword,
         role: userRecord.role,
         username: userRecord.username,
-        displayName: userRecord.display_name,
-        picture: userRecord.picture,
+        ...await getUserSingerPresentation(userRecord),
       });
     }
 
@@ -1806,8 +1809,7 @@ apiRouter.post(
       isDefaultPassword,
       role: updatedUser.role,
       username: updatedUser.username,
-      displayName: updatedUser.display_name,
-      picture: updatedUser.picture,
+      ...await getUserSingerPresentation(updatedUser),
     });
   })
 );
@@ -1835,8 +1837,7 @@ apiRouter.get(
       valid: true,
       role: info.role,
       username: user?.username || null,
-      displayName: user?.display_name || null,
-      picture: user?.picture || null,
+      ...(user ? await getUserSingerPresentation(user) : { displayName: null, picture: null }),
     });
   })
 );
@@ -1981,20 +1982,45 @@ apiRouter.get(
   ah(async (_req, res) => {
     const users = await listUsers();
     // Strip password hashes from the response
-    const safeUsers = users.map(u => ({
-      id: u.id,
-      username: u.username,
-      display_name: u.display_name,
-      picture: u.picture,
-      role: u.role,
-      is_active: u.is_active,
-      oidc_subject: u.oidc_subject,
-      oidc_issuer: u.oidc_issuer,
-      created_at: u.created_at,
-      updated_at: u.updated_at,
+    const safeUsers = await Promise.all(users.map(async u => {
+      const presentation = await getUserSingerPresentation(u);
+      return {
+        id: u.id,
+        username: u.username,
+        display_name: u.singer_display_name ?? presentation.displayName ?? u.display_name,
+        picture: presentation.picture,
+        role: u.role,
+        is_active: u.is_active,
+        oidc_subject: u.oidc_subject,
+        oidc_issuer: u.oidc_issuer,
+        social_provider: u.social_provider ?? null,
+        singer_id: u.singer_id == null ? null : String(u.singer_id),
+        singer_display_name: u.singer_display_name ?? null,
+        linkedLogins: await getLinkedLogins(u.id),
+        created_at: u.created_at,
+        updated_at: u.updated_at,
+      };
     }));
     res.json(safeUsers);
   })
+);
+
+apiRouter.get(
+  '/admin/users/:id/link-candidates',
+  adminGuard,
+  ah(async (req, res) => {
+    res.json(await getAccountLinkCandidates(req.params.id, req.query.q));
+  }),
+);
+
+apiRouter.post(
+  '/admin/users/:id/link',
+  adminGuard,
+  ah(async (req, res) => {
+    const result = await linkAccountLogin(req.params.id, req.body?.sourceUserId);
+    postQueueUpdate('queue.updated');
+    res.json(result);
+  }),
 );
 
 // Create a new user (admin only)
@@ -2034,15 +2060,18 @@ apiRouter.put(
   '/admin/users/:id',
   adminGuard,
   ah(async (req, res) => {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid user id' });
+    const id = parseUserId(req.params.id);
 
     const { role, is_active, password } = req.body;
+    const account = await getUserById(id);
+    if (!account) return res.status(404).json({ error: 'User not found' });
+    if (!isManagedAccount(account)) {
+      return res.status(409).json({ error: 'Manage account privileges on the canonical local or OIDC user' });
+    }
 
     // Prevent removing the last admin
     if (role === 'user' || is_active === false) {
-      const target = await getUserById(id);
-      if (target?.role === 'admin') {
+      if (account.role === 'admin') {
         const adminCount = await countAdminUsers();
         if (adminCount <= 1) {
           return res.status(400).json({ error: 'Cannot demote or deactivate the last admin user' });
@@ -2218,6 +2247,7 @@ apiRouter.put(
 // In-memory store for OIDC state/PKCE (expires after 10 minutes)
 const oidcStateStore = new Map<string, { codeVerifier: string; createdAt: number; returnTo: '/admin' | '/host'; redirectUri: string }>();
 const oidcExchangeStore = new Map<string, {
+  userId: number;
   sessionToken: string;
   role: string;
   username: string;
@@ -2412,11 +2442,11 @@ apiRouter.get(
       const sessionToken = await createSession(30, user.id, user.role);
       const exchangeCode = crypto.randomBytes(24).toString('hex');
       oidcExchangeStore.set(exchangeCode, {
+        userId: user.id,
         sessionToken,
         role: user.role,
         username: user.username,
-        displayName: user.display_name,
-        picture: user.picture,
+        ...await getUserSingerPresentation(user),
         createdAt: Date.now(),
       });
       const frontendUrl = await getOidcFrontendUrl(req);
@@ -2444,14 +2474,19 @@ apiRouter.post(
     }
 
     oidcExchangeStore.delete(code);
+    const user = await getUserById(entry.userId);
+    const session = await validateSessionInfo(entry.sessionToken);
+    if (!user?.is_active || !session.valid || session.userId !== user.id) {
+      return res.status(403).json({ error: 'Account disabled or session expired' });
+    }
+    await ensureAuthenticatedSinger(user);
 
     res.json({
       ok: true,
       sessionToken: entry.sessionToken,
-      role: entry.role,
-      username: entry.username,
-      displayName: entry.displayName,
-      picture: entry.picture,
+      role: session.role,
+      username: user.username,
+      ...await getUserSingerPresentation(user),
     });
   })
 );
@@ -3442,7 +3477,12 @@ async function resolveSelfSingerProfile(
   const user = await getOptionalAuthenticatedUser(req);
   if (user) {
     const singer = await ensureAuthenticatedSinger(user);
-    return { singer, user, canUpload: !user.oidc_subject };
+    return {
+      singer, user,
+      canUpload: singer.identity_merged
+        ? !singer.profile_image_admin_override && !singer.profile_image_user_id && singer.profile_image_source !== 'oidc'
+        : !user.oidc_subject && !user.social_provider,
+    };
   }
 
   const singer = await resolveGuestSinger(
@@ -3480,7 +3520,7 @@ apiRouter.post(
   ah(async (req, res) => {
     const resolved = await resolveSelfSingerProfile(req);
     if (!resolved.canUpload) {
-      return res.status(403).json({ error: 'This profile image is managed by your OIDC provider' });
+      return res.status(403).json({ error: 'This profile image is managed by your sign-in provider' });
     }
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
       return res.status(400).json({ error: 'Upload an image file' });
@@ -3500,6 +3540,9 @@ apiRouter.patch(
   queueLimiter,
   ah(async (req, res) => {
     const resolved = await resolveSelfSingerProfile(req);
+    if (resolved.singer.identity_merged && resolved.singer.profile_image_admin_override) {
+      return res.status(403).json({ error: 'This shared profile image is managed by the host' });
+    }
     await setSingerProfileFocus(resolved.singer.id, req.body?.focusX, req.body?.focusY, req.body?.crop);
     postQueueUpdate('queue.updated');
     res.json(await buildSelfSingerProfileResponse(resolved));
@@ -3512,7 +3555,7 @@ apiRouter.delete(
   ah(async (req, res) => {
     const resolved = await resolveSelfSingerProfile(req);
     if (!resolved.canUpload) {
-      return res.status(403).json({ error: 'This profile image is managed by your OIDC provider' });
+      return res.status(403).json({ error: 'This profile image is managed by your sign-in provider' });
     }
     await clearSingerProfileImage(resolved.singer.id);
     postQueueUpdate('queue.updated');
@@ -3647,7 +3690,7 @@ apiRouter.delete(
   ah(async (req, res) => {
     const singerId = Number(req.params.id);
     if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
-    const deleted = await withTransaction(async (client) => {
+    const deleted = await withQueueTransaction(async (client) => {
       const exists = await client.query<{ id: string }>(`SELECT id FROM singers WHERE id = $1 FOR UPDATE`, [singerId]);
       if (exists.rows.length === 0) {
         return false;
@@ -3731,7 +3774,7 @@ apiRouter.post(
     const { singer, user } = await resolveSelfSingerProfile(req);
     const result = await importSingerHistoryKdFile(data, {
       selfSinger: singer,
-      includeProfile: !user?.oidc_subject,
+      includeProfile: !user?.oidc_subject && !user?.social_provider,
     });
     await resortQueueByRotation();
     postQueueUpdate('queue.updated');
@@ -3792,59 +3835,10 @@ apiRouter.patch(
   '/singers/:id/rename',
   adminGuard,
   ah(async (req, res) => {
-    const singerId = Number(req.params.id);
-    const displayName = String(req.body?.displayName ?? '').trim();
-    if (!Number.isFinite(singerId)) return res.status(400).send('Invalid singer id');
-    if (!displayName) return res.status(400).send('displayName is required');
-
-    const normalizedName = normalizeSingerName(displayName);
-    if (!normalizedName) return res.status(400).send('displayName is required');
-
-    const existingSinger = await query<{ id: string }>(
-      `SELECT id FROM singers WHERE normalized_name = $1 AND id != $2 LIMIT 1`,
-      [normalizedName, singerId],
-    );
-    if (existingSinger.rows.length > 0) {
-      return res.status(400).send('Singer name is already in use');
-    }
-
-    await query('BEGIN');
-    try {
-      const updateSinger = await query<{ id: string; display_name: string; normalized_name: string }>(
-        `UPDATE singers
-            SET display_name = $1,
-                normalized_name = $2
-          WHERE id = $3
-        RETURNING id, display_name, normalized_name`,
-        [displayName, normalizedName, singerId],
-      );
-      if (updateSinger.rows.length === 0) {
-        await query('ROLLBACK');
-        return res.status(404).send('Singer not found');
-      }
-
-      await query(
-        `UPDATE queue
-            SET requested_by = $1
-          WHERE singer_id = $2
-            AND status IN ('queued', 'playing')`,
-        [displayName, singerId],
-      );
-
-      await query('COMMIT');
-      postQueueUpdate('queue.updated');
-      res.json({
-        ok: true,
-        singer: {
-          id: updateSinger.rows[0].id,
-          displayName: updateSinger.rows[0].display_name,
-          normalizedName: updateSinger.rows[0].normalized_name,
-        },
-      });
-    } catch (error) {
-      await query('ROLLBACK');
-      throw error;
-    }
+    if (typeof req.body?.displayName !== 'string') return res.status(400).json({ error: 'displayName is required' });
+    const singer = await renameSingerById(parseSingerId(req.params.id), req.body.displayName);
+    postQueueUpdate('queue.updated');
+    res.json({ ok: true, singer: { id: String(singer.id), displayName: singer.display_name, normalizedName: singer.normalized_name } });
   })
 );
 
@@ -3917,102 +3911,21 @@ apiRouter.patch(
 // ---------------------------------------------------------------------------
 // POST /api/singers/:id/merge — merge source singer into target singer (admin)
 // ---------------------------------------------------------------------------
+apiRouter.get(
+  '/singers/:id/merge-candidates',
+  adminGuard,
+  ah(async (req, res) => {
+    res.json(await getSingerMergeCandidates(req.params.id, req.query.q));
+  }),
+);
+
 apiRouter.post(
   '/singers/:id/merge',
   adminGuard,
   ah(async (req, res) => {
-    const targetId = Number(req.params.id);
-    const sourceId = Number(req.body?.sourceId);
-    if (!Number.isFinite(targetId) || !Number.isFinite(sourceId)) {
-      return res.status(400).json({ error: 'Invalid singer ids' });
-    }
-    if (targetId === sourceId) {
-      return res.status(400).json({ error: 'Cannot merge singer with itself' });
-    }
-    const merged = await withTransaction(async (client) => {
-      const singerCheck = await client.query<{ id: string }>(
-        `SELECT id FROM singers WHERE id = ANY($1::bigint[])`,
-        [[targetId, sourceId]],
-      );
-      if (singerCheck.rows.length < 2) {
-        return false;
-      }
-      const linkedUsers = await client.query(
-        `SELECT id FROM users WHERE singer_id IN ($1, $2) FOR UPDATE`, [targetId, sourceId],
-      );
-      if (linkedUsers.rows.length > 1) {
-        throw Object.assign(new Error('Cannot merge singers linked to different users'), { status: 409 });
-      }
-      // Get target display name for updating queue rows
-      const targetRes = await client.query<{ display_name: string }>(
-        `SELECT display_name FROM singers WHERE id = $1`,
-        [targetId],
-      );
-      const targetDisplayName = targetRes.rows[0]?.display_name ?? '';
-      // Move all queue entries from source to target
-      await client.query(
-        `UPDATE queue SET singer_id = $1, requested_by = $2 WHERE singer_id = $3`,
-        [targetId, targetDisplayName, sourceId],
-      );
-      // Remove source from rotations where target already exists, then reassign the rest
-      await client.query(
-        `DELETE FROM rotation_singers
-          WHERE singer_id = $1
-            AND rotation_id IN (
-              SELECT rotation_id FROM rotation_singers WHERE singer_id = $2
-            )`,
-        [sourceId, targetId],
-      );
-      await client.query(
-        `UPDATE rotation_singers SET singer_id = $1 WHERE singer_id = $2`,
-        [targetId, sourceId],
-      );
-      await client.query(`UPDATE rotation_turns SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
-      await client.query(`UPDATE manual_overrides SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
-      await client.query(
-        `UPDATE song_requests
-            SET participant_singer_ids = ARRAY(
-              SELECT mapped_id
-                FROM (
-                  SELECT
-                    CASE WHEN participant_id = $1::bigint THEN $2::bigint ELSE participant_id END AS mapped_id,
-                    MIN(ordinality) AS first_position
-                  FROM unnest(participant_singer_ids) WITH ORDINALITY AS participant(participant_id, ordinality)
-                  GROUP BY CASE WHEN participant_id = $1::bigint THEN $2::bigint ELSE participant_id END
-                ) deduplicated
-               ORDER BY first_position
-            )
-          WHERE $1::bigint = ANY(participant_singer_ids)`,
-        [sourceId, targetId],
-      );
-      await client.query(`UPDATE song_requests SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
-      await client.query(
-        `UPDATE singers target
-            SET profile_image_source = source.profile_image_source,
-                profile_image_url = source.profile_image_url,
-                profile_image_mime = source.profile_image_mime,
-                profile_image_data = source.profile_image_data,
-                profile_image_focus_x = source.profile_image_focus_x,
-                profile_image_focus_y = source.profile_image_focus_y,
-                profile_image_crop = source.profile_image_crop,
-                profile_image_admin_override = source.profile_image_admin_override,
-                profile_image_updated_at = source.profile_image_updated_at
-           FROM singers source
-          WHERE target.id = $1
-            AND source.id = $2
-            AND target.profile_image_source IS NULL
-            AND source.profile_image_source IS NOT NULL`,
-        [targetId, sourceId],
-      );
-      await client.query(`UPDATE users SET singer_id = $1 WHERE singer_id = $2`, [targetId, sourceId]);
-      await client.query(`DELETE FROM singers WHERE id = $1`, [sourceId]);
-      return true;
-    });
-    if (!merged) return res.status(404).json({ error: 'One or both singers not found' });
-    await recalculateSingerStats(String(targetId));
-    await resortQueueByRotation();
+    const merged = await mergeSingers(req.params.id, req.body?.sourceId);
     postQueueUpdate('queue.updated');
-    res.json({ ok: true });
+    res.json(merged);
   })
 );
 
@@ -5966,7 +5879,8 @@ apiRouter.get(
     const result = await query('SELECT key, value FROM settings ORDER BY key');
     const settings: Record<string, any> = {};
     for (const row of result.rows) {
-      settings[row.key] = row.value;
+      settings[row.key] = row.key === SOCIAL_CONFIG_KEY
+        ? maskSocialConfig(row.value as SocialConfig) : row.value;
     }
     settings['station.mode'] = process.env.STATION_MODE === 'true';
     settings['images.upload_dir'] = settings['images.upload_dir'] || DEFAULT_IMAGE_UPLOADS_DIR;
@@ -6007,6 +5921,9 @@ apiRouter.put(
     
     if (!key) {
       return res.status(400).json({ error: 'Setting key is required' });
+    }
+    if (key === 'social' || key.startsWith('social.')) {
+      return res.status(400).json({ error: 'Use /api/admin/settings/social to update social sign-in settings' });
     }
     
     await setSetting(key, value);
@@ -6163,8 +6080,9 @@ apiRouter.get(
           WHERE title ILIKE '%' || $1 || '%'
              OR artist ILIKE '%' || $1 || '%'
              OR genre ILIKE '%' || $1 || '%'
+             OR file_path ILIKE '%' || $1 || '%'
           ORDER BY artist NULLS LAST, title`,
-        [q]
+        [q.replace(/[\\%_]/g, '\\$&')]
       )
       : await query(
         `SELECT id, title, artist, genre, duration_ms, file_path
@@ -6206,6 +6124,7 @@ apiRouter.get(
       volumePercent: Number.isFinite(volumePercent) ? Math.max(0, Math.min(100, Math.round(volumePercent))) : 100,
       resumeDelaySec: Number.isFinite(resumeDelaySec) ? Math.max(0, Math.min(30, Math.round(resumeDelaySec))) : 2,
       currentTrack: resolved.track,
+      currentStartedAt: resolved.state.currentStartedAt,
       elapsedSec: elapsed,
       remainingSec,
       playlistTrackIds: resolved.state.playlistTrackIds,
@@ -6357,39 +6276,19 @@ apiRouter.post(
   '/break-music/playlists',
   sessionGuard,
   ah(async (req, res) => {
-    const name = String(req.body?.name ?? '').trim();
-    const trackIds = Array.isArray(req.body?.trackIds)
-      ? req.body.trackIds.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
-      : [];
-
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
     if (!name) return res.status(400).json({ error: 'name required' });
-    if (trackIds.length === 0) return res.status(400).json({ error: 'trackIds required' });
-
-    await query('BEGIN');
+    const trackIds = validateBreakTrackIds(req.body?.trackIds);
+    const { playlistId, tracks } = await saveBreakMusicPlaylist(name, trackIds);
+    let m3uPath: string | null = null;
+    let warning: string | undefined;
     try {
-      const playlist = await query<{ id: number }>(
-        `INSERT INTO break_music_playlists(name)
-         VALUES($1)
-         ON CONFLICT (name) DO UPDATE SET updated_at = now()
-         RETURNING id`,
-        [name]
-      );
-      const playlistId = playlist.rows[0].id;
-      await query(`DELETE FROM break_music_playlist_tracks WHERE playlist_id = $1`, [playlistId]);
-      for (let i = 0; i < trackIds.length; i++) {
-        await query(
-          `INSERT INTO break_music_playlist_tracks(playlist_id, track_id, position)
-           VALUES ($1, $2, $3)`,
-          [playlistId, trackIds[i], i]
-        );
-      }
-      const m3uPath = await writeBreakMusicPlaylistFile(name, trackIds);
-      await query('COMMIT');
-      res.json({ ok: true, playlistId, m3uPath });
+      m3uPath = await writeBreakMusicPlaylistFile(name, tracks);
     } catch (err) {
-      await query('ROLLBACK');
-      throw err;
+      warning = 'Playlist saved in the database, but the M3U file could not be exported. Check the playlists folder and its write permissions.';
+      logger.warn(`[break-music] M3U export failed for saved playlist ${playlistId}:`, err);
     }
+    res.json({ ok: true, playlistId, m3uPath, ...(warning ? { warning } : {}) });
   })
 );
 
@@ -6397,15 +6296,19 @@ apiRouter.post(
   '/break-music/playlists/load',
   sessionGuard,
   ah(async (req, res) => {
-    const playlistId = toInt(req.body?.playlistId);
-    if (playlistId == null) return res.status(400).json({ error: 'playlistId required' });
-    const tracks = await query<{ track_id: number }>(
+    const playlistId = req.body?.playlistId;
+    if (!isPositiveTrackId(playlistId)) return res.status(400).json({ error: 'playlistId must be a positive safe integer' });
+    const playlist = await query('SELECT id FROM break_music_playlists WHERE id = $1::bigint', [playlistId]);
+    if (!playlist.rows.length) return res.status(404).json({ error: 'Playlist not found' });
+    const savedTracks = await query<{ track_id: number }>(
       `SELECT track_id FROM break_music_playlist_tracks
         WHERE playlist_id = $1
         ORDER BY position`,
       [playlistId]
     );
-    const trackIds = tracks.rows.map(r => r.track_id);
+    const trackIds = validateBreakTrackIds(savedTracks.rows.map(r => r.track_id));
+    const tracks = await getOrderedBreakTracks(trackIds);
+    if (tracks.length !== trackIds.length) return res.status(400).json({ error: 'Playlist contains tracks that no longer exist' });
     await setBreakMusicState({
       playlistTrackIds: trackIds,
       playlistIndex: 0,
@@ -6417,7 +6320,35 @@ apiRouter.post(
     });
     const resolved = await resolveBreakMusicPlaybackState(0);
     postQueueUpdate('break_music.updated');
-    res.json({ ok: true, trackIds, currentTrack: resolved.track });
+    res.json({ ok: true, playlistId, activePlaylistId: resolved.state.activePlaylistId, trackIds, tracks, playlistIndex: resolved.state.playlistIndex, currentTrack: resolved.track });
+  })
+);
+
+apiRouter.get(
+  '/break-music/playlist/active',
+  sessionGuard,
+  ah(async (_req, res) => {
+    const state = await getBreakMusicState();
+    let tracks = await getOrderedBreakTracks(state.playlistTrackIds);
+    const trackIds = tracks.map(track => track.id);
+    const availableIds = new Set(trackIds);
+    const retainedIndex = state.playlistTrackIds.slice(0, state.playlistIndex).filter(id => availableIds.has(id)).length;
+    const currentTrack = await getBreakTrackById(state.currentTrackId);
+    const currentIndex = currentTrack
+      ? trackIds[retainedIndex] === currentTrack.id ? retainedIndex : trackIds.indexOf(currentTrack.id)
+      : -1;
+    if (currentIndex > 0) {
+      tracks = rotateBreakPlaylistToFront(tracks, currentIndex);
+      await setBreakMusicState({ playlistTrackIds: tracks.map(track => track.id), playlistIndex: 0 });
+    }
+    res.json({
+      trackIds: tracks.map(track => track.id),
+      tracks,
+      playlistId: state.activePlaylistId,
+      activePlaylistId: state.activePlaylistId,
+      playlistIndex: currentIndex >= 0 ? 0 : Math.min(retainedIndex, Math.max(0, tracks.length - 1)),
+      currentTrack,
+    });
   })
 );
 
@@ -6425,20 +6356,10 @@ apiRouter.post(
   '/break-music/playlist/active',
   sessionGuard,
   ah(async (req, res) => {
-    const requestedTrackIds = Array.isArray(req.body?.trackIds)
-      ? req.body.trackIds.map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
-      : [];
-
-    const existing = requestedTrackIds.length
-      ? await query<{ id: number }>(
-        `SELECT id
-           FROM break_music_tracks
-          WHERE id = ANY($1)
-          ORDER BY array_position($1::int[], id)`,
-        [requestedTrackIds]
-      )
-      : { rows: [] as { id: number }[] };
-    const trackIds = existing.rows.map((r) => r.id);
+    const requestedTrackIds = validateBreakTrackIds(req.body?.trackIds, true);
+    const tracks = await getOrderedBreakTracks(requestedTrackIds);
+    if (tracks.length !== requestedTrackIds.length) return res.status(400).json({ error: 'One or more tracks no longer exist' });
+    const trackIds = tracks.map((r) => r.id);
 
     const state = await getBreakMusicState();
     let currentTrackId = state.currentTrackId;
@@ -6452,7 +6373,9 @@ apiRouter.post(
       currentStartedAt = null;
       currentPositionSec = 0;
     } else if (currentTrackId != null && trackIds.includes(currentTrackId)) {
-      playlistIndex = trackIds.indexOf(currentTrackId);
+      const occurrence = state.playlistTrackIds.slice(0, state.playlistIndex).filter(id => id === currentTrackId).length;
+      const matchingIndexes = trackIds.flatMap((id, index) => id === currentTrackId ? [index] : []);
+      playlistIndex = matchingIndexes[Math.min(occurrence, matchingIndexes.length - 1)];
     } else {
       const maxIndex = Math.max(0, trackIds.length - 1);
       const nextIndex = Math.min(Math.max(state.playlistIndex, 0), maxIndex);
@@ -6476,6 +6399,7 @@ apiRouter.post(
     res.json({
       ok: true,
       trackIds: resolved.state.playlistTrackIds,
+      tracks: await getOrderedBreakTracks(resolved.state.playlistTrackIds),
       playlistIndex: resolved.state.playlistIndex,
       currentTrack: resolved.track
     });
@@ -6485,6 +6409,11 @@ apiRouter.post(
 // JSON error handler
 apiRouter.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('API error:', err);
+  if (err?.code === '23503' && [
+    'queue_singer_id_fkey', 'rotation_singers_singer_id_fkey', 'song_requests_singer_id_fkey',
+  ].includes(err.constraint)) {
+    return res.status(409).json({ error: 'Singer changed while processing the request. Refresh your singer profile and retry.' });
+  }
   const status = Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500;
   res.status(status).json({ error: String(err?.message || err) });
 });

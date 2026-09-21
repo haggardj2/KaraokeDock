@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
-import { withTransaction } from './db.js';
 import { normalizeSingerName, normalizeSingerUuid, type SingerRow } from './queueIdentity.js';
+import { withQueueTransaction } from './rotation/queueTransaction.js';
 
 const requestError = (message: string, status: number) => Object.assign(new Error(message), { status });
 
@@ -23,7 +23,7 @@ export async function resolveGuestSinger(
   if (options.rename && !displayName) throw requestError('name is required', 400);
 
   try {
-    return await withTransaction(async (client) => {
+    return await withQueueTransaction(async (client) => {
       const byUuid = uuid
         ? await client.query<SingerRow>('SELECT * FROM singers WHERE public_uuid = $1 FOR UPDATE', [uuid])
         : { rows: [] };

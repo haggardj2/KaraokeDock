@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, API_BASE } from "../api";
 import { useAuth } from "../auth-context";
 import { parseBooleanSetting } from "../utils/settings";
+import SocialLoginSettings from "../components/SocialLoginSettings";
+import AccountLinkDialog from "../components/AccountLinkDialog";
+import SingerAvatar from "../components/SingerAvatar";
 
 type LibraryParseMode =
   | 'discid-artist-title'
@@ -30,6 +33,10 @@ type ManagedUser = {
   is_active: boolean;
   oidc_subject: string | null;
   oidc_issuer: string | null;
+  social_provider?: 'google' | 'facebook' | null;
+  singer_id: string | null;
+  singer_display_name: string | null;
+  linkedLogins: { id: number; username: string; provider: string; isActive: boolean }[];
   created_at: string;
 };
 type OidcConfig = {
@@ -138,6 +145,7 @@ type AdminCardState = {
   remoteGatewayExpanded: boolean;
   usersExpanded: boolean;
   oidcSettingsExpanded: boolean;
+  socialLoginExpanded: boolean;
 };
 
 function loadAdminCardState(): AdminCardState {
@@ -148,6 +156,7 @@ function loadAdminCardState(): AdminCardState {
     remoteGatewayExpanded: true,
     usersExpanded: true,
     oidcSettingsExpanded: false,
+    socialLoginExpanded: false,
   };
 
   if (typeof window === 'undefined') {
@@ -168,14 +177,15 @@ function loadAdminCardState(): AdminCardState {
       remoteGatewayExpanded: parsed.remoteGatewayExpanded ?? defaults.remoteGatewayExpanded,
       usersExpanded: parsed.usersExpanded ?? defaults.usersExpanded,
       oidcSettingsExpanded: parsed.oidcSettingsExpanded ?? defaults.oidcSettingsExpanded,
+      socialLoginExpanded: parsed.socialLoginExpanded ?? defaults.socialLoginExpanded,
     };
   } catch {
     return defaults;
   }
 }
 
-const getUserDisplayName = (user: Pick<ManagedUser, 'username' | 'display_name'>) =>
-  user.display_name?.trim() || user.username;
+const getUserDisplayName = (user: Pick<ManagedUser, 'username' | 'display_name' | 'singer_display_name'>) =>
+  user.singer_display_name?.trim() || user.display_name?.trim() || user.username;
 
 export default function Admin() {
   const auth = useAuth()
@@ -252,6 +262,8 @@ export default function Admin() {
 
   // User Manager state
   const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [mergeUser, setMergeUser] = useState<ManagedUser | null>(null);
+  const [usersLoadError, setUsersLoadError] = useState("");
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [newUserUsername, setNewUserUsername] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
@@ -1082,12 +1094,21 @@ export default function Admin() {
 
   async function refreshUsers() {
     if (!auth.sessionToken || !auth.isLoggedIn || !auth.isAdmin) return;
+    setUsersLoadError("");
     try {
       const data = await api("/api/admin/users", { headers: sessionHeaders });
       setUsers(data);
     } catch (err) {
       console.error("Failed to load users:", err);
+      setUsersLoadError(err instanceof Error ? err.message : "Could not refresh users. Reload the list before merging.");
     }
+  }
+
+  async function handleUserMerged(sourceName: string) {
+    setMergeUser(null);
+    auth.retrySessionValidation();
+    setBanner(`Linked "${sourceName}" to "${mergeUser ? getUserDisplayName(mergeUser) : 'the selected account'}". Sign in again with the social provider to use this account and its permissions.`);
+    await refreshUsers();
   }
 
   async function handleCreateUser(e: React.FormEvent) {
@@ -2711,6 +2732,11 @@ export default function Admin() {
                 </button>
               </div>
               <div className={`card-content ${usersExpanded ? 'expanded' : 'collapsed'}`}>
+                {usersLoadError && (
+                  <div className="error-msg" role="alert">
+                    {usersLoadError} <button className="btn ghost" onClick={() => void refreshUsers()}>Retry</button>
+                  </div>
+                )}
                 <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'flex-end' }}>
                   <button
                     className="btn-icon primary"
@@ -2762,6 +2788,10 @@ export default function Admin() {
                     {users.map((user) => (
                       <div key={user.id} className="library-item">
                         <div className="library-header">
+                          <div style={{ flexShrink: 0, marginRight: 12 }}>
+                            <SingerAvatar name={getUserDisplayName(user)}
+                              profile={{ imageUrl: user.picture, focusX: 50, focusY: 50 }} size={40} />
+                          </div>
                           <div className="library-info">
                             <div className="library-name" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                               {getUserDisplayName(user)}
@@ -2773,15 +2803,26 @@ export default function Admin() {
                               }}>{user.role}</span>
                               {!user.is_active && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(239,68,68,0.2)', color: '#fca5a5', fontWeight: 600 }}>inactive</span>}
                               {user.oidc_subject && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(16,185,129,0.2)', color: '#6ee7b7', fontWeight: 600 }}>SSO</span>}
+                              {user.social_provider && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(16,185,129,0.2)', color: '#6ee7b7', fontWeight: 600 }}>{user.social_provider === 'google' ? 'Google' : 'Facebook'}</span>}
                             </div>
                             <div className="user-meta">
-                              {user.display_name && user.display_name !== user.username && (
+                              {getUserDisplayName(user) !== user.username && (
                                 <span>{user.username} •</span>
                               )}
                               <span className="user-meta-date">Created: {new Date(user.created_at).toLocaleDateString()}</span>
                             </div>
+                            {!!user.linkedLogins?.length && <div className="user-meta">
+                              Linked sign-ins: {user.linkedLogins.map(login => `${login.provider === 'google' ? 'Google' : 'Facebook'} (${login.username})${login.isActive ? '' : ' - disabled'}`).join(', ')}
+                            </div>}
                           </div>
                           <div className="library-actions">
+                            <button
+                              className="btn-icon"
+                              title="Merge a social login into this account"
+                              aria-label={`Merge singer and logins into ${getUserDisplayName(user)}`}
+                              disabled={!user.is_active || !!usersLoadError}
+                              onClick={() => setMergeUser(user)}
+                            ><MaterialIcon name="merge" /></button>
                             <button
                               className="btn-icon"
                               title="Edit user"
@@ -2807,6 +2848,18 @@ export default function Admin() {
               </div>
             </div>
 
+            {!stationMode && (
+              <SocialLoginSettings key={auth.sessionToken} sessionToken={auth.sessionToken}
+                expanded={cardState.socialLoginExpanded}
+                onToggle={() => updateCardState('socialLoginExpanded', !cardState.socialLoginExpanded)} />
+            )}
+            {auth.isAdmin && mergeUser && (
+              <AccountLinkDialog key={`${mergeUser.id}:${auth.sessionToken}`}
+                userId={mergeUser.id} targetName={getUserDisplayName(mergeUser)} role={mergeUser.role}
+                sessionToken={auth.sessionToken}
+                onClose={() => setMergeUser(null)}
+                onLinked={(sourceName) => void handleUserMerged(sourceName)} />
+            )}
             {/* OIDC Settings Card */}
             {!stationMode && (
             <div className="card">

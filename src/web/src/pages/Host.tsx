@@ -6,6 +6,10 @@ import { parseBooleanSetting } from '../utils/settings'
 import SingerAvatar, { type SingerProfile, type ProfileCrop } from '../components/SingerAvatar'
 import ProfileDialog from '../components/ProfileDialog'
 import ProfileImageEditor from '../components/ProfileImageEditor'
+import QueueDragHandle from '../components/QueueDragHandle'
+import QueueSongText from '../components/QueueSongText'
+import { attachTouchQueueReorder } from '../touch-queue-reorder'
+import { matchesBreakTrack, optionalPlaylistId, samePlaylistOrder, type BreakTrack } from '../break-playlist'
 import type { OverlaySettings } from '../components/QueueOverlay'
 import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, singerPlaybackAction, getSingerDisplaySong, type PlayerPlaybackState } from '../playerPlayback'
 
@@ -229,15 +233,6 @@ function renderStatusMessage(message: string) {
     )
   }
   return message
-}
-
-type BreakTrack = {
-  id: number
-  title: string
-  artist: string | null
-  genre: string | null
-  duration_ms: number | null
-  file_path: string
 }
 
 type BreakPlaylist = {
@@ -523,6 +518,13 @@ export default function Host() {
   const [breakPlaylists, setBreakPlaylists] = useState<BreakPlaylist[]>([])
   const [activeBreakPlaylistId, setActiveBreakPlaylistId] = useState<number | null>(null)
   const [selectedBreakPlaylistId, setSelectedBreakPlaylistId] = useState('')
+  const [breakPlaylistName, setBreakPlaylistName] = useState('')
+  const [breakDraftMode, setBreakDraftMode] = useState(false)
+  const [breakDraftDirty, setBreakDraftDirty] = useState(false)
+  const [breakManagerBusy, setBreakManagerBusy] = useState(false)
+  const [breakSyncPending, setBreakSyncPending] = useState(0)
+  const [breakManagerError, setBreakManagerError] = useState('')
+  const [breakManagerNotice, setBreakManagerNotice] = useState('')
   const [breakPlaylistIndex, setBreakPlaylistIndex] = useState(0)
   const [breakSort, setBreakSort] = useState<BreakSortState>({ column: 'artist', direction: 'asc' })
   const [showBreakColumnMenu, setShowBreakColumnMenu] = useState(false)
@@ -546,6 +548,10 @@ export default function Host() {
   const [savingSingerName, setSavingSingerName] = useState(false)
   const [singerDraggedId, setSingerDraggedId] = useState<string | null>(null)
   const [singerDragOverId, setSingerDragOverId] = useState<string | null>(null)
+  const [savingQueueOrder, setSavingQueueOrder] = useState(false)
+  const queueOrderSavingRef = useRef(false)
+  const singerQueueTouchRef = useRef<HTMLDivElement>(null)
+  const songQueueTouchRef = useRef<HTMLTableSectionElement>(null)
   const [modalSongDraggedId, setModalSongDraggedId] = useState<number | null>(null)
   const [modalSongDragOverId, setModalSongDragOverId] = useState<number | null>(null)
   const [historyManagerOpen, setHistoryManagerOpen] = useState(false)
@@ -556,10 +562,6 @@ export default function Host() {
   const [archivedSingers, setArchivedSingers] = useState<ArchivedSinger[]>([])
   const [archivedSingersLoading, setArchivedSingersLoading] = useState(false)
   // Merge singer state
-  const [mergeSingerDialogOpen, setMergeSingerDialogOpen] = useState(false)
-  const [mergeSingerQuery, setMergeSingerQuery] = useState('')
-  const [mergeSingerError, setMergeSingerError] = useState('')
-  const [mergingSinger, setMergingSinger] = useState(false)
   // Add song to queue from singer modal — delegates to showManualRequest with singer pre-filled
   const [manualRequestForSingerId, setManualRequestForSingerId] = useState<string | null>(null)
 
@@ -579,6 +581,11 @@ export default function Host() {
   const breakColumnMenuRef = useRef<HTMLDivElement | null>(null)
   const breakManagerLayoutRef = useRef<HTMLDivElement | null>(null)
   const breakPlaylistSyncRequestRef = useRef(0)
+  const breakSyncChainRef = useRef<Promise<void>>(Promise.resolve())
+  const breakManagerBusyRef = useRef(false)
+  const breakDraftRef = useRef(false)
+  const breakStateRequestRef = useRef(0)
+  const breakEditorRequestRef = useRef(0)
   const breakVolumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hostHistoryImportInputRef = useRef<HTMLInputElement | null>(null)
   const playerBackgroundImageInputRef = useRef<HTMLInputElement | null>(null)
@@ -853,8 +860,10 @@ export default function Host() {
   }, [auth.sessionToken, auth.isLoggedIn, headers])
 
   async function loadBreakMusicState() {
+    const request = ++breakStateRequestRef.current
     try {
       const state = await api('/api/break-music/state')
+      if (request !== breakStateRequestRef.current) return
       const nextPlaylistIndex = Number(state.playlistIndex)
       setBreakMusicPaused(!!state.paused)
       setBreakPauseDuringKaraoke(state.pauseDuringKaraoke !== false)
@@ -872,9 +881,8 @@ export default function Host() {
         setBreakMusicResumeDelay(Math.max(0, Math.min(30, Math.round(state.resumeDelaySec))))
       }
       setBreakPlaylists(state.playlists || [])
-      const nextActivePlaylistId = Number.isFinite(Number(state.activePlaylistId)) ? Number(state.activePlaylistId) : null
+      const nextActivePlaylistId = optionalPlaylistId(state.activePlaylistId)
       setActiveBreakPlaylistId(nextActivePlaylistId)
-      setSelectedBreakPlaylistId(nextActivePlaylistId != null ? String(nextActivePlaylistId) : '')
     } catch (err) {
       console.error('Failed to load break music state:', err)
     }
@@ -955,72 +963,160 @@ export default function Host() {
       const tracks = Array.isArray(result) ? result : []
       setBreakLibraryTracks(tracks)
       return tracks
-    } catch {
-      setBreakLibraryTracks([])
-      return []
+    } catch (error) {
+      console.error('Could not load break music library:', error)
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not load the break music library.')
+      throw error
     }
+  }
+
+  function setBreakEditorTracks(tracks: BreakTrack[]) {
+    setBreakPlaylistTracks(tracks)
+    breakPlaylistTracksRef.current = tracks
+  }
+
+  async function hydrateBreakActivePlaylist() {
+    const request = ++breakEditorRequestRef.current
+    const result: { tracks: BreakTrack[]; activePlaylistId: number | null } = await api('/api/break-music/playlist/active', { headers })
+    if (request === breakEditorRequestRef.current && !breakDraftRef.current) {
+      setBreakEditorTracks(result.tracks)
+    }
+    return result
   }
 
   async function openBreakMusicManager() {
     setShowBreakPlaylistModal(true)
-    const tracks = await loadBreakMusicLibrary('')
-    const byId = new Map<number, BreakTrack>(tracks.map((t: BreakTrack) => [t.id, t]))
-    const next = breakPlaylistTrackIds
-      .map((id) => byId.get(id))
-      .filter((v): v is BreakTrack => !!v)
-    setBreakPlaylistTracks(next)
-    breakPlaylistTracksRef.current = next
+    await refreshBreakMusicManager()
   }
 
   async function refreshBreakMusicManager() {
-    const tracks = await loadBreakMusicLibrary('')
-    const byId = new Map<number, BreakTrack>(tracks.map((t: BreakTrack) => [t.id, t]))
-    const next = breakPlaylistTracksRef.current.map((t) => byId.get(t.id) || t)
-    setBreakPlaylistTracks(next)
-    breakPlaylistTracksRef.current = next
+    if (breakManagerBusyRef.current) return
+    breakManagerBusyRef.current = true
+    setBreakManagerBusy(true)
+    setBreakManagerError('')
+    try {
+      await breakSyncChainRef.current
+      const [, playlists] = await Promise.all([
+        loadBreakMusicLibrary(''),
+        api('/api/break-music/playlists', { headers }) as Promise<BreakPlaylist[]>,
+      ])
+      setBreakPlaylists(playlists)
+      if (!breakDraftRef.current) {
+        const active = await hydrateBreakActivePlaylist()
+        const activeId = optionalPlaylistId(active.activePlaylistId)
+        setBreakPlaylistName(previous => previous || playlists.find(playlist => playlist.id === activeId)?.name || '')
+        setSelectedBreakPlaylistId(previous => previous || (activeId === null ? '' : String(activeId)))
+      }
+    } catch (error) {
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not refresh break music.')
+    } finally {
+      breakManagerBusyRef.current = false
+      setBreakManagerBusy(false)
+    }
+  }
+
+  function newBreakPlaylist() {
+    if (breakManagerBusyRef.current || (breakDraftDirty && !window.confirm('Discard the unsaved playlist draft?'))) return
+    breakEditorRequestRef.current++
+    breakDraftRef.current = true
+    setBreakDraftMode(true)
+    setBreakDraftDirty(false)
+    setBreakPlaylistName('')
+    setSelectedBreakPlaylistId('')
+    setBreakEditorTracks([])
+    setBreakManagerError('')
+    setBreakManagerNotice('New playlist draft. The running playlist is unchanged.')
+  }
+
+  async function editRunningBreakPlaylist() {
+    if (breakManagerBusyRef.current || (breakDraftDirty && !window.confirm('Discard the unsaved playlist draft?'))) return
+    breakDraftRef.current = false
+    setBreakDraftMode(false)
+    setBreakDraftDirty(false)
+    setBreakPlaylistName('')
+    setBreakManagerNotice('')
+    await refreshBreakMusicManager()
   }
 
   async function saveBreakPlaylist() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
-    if (breakPlaylistTracks.length === 0) return
-    const existingName = breakPlaylists.find((playlist) => String(playlist.id) === selectedBreakPlaylistId)?.name || ''
-    const enteredName = window.prompt('Save playlist as:', existingName)
-    if (enteredName === null) return
-    const name = enteredName.trim()
+    if (!auth.sessionToken || !auth.isLoggedIn || breakManagerBusyRef.current) return
+    const name = breakPlaylistName.trim()
     if (!name) {
-      window.alert('Playlist name is required.')
+      setBreakManagerError('Enter a playlist name before saving.')
       return
     }
-    const result = await api('/api/break-music/playlists', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        name,
-        trackIds: breakPlaylistTracks.map((t) => t.id),
-      }),
-    })
-    await loadBreakMusicState()
-    if (result?.playlistId) {
+    if (breakPlaylistTracksRef.current.length === 0) {
+      setBreakManagerError('Add at least one track before saving.')
+      return
+    }
+    if (breakPlaylists.some(playlist => playlist.name === name) && !window.confirm(`Replace the saved playlist "${name}"?`)) return
+    breakManagerBusyRef.current = true
+    setBreakManagerBusy(true)
+    setBreakManagerError('')
+    setBreakManagerNotice('')
+    try {
+      await breakSyncChainRef.current
+      const result: { playlistId: number; warning?: string } = await api('/api/break-music/playlists', {
+        method: 'POST', headers,
+        body: JSON.stringify({ name, trackIds: breakPlaylistTracksRef.current.map(track => track.id) }),
+      })
+      breakStateRequestRef.current++
+      setBreakPlaylists(previous => [
+        { id: result.playlistId, name }, ...previous.filter(playlist => playlist.id !== result.playlistId),
+      ])
       setSelectedBreakPlaylistId(String(result.playlistId))
+      setBreakDraftDirty(false)
+      setBreakManagerNotice(`Saved "${name}".${breakDraftRef.current ? ' Select Load to use it for playback.' : ''}${result.warning ? ` ${result.warning}` : ''}`)
+    } catch (error) {
+      console.error('Could not save break music playlist:', error)
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not save playlist.')
+    } finally {
+      breakManagerBusyRef.current = false
+      setBreakManagerBusy(false)
     }
   }
 
   async function loadBreakPlaylist(playlistId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
-    await api('/api/break-music/playlists/load', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ playlistId }),
-    })
-    setSelectedBreakPlaylistId(String(playlistId))
-    await loadBreakMusicState()
-    await refreshBreakMusicManager()
+    if (!auth.sessionToken || !auth.isLoggedIn || breakManagerBusyRef.current) return
+    if (breakDraftDirty && !window.confirm('Discard unsaved playlist edits and load the selected playlist for playback?')) return
+    breakManagerBusyRef.current = true
+    setBreakManagerBusy(true)
+    setBreakManagerError('')
+    setBreakManagerNotice('')
+    breakEditorRequestRef.current++
+    try {
+      await breakSyncChainRef.current
+      breakStateRequestRef.current++
+      const result: { tracks: BreakTrack[]; trackIds: number[]; currentTrack: BreakTrack | null; playlistIndex: number } =
+        await api('/api/break-music/playlists/load', {
+          method: 'POST', headers, body: JSON.stringify({ playlistId }),
+        })
+      breakDraftRef.current = false
+      setBreakDraftMode(false)
+      setBreakDraftDirty(false)
+      setBreakEditorTracks(result.tracks)
+      setBreakPlaylistTrackIds(result.trackIds)
+      setBreakPlaylistIndex(result.playlistIndex)
+      setBreakMusicTrack(result.currentTrack)
+      setSelectedBreakPlaylistId(String(playlistId))
+      setActiveBreakPlaylistId(playlistId)
+      const name = breakPlaylists.find(playlist => playlist.id === playlistId)?.name || ''
+      setBreakPlaylistName(name)
+      setBreakManagerNotice(`Loaded "${name}" for playback.`)
+      await loadBreakMusicState()
+    } catch (error) {
+      console.error('Could not load break music playlist:', error)
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not load playlist.')
+    } finally {
+      breakManagerBusyRef.current = false
+      setBreakManagerBusy(false)
+    }
   }
 
-  async function syncBreakActivePlaylist(nextTracks: BreakTrack[]) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
-    const requestId = ++breakPlaylistSyncRequestRef.current
+  async function syncBreakActivePlaylist(nextTracks: BreakTrack[], requestId: number) {
     try {
+      if (!auth.sessionToken || !auth.isLoggedIn) throw new Error('Sign in to update the running playlist.')
+      breakStateRequestRef.current++
       const result = await api('/api/break-music/playlist/active', {
         method: 'POST',
         headers,
@@ -1035,22 +1131,29 @@ export default function Host() {
     } catch (err) {
       console.error('Failed to sync active break playlist:', err)
       if (requestId === breakPlaylistSyncRequestRef.current) {
-        setBanner('⚠️ Failed to update active break playlist')
-        setTimeout(() => setBanner(''), 4000)
+        setBreakManagerError('Failed to update the running playlist. Your edits are still shown; save them as a named playlist or refresh to reload playback.')
       }
+    } finally {
+      setBreakSyncPending(count => count - 1)
     }
   }
 
   function setBreakPlaylistTracksAndSync(nextTracks: BreakTrack[]) {
-    setBreakPlaylistTracks(nextTracks)
-    breakPlaylistTracksRef.current = nextTracks
-    void syncBreakActivePlaylist(nextTracks)
+    if (breakManagerBusyRef.current) return
+    breakEditorRequestRef.current++
+    setBreakEditorTracks(nextTracks)
+    setBreakDraftDirty(true)
+    setBreakManagerNotice('')
+    if (breakDraftRef.current) return
+    const request = ++breakPlaylistSyncRequestRef.current
+    setBreakSyncPending(count => count + 1)
+    breakSyncChainRef.current = breakSyncChainRef.current.then(() => syncBreakActivePlaylist(nextTracks, request))
   }
 
   function addBreakTrackToPlaylist(track: BreakTrack) {
     const playlist = breakPlaylistTracksRef.current
     const hasIndexedCurrentTrack =
-      breakMusicTrack != null &&
+      !breakDraftRef.current && breakMusicTrack != null &&
       breakPlaylistIndex >= 0 &&
       breakPlaylistIndex < playlist.length &&
       playlist[breakPlaylistIndex]?.id === breakMusicTrack.id
@@ -1079,7 +1182,7 @@ export default function Host() {
     const newTracks = toAdd.filter((t) => !existingIds.has(t.id))
     if (newTracks.length === 0) return
     const hasIndexedCurrentTrack =
-      breakMusicTrack != null &&
+      !breakDraftRef.current && breakMusicTrack != null &&
       breakPlaylistIndex >= 0 &&
       breakPlaylistIndex < playlist.length &&
       playlist[breakPlaylistIndex]?.id === breakMusicTrack.id
@@ -1098,7 +1201,7 @@ export default function Host() {
     }
     // Pin the currently playing track at position 0 so that after it finishes,
     // playback continues through the full new shuffled order from the beginning.
-    if (breakMusicTrack) {
+    if (!breakDraftRef.current && breakMusicTrack) {
       const currentIdx = playlist.findIndex((t) => t.id === breakMusicTrack.id)
       if (currentIdx > 0) {
         const [current] = playlist.splice(currentIdx, 1)
@@ -1112,10 +1215,7 @@ export default function Host() {
     const playlist = breakPlaylistTracksRef.current
     const target = index + direction
     if (target < 0 || target >= playlist.length) return
-    const next = [...playlist]
-    const [item] = next.splice(index, 1)
-    next.splice(target, 0, item)
-    setBreakPlaylistTracksAndSync(next)
+    moveBreakTrackToPlaylistIndex(index, target)
   }
 
   function moveBreakTrackToPlaylistIndex(fromIndex: number, targetIndex: number) {
@@ -1129,6 +1229,10 @@ export default function Host() {
     ) {
       return
     }
+    if (!breakDraftRef.current && playlist[0]?.id === breakMusicTrack?.id) {
+      if (fromIndex === 0) return
+      targetIndex = Math.max(1, targetIndex)
+    }
     const next = [...playlist]
     const [item] = next.splice(fromIndex, 1)
     next.splice(targetIndex, 0, item)
@@ -1136,17 +1240,7 @@ export default function Host() {
   }
 
   const filteredBreakLibraryTracks = useMemo(() => {
-    const q = breakSearchQuery.trim().toLowerCase()
-    if (!q) return breakLibraryTracks
-    return breakLibraryTracks.filter((track) => {
-      const hay = [
-        track.title || '',
-        track.artist || '',
-        track.genre || '',
-        track.file_path || '',
-      ].join(' ').toLowerCase()
-      return hay.includes(q)
-    })
+    return breakLibraryTracks.filter(track => matchesBreakTrack(track, breakSearchQuery))
   }, [breakLibraryTracks, breakSearchQuery])
 
   const breakPlaylistDurationMs = useMemo(
@@ -1155,11 +1249,11 @@ export default function Host() {
   )
 
   const currentBreakPlaylistRowIndex = useMemo(() => {
-    if (!breakMusicTrack) return -1
+    if (breakDraftMode || !breakMusicTrack) return -1
     const indexedTrackId = breakPlaylistTracks[breakPlaylistIndex]?.id
     if (indexedTrackId === breakMusicTrack.id) return breakPlaylistIndex
     return breakPlaylistTracks.findIndex((item) => item.id === breakMusicTrack.id)
-  }, [breakMusicTrack, breakPlaylistTracks, breakPlaylistIndex])
+  }, [breakDraftMode, breakMusicTrack, breakPlaylistTracks, breakPlaylistIndex])
 
   const activeBreakPlaylistName = useMemo(() => {
     if (activeBreakPlaylistId == null) return ''
@@ -1167,14 +1261,13 @@ export default function Host() {
   }, [activeBreakPlaylistId, breakPlaylists])
 
   useEffect(() => {
-    if (!showBreakPlaylistModal || breakLibraryTracks.length === 0) return
-    const byId = new Map<number, BreakTrack>(breakLibraryTracks.map((t) => [t.id, t]))
-    const next = breakPlaylistTrackIds
-      .map((id) => byId.get(id))
-      .filter((v): v is BreakTrack => !!v)
-    setBreakPlaylistTracks(next)
-    breakPlaylistTracksRef.current = next
-  }, [showBreakPlaylistModal, breakPlaylistTrackIds, breakLibraryTracks])
+    if (!showBreakPlaylistModal || breakDraftMode || breakManagerBusy || breakSyncPending > 0 || breakManagerError) return
+    if (samePlaylistOrder(breakPlaylistTracksRef.current, breakPlaylistTrackIds)) return
+    void hydrateBreakActivePlaylist().catch(error => {
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not load the running playlist.')
+    })
+    return () => { breakEditorRequestRef.current++ }
+  }, [showBreakPlaylistModal, breakDraftMode, breakPlaylistTrackIds, breakManagerBusy, breakSyncPending, breakManagerError, headers])
 
   useEffect(() => {
     if (!showBreakColumnMenu) return
@@ -1306,6 +1399,8 @@ export default function Host() {
   }
 
   function closeBreakMusicManager() {
+    if (breakManagerBusyRef.current) return
+    breakEditorRequestRef.current++
     setShowBreakColumnMenu(false)
     setShowBreakPlaylistModal(false)
   }
@@ -1628,9 +1723,9 @@ export default function Host() {
     }
   }
 
-  async function handleModalSongDrop(targetQueueId: number) {
+  async function handleModalSongDrop(targetQueueId: number, sourceQueueId = modalSongDraggedId) {
     setModalSongDragOverId(null)
-    if (!modalSongDraggedId || modalSongDraggedId === targetQueueId || !selectedSingerId) {
+    if (!sourceQueueId || sourceQueueId === targetQueueId || !selectedSingerId || queueOrderSavingRef.current) {
       setModalSongDraggedId(null)
       return
     }
@@ -1639,12 +1734,14 @@ export default function Host() {
       return
     }
     const songs = selectedSingerHistory.queuedSongs.filter(s => s.status === 'queued')
-    const fromIdx = songs.findIndex(s => s.queueId === modalSongDraggedId)
+    const fromIdx = songs.findIndex(s => s.queueId === sourceQueueId)
     const toIdx = songs.findIndex(s => s.queueId === targetQueueId)
     if (fromIdx < 0 || toIdx < 0) { setModalSongDraggedId(null); return }
     const reordered = [...songs]
     const [moved] = reordered.splice(fromIdx, 1)
     reordered.splice(toIdx, 0, moved)
+    queueOrderSavingRef.current = true
+    setSavingQueueOrder(true)
     try {
       await api(`/api/singers/${selectedSingerId}/song-order`, {
         method: 'PATCH',
@@ -1656,7 +1753,10 @@ export default function Host() {
       setSelectedSingerHistory(history || null)
     } catch (err) {
       console.error('Failed to reorder singer queue:', err)
+      setBanner('Could not update song order. Please try again.')
     } finally {
+      queueOrderSavingRef.current = false
+      setSavingQueueOrder(false)
       setModalSongDraggedId(null)
     }
   }
@@ -1751,40 +1851,6 @@ export default function Host() {
     }
   }
 
-  async function mergeSingerIntoTarget() {
-    if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerId) return
-    const sourceName = mergeSingerQuery.trim()
-    if (!sourceName) { setMergeSingerError('Enter a singer name to merge'); return }
-    // Find singer id by name
-    const allSingers = queueState?.queueOrder ?? []
-    const matchedSinger =
-      allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase() && s.singerId !== selectedSingerId) ??
-      allSingers.find(s => s.displayName.toLowerCase() === sourceName.toLowerCase())
-    if (!matchedSinger) { setMergeSingerError(`Singer "${sourceName}" not found`); return }
-    if (matchedSinger.singerId === selectedSingerId) { setMergeSingerError('Cannot merge a singer with themselves'); return }
-    setMergingSinger(true)
-    setMergeSingerError('')
-    try {
-      await api(`/api/singers/${selectedSingerId}/merge`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ sourceId: Number(matchedSinger.singerId) }),
-      })
-      setMergeSingerDialogOpen(false)
-      setMergeSingerQuery('')
-      await refreshQueueState()
-      const history = await api(`/api/singers/${selectedSingerId}/history`, { headers })
-      setSelectedSingerHistory(history || null)
-      setBanner(`✔ Merged "${sourceName}" into this singer`)
-      setTimeout(() => setBanner(''), 4000)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Merge failed'
-      setMergeSingerError(msg)
-    } finally {
-      setMergingSinger(false)
-    }
-  }
-
   async function searchSongsForSinger(q: string) {
     // No longer used — singer add-song uses the manual request modal
   }
@@ -1825,6 +1891,44 @@ export default function Host() {
     setSingerDraggedId(singerId)
   }
 
+  const touchQueueCallbacks = useRef<{
+    enabled: () => boolean
+    singerDrop: (source: string, target: string) => void
+    songDrop: (source: string, target: string) => void
+  }>({
+    enabled: () => false,
+    singerDrop: (_source: string, _target: string) => {},
+    songDrop: (_source: string, _target: string) => {},
+  })
+  touchQueueCallbacks.current = {
+    enabled: () => auth.isLoggedIn && auth.isAdmin && !busy && !queueOrderSavingRef.current,
+    singerDrop: (source, target) => { void reorderSingers(source, target) },
+    songDrop: (source, target) => { void handleModalSongDrop(Number(target), Number(source)) },
+  }
+  const hasSingerQueue = Boolean(queueState?.queueOrder.length)
+  const hasSongQueue = Boolean(selectedSingerHistory?.queuedSongs.length)
+  useEffect(() => {
+    if (!singerQueueTouchRef.current) return
+    return attachTouchQueueReorder(singerQueueTouchRef.current, {
+      attribute: 'data-singer-drag-id',
+      isEnabled: () => touchQueueCallbacks.current.enabled(),
+      onStart: setSingerDraggedId, onTarget: setSingerDragOverId,
+      onEnd: () => { setSingerDraggedId(null); setSingerDragOverId(null) },
+      onDrop: (source, target) => touchQueueCallbacks.current.singerDrop(source, target),
+    })
+  }, [auth.isLoggedIn, hasSingerQueue])
+  useEffect(() => {
+    if (!songQueueTouchRef.current) return
+    return attachTouchQueueReorder(songQueueTouchRef.current, {
+      attribute: 'data-song-drag-id',
+      isEnabled: () => touchQueueCallbacks.current.enabled(),
+      onStart: id => setModalSongDraggedId(Number(id)),
+      onTarget: id => setModalSongDragOverId(id === null ? null : Number(id)),
+      onEnd: () => { setModalSongDraggedId(null); setModalSongDragOverId(null) },
+      onDrop: (source, target) => touchQueueCallbacks.current.songDrop(source, target),
+    })
+  }, [singerModalOpen, singerModalLoading, hasSongQueue])
+
   function handleSingerDragEnd() {
     setSingerDraggedId(null)
     setSingerDragOverId(null)
@@ -1837,8 +1941,12 @@ export default function Host() {
 
   async function handleSingerDrop(e: React.DragEvent, targetSingerId: string) {
     e.preventDefault()
+    if (singerDraggedId) await reorderSingers(singerDraggedId, targetSingerId)
+  }
+
+  async function reorderSingers(sourceSingerId: string, targetSingerId: string) {
     setSingerDragOverId(null)
-    if (!singerDraggedId || singerDraggedId === targetSingerId) {
+    if (sourceSingerId === targetSingerId || queueOrderSavingRef.current) {
       setSingerDraggedId(null)
       return
     }
@@ -1848,13 +1956,13 @@ export default function Host() {
     }
     const rotationId = queueState.activeRotation.id
     const singers = [...queueState.queueOrder].sort((a, b) => {
-      const aIsSinging = a.queuedSongs.some(q => q.status === 'playing')
-      const bIsSinging = b.queuedSongs.some(q => q.status === 'playing')
+      const aIsSinging = getSingerDisplaySong(a)?.status === 'playing'
+      const bIsSinging = getSingerDisplaySong(b)?.status === 'playing'
       if (aIsSinging && !bIsSinging) return -1
       if (!aIsSinging && bIsSinging) return 1
       return 0
     })
-    const fromIdx = singers.findIndex(s => s.singerId === singerDraggedId)
+    const fromIdx = singers.findIndex(s => s.singerId === sourceSingerId)
     const toIdx = singers.findIndex(s => s.singerId === targetSingerId)
     if (fromIdx < 0 || toIdx < 0) {
       setSingerDraggedId(null)
@@ -1864,6 +1972,8 @@ export default function Host() {
     const reordered = [...singers]
     const [moved] = reordered.splice(fromIdx, 1)
     reordered.splice(toIdx, 0, moved)
+    queueOrderSavingRef.current = true
+    setSavingQueueOrder(true)
     try {
       await api(`/api/rotations/${rotationId}/singers/reorder`, {
         method: 'PATCH',
@@ -1873,7 +1983,10 @@ export default function Host() {
       await refreshQueueState()
     } catch (err) {
       console.error('Failed to reorder singers:', err)
+      setBanner('Could not update singer order. Please try again.')
     } finally {
+      queueOrderSavingRef.current = false
+      setSavingQueueOrder(false)
       setSingerDraggedId(null)
     }
   }
@@ -3504,6 +3617,114 @@ function closeDetails(e: React.SyntheticEvent) {
           display: none;
         }
 
+        .singer-queue-header,
+        .singer-queue-tools {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+
+        .singer-queue-header {
+          justify-content: space-between;
+          margin-bottom: 20px;
+        }
+
+        .singer-queue-tools .stat-pill {
+          white-space: nowrap;
+        }
+
+        .singer-queue-row {
+          display: grid;
+          grid-template-columns: 32px 44px minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 12px;
+        }
+
+        .singer-queue-entry {
+          padding: 14px 16px;
+        }
+
+        .singer-queue-avatar {
+          --singer-avatar-size: 44px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .singer-queue-info {
+          min-width: 0;
+        }
+
+        .singer-queue-name {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+          font-size: 16px;
+          font-weight: 700;
+          overflow-wrap: anywhere;
+        }
+
+        .singer-queue-name > span:not(.singer-queue-name-text) {
+          white-space: nowrap;
+        }
+
+        .singer-queue-song {
+          margin-top: 2px;
+          font-size: 13px;
+          line-height: 1.5;
+          color: var(--color-text-secondary);
+          overflow-wrap: anywhere;
+        }
+
+        .singer-queue-stats {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px 16px;
+          margin-top: 4px;
+          font-size: 12px;
+          color: var(--color-text-muted);
+        }
+
+        .singer-queue-stats > span {
+          white-space: nowrap;
+        }
+
+        .singer-queue-actions {
+          display: flex;
+          gap: 6px;
+        }
+
+        .queue-drag-handle {
+          -webkit-touch-callout: none;
+        }
+
+        @media (pointer: coarse) {
+          [data-singer-drag-id],
+          [data-song-drag-id] {
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+          }
+        }
+
+        .queue-drag-handle:focus-visible {
+          outline: 2px solid var(--color-accent);
+          outline-offset: 3px;
+        }
+
+        @media (pointer: coarse) {
+          .queue-drag-handle {
+            min-width: 44px;
+            min-height: 44px;
+          }
+
+          .singer-queue-row {
+            grid-template-columns: 44px 44px minmax(0, 1fr) auto;
+          }
+        }
+
         .mobile-actions-menu {
           position: relative;
         }
@@ -3530,6 +3751,95 @@ function closeDetails(e: React.SyntheticEvent) {
         }
 
         @media (max-width: 640px) {
+          .singer-queue-card {
+            padding: 12px;
+          }
+
+          .singer-queue-header {
+            margin-bottom: 10px;
+          }
+
+          .singer-queue-entry {
+            padding: 8px;
+          }
+
+          .singer-queue-tools {
+            gap: 8px;
+          }
+
+          .singer-queue-row {
+            grid-template-columns: 44px minmax(0, 1fr) 44px;
+            grid-template-rows: minmax(44px, auto) minmax(40px, auto);
+            gap: 4px 8px;
+          }
+
+          .singer-queue-row > .queue-drag-handle {
+            grid-column: 1;
+            grid-row: 1;
+            width: 44px !important;
+            height: 44px !important;
+            font-size: 12px !important;
+            background-clip: content-box !important;
+            padding: 6px !important;
+            box-sizing: border-box;
+          }
+
+          .singer-queue-avatar {
+            --singer-avatar-size: 30px;
+            grid-column: 1;
+            grid-row: 2;
+          }
+
+          .singer-queue-info {
+            grid-column: 2;
+            grid-row: 1 / 3;
+          }
+
+          .singer-queue-name {
+            font-size: 14px;
+            line-height: 1.25;
+            gap: 4px;
+          }
+
+          .singer-queue-name-text {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            white-space: normal !important;
+          }
+
+          .singer-queue-song,
+          .singer-queue-stats {
+            margin-top: 4px;
+            font-size: 11px;
+          }
+
+          .singer-queue-stats {
+            gap: 4px 10px;
+          }
+
+          .singer-queue-last-sang,
+          .singer-queue-song-prefix {
+            display: none;
+          }
+
+          .singer-queue-actions {
+            grid-column: 3;
+            grid-row: 1 / 3;
+            flex-direction: column;
+            gap: 0;
+          }
+
+          .singer-queue-actions .control-btn {
+            width: 44px;
+            min-width: 44px;
+            min-height: 44px;
+            padding: 0 !important;
+            border: 0;
+            background: transparent;
+          }
+
           .queue-item-actions.desktop {
             display: none;
           }
@@ -4408,12 +4718,12 @@ function closeDetails(e: React.SyntheticEvent) {
               )}
             </div>
 
-            <div className="card">
-              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12}}>
+            <div className="card singer-queue-card">
+              <div className="singer-queue-header">
                 <h2 style={{margin: 0}} title="Queue Order" aria-label="Queue Order">
                   <MaterialIcon name="mic_external_on" style={{ fontSize: 24, verticalAlign: 'text-bottom' }} />
                 </h2>
-                <div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
+                <div className="singer-queue-tools">
                   <span className="stat-pill" title="Singers" aria-label={`${queueState?.queueOrder.length ?? 0} singers`}>
                     <MaterialIcon name="group" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 4 }} />
                     {queueState?.queueOrder.length ?? 0}
@@ -4450,6 +4760,11 @@ function closeDetails(e: React.SyntheticEvent) {
               </div>
 
               {/* Singer-based queue order */}
+              {Boolean(queueState?.queueOrder.length) && (
+                <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                  Drag a number or hold a singer to reorder.
+                </p>
+              )}
               {(!queueState || queueState.queueOrder.length === 0) ? (
                 <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-text-secondary)' }}>
                   <MaterialIcon name="music_note" style={{ fontSize: 48, marginBottom: 16, opacity: 0.5 }} />
@@ -4459,7 +4774,7 @@ function closeDetails(e: React.SyntheticEvent) {
                   </div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div ref={singerQueueTouchRef} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {(() => {
                     // Single-pass: tag each singer with isSinging, then sort current singer first
                     type TaggedSinger = typeof queueState.queueOrder[number] & { isSinging: boolean; displaySong: QueueSong | null }
@@ -4477,7 +4792,9 @@ function closeDetails(e: React.SyntheticEvent) {
                       return (
                     <div
                       key={singer.singerId}
-                      draggable
+                      className="singer-queue-entry"
+                      data-singer-drag-id={singer.singerId}
+                      draggable={!savingQueueOrder}
                       onDragStart={() => handleSingerDragStart(singer.singerId)}
                       onDragEnd={handleSingerDragEnd}
                       onDragOver={e => handleSingerDragOver(e, singer.singerId)}
@@ -4493,15 +4810,20 @@ function closeDetails(e: React.SyntheticEvent) {
                           ? '1.5px solid var(--color-accent)'
                           : '1px solid var(--color-border)',
                         borderRadius: 12,
-                        padding: '14px 16px',
                         opacity: singerDraggedId === singer.singerId ? 0.5 : 1,
                         cursor: 'grab',
                         transition: 'border-color 0.15s, background 0.15s',
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                      <div className="singer-queue-row">
                         {/* Position badge */}
-                        <span style={{
+                        <QueueDragHandle id={singer.singerId} attribute="data-singer-drag-id"
+                          label={`Reorder ${singer.displayName}`}
+                          disabled={busy || savingQueueOrder || !queueState.activeRotation}
+                          onStart={() => handleSingerDragStart(singer.singerId)}
+                          onTarget={setSingerDragOverId} onEnd={handleSingerDragEnd}
+                          onDrop={(sourceId, targetId) => void reorderSingers(sourceId, targetId)}
+                          style={{
                           display: 'inline-flex',
                           alignItems: 'center',
                           justifyContent: 'center',
@@ -4515,38 +4837,44 @@ function closeDetails(e: React.SyntheticEvent) {
                           fontSize: 14,
                         }}>
                           {isSinging ? <MaterialIcon name="mic_external_on" style={{ fontSize: 18 }} /> : idx + 1}
-                        </span>
+                        </QueueDragHandle>
 
-                        <SingerAvatar name={singer.displayName} profile={singer.profile} size={44} />
+                        <div className="singer-queue-avatar">
+                          <SingerAvatar name={singer.displayName} profile={singer.profile} size="var(--singer-avatar-size)" />
+                        </div>
 
                         {/* Singer info */}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 700, fontSize: 16, color: isSinging ? 'rgba(16,185,129,1)' : 'var(--color-text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                            {singer.displayName}
+                        <div className="singer-queue-info">
+                          <div className="singer-queue-name" style={{ color: isSinging ? 'rgba(16,185,129,1)' : 'var(--color-text-primary)' }}>
+                            <span className="singer-queue-name-text" title={singer.displayName}>{singer.displayName}</span>
                             {isSinging && (
                               <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, background: 'rgba(16,185,129,0.2)', color: 'rgba(16,185,129,1)', letterSpacing: 0.5, textTransform: 'uppercase' }}>
                                 Now Singing
                               </span>
                             )}
                           </div>
-                          <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 2 }}>
+                          <div className="singer-queue-song">
                             {displaySong
-                              ? <><strong style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'}</strong> {displaySong.title || 'Unknown'} — {displaySong.artist || 'Unknown'}{renderDiscIdTag(displaySong.discId)}</>
+                              ? <QueueSongText label={`${isSinging ? 'Singing' : 'Next'}: ${displaySong.title || 'Unknown'} — ${displaySong.artist || 'Unknown'}${displaySong.discId ? ` (${displaySong.discId})` : ''}`}>
+                                  <strong className="singer-queue-song-prefix" style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'} </strong>
+                                  {displaySong.title || 'Unknown'} — {displaySong.artist || 'Unknown'}{renderDiscIdTag(displaySong.discId)}
+                                </QueueSongText>
                               : <span style={{ opacity: 0.6 }}>No queued song</span>
                             }
                           </div>
-                          <div style={{ display: 'flex', gap: 16, marginTop: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
-                            <span><MaterialIcon name="music_note" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.queuedSongsCount} queued</span>
-                            <span><MaterialIcon name="check_circle" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.totalSongsSung} sang</span>
-                            {singer.lastSangAt && <span><MaterialIcon name="schedule" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{formatTimeAgo(singer.lastSangAt)}</span>}
+                          <div className="singer-queue-stats">
+                            <span title="Queued songs" aria-label={`${singer.queuedSongsCount} queued songs`}><MaterialIcon name="music_note" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.queuedSongsCount}</span>
+                            <span title="Songs sung" aria-label={`${singer.totalSongsSung} songs sung`}><MaterialIcon name="check_circle" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.totalSongsSung}</span>
+                            {singer.lastSangAt && <span className="singer-queue-last-sang" title="Last sang"><MaterialIcon name="schedule" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{formatTimeAgo(singer.lastSangAt)}</span>}
                           </div>
                         </div>
 
                         {/* Actions */}
-                        <div style={{ display: 'flex', gap: 6, flex: '0 0 auto' }}>
+                        <div className="singer-queue-actions">
                           <button
                             className="control-btn"
                             title="View singer queue and history"
+                            aria-label={`View ${singer.displayName}'s queue and history`}
                             onClick={() => openSingerModal(singer.singerId)}
                             style={{ padding: '6px 10px', fontSize: 16, lineHeight: 1 }}
                           >
@@ -4555,6 +4883,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           <button
                             className="control-btn danger"
                             title="Remove singer from rotation"
+                            aria-label={`Remove ${singer.displayName} from rotation`}
                             disabled={busy}
                             onClick={() => removeSingerFromRotation(singer.singerId)}
                             style={{ padding: '6px 10px', fontSize: 13 }}
@@ -4913,18 +5242,6 @@ function closeDetails(e: React.SyntheticEvent) {
                         <button
                           className="control-btn"
                           type="button"
-                          title="Merge another singer into this one"
-                          aria-label="Merge singer"
-                          style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
-                          onClick={() => { setMergeSingerDialogOpen(true); setMergeSingerError(''); setMergeSingerQuery('') }}
-                        >
-                          <MaterialIcon name="shuffle" />
-                        </button>
-                      )}
-                      {selectedSingerHistory && (
-                        <button
-                          className="control-btn"
-                          type="button"
                           title="Add a song to this singer's queue"
                           aria-label="Add song to queue"
                           style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
@@ -5005,7 +5322,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           </div>
                         ) : (
                           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                            <tbody>
+                            <tbody ref={songQueueTouchRef}>
                               {(() => {
                                 const queuedOnly = selectedSingerHistory.queuedSongs.filter(s => s.status === 'queued')
                                 const queuedIdxMap = new Map(queuedOnly.map((s, idx) => [s.queueId, idx]))
@@ -5015,7 +5332,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                 return (
                                   <tr
                                     key={song.queueId}
-                                    draggable={isDraggable}
+                                    data-song-drag-id={isDraggable ? String(song.queueId) : undefined}
+                                    draggable={isDraggable && !savingQueueOrder}
                                     onDragStart={() => isDraggable && setModalSongDraggedId(song.queueId)}
                                     onDragEnd={() => setModalSongDraggedId(null)}
                                     onDragOver={e => { if (isDraggable) { e.preventDefault(); setModalSongDragOverId(song.queueId) } }}
@@ -5029,7 +5347,14 @@ function closeDetails(e: React.SyntheticEvent) {
                                     }}
                                   >
                                     <td style={{ padding: '8px 10px', width: 32, textAlign: 'center', borderBottom: '1px solid var(--color-border)' }}>
-                                      <span style={{
+                                      <QueueDragHandle id={String(song.queueId)} attribute="data-song-drag-id"
+                                        label={`Reorder ${song.title || 'song'}`}
+                                        disabled={!isDraggable || busy || savingQueueOrder}
+                                        onStart={() => setModalSongDraggedId(song.queueId)}
+                                        onTarget={(id) => setModalSongDragOverId(id === null ? null : Number(id))}
+                                        onEnd={() => { setModalSongDraggedId(null); setModalSongDragOverId(null) }}
+                                        onDrop={(sourceId, targetId) => void handleModalSongDrop(Number(targetId), Number(sourceId))}
+                                        style={{
                                         background: 'rgba(99,102,241,0.9)',
                                         color: 'white',
                                         borderRadius: 6,
@@ -5040,7 +5365,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                         justifyContent: 'center',
                                         fontSize: 11,
                                         fontWeight: 700,
-                                      }}>{i + 1}</span>
+                                      }}>{i + 1}</QueueDragHandle>
                                     </td>
                                     <td style={{ padding: '8px 6px', borderBottom: '1px solid var(--color-border)' }}>
                                       <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
@@ -5277,46 +5602,6 @@ function closeDetails(e: React.SyntheticEvent) {
                             disabled={savingSingerName || editingSingerName.trim() === selectedSingerHistory.singer.displayName}
                           >
                             {savingSingerName ? 'Saving…' : 'Update Name'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
-                {mergeSingerDialogOpen && selectedSingerHistory && (
-                  <>
-                    <div className="modal-backdrop" onClick={() => setMergeSingerDialogOpen(false)} />
-                    <div className="modal" style={{ maxWidth: 460, zIndex: 1001 }}>
-                      <div className="modal-header">
-                        <h3 style={{ margin: 0 }}><MaterialIcon name="shuffle" style={{ fontSize: 22, verticalAlign: 'text-bottom', marginRight: 8 }} />Merge Singer</h3>
-                        <button className="control-btn" style={{ width: 40, height: 40, padding: 0 }} onClick={() => setMergeSingerDialogOpen(false)}><MaterialIcon name="close" /></button>
-                      </div>
-                      <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>
-                        Merge another singer's history and queue into <strong>{selectedSingerHistory.singer.displayName}</strong>. The other singer will be removed.
-                      </p>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                        <div>
-                          <label className="form-label" style={{ marginBottom: 6 }}>Singer to merge (source)</label>
-                          <input
-                            className="form-input"
-                            list="merge-singer-list"
-                            value={mergeSingerQuery}
-                            onChange={e => { setMergeSingerQuery(e.target.value); setMergeSingerError('') }}
-                            placeholder="Type singer name…"
-                            autoFocus
-                            disabled={mergingSinger}
-                          />
-                          <datalist id="merge-singer-list">
-                            {(queueState?.queueOrder ?? []).filter(s => s.singerId !== selectedSingerId).map(s => (
-                              <option key={s.singerId} value={s.displayName} />
-                            ))}
-                          </datalist>
-                        </div>
-                        {mergeSingerError && <div style={{ color: '#ef4444', fontSize: 13 }}>{mergeSingerError}</div>}
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-                          <button className="control-btn" type="button" onClick={() => setMergeSingerDialogOpen(false)} disabled={mergingSinger}>Cancel</button>
-                          <button className="control-btn primary" type="button" onClick={() => void mergeSingerIntoTarget()} disabled={mergingSinger || !mergeSingerQuery.trim()}>
-                            {mergingSinger ? 'Merging…' : 'Merge'}
                           </button>
                         </div>
                       </div>
@@ -6889,12 +7174,21 @@ function closeDetails(e: React.SyntheticEvent) {
                   </div>
 
                   <div className="break-manager-body">
+                    {breakManagerError && <p role="alert" style={{ color: 'var(--color-danger)', margin: '0 0 12px' }}>{breakManagerError}</p>}
+                    {breakManagerNotice && <p role="status" style={{ color: 'var(--color-text-secondary)', margin: '0 0 12px' }}>{breakManagerNotice}</p>}
+                    {(breakManagerBusy || breakSyncPending > 0) && (
+                      <p role="status" style={{ margin: '0 0 12px', fontSize: 13 }}>
+                        {breakManagerBusy ? 'Loading or saving playlist...' : 'Updating running playlist...'}
+                      </p>
+                    )}
                     <div className="break-manager-toolbar">
                       <label className="form-label" style={{ marginBottom: 6 }}>Saved Playlists</label>
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                         <select
                           className="form-input"
                           value={selectedBreakPlaylistId}
+                          aria-label="Saved playlists"
+                          disabled={breakManagerBusy}
                           onChange={(e) => setSelectedBreakPlaylistId(e.target.value)}
                           style={{ flex: 1, minWidth: 0, marginBottom: 0, padding: '10px 12px', fontSize: 13 }}
                         >
@@ -6909,8 +7203,9 @@ function closeDetails(e: React.SyntheticEvent) {
                           className="control-btn"
                           type="button"
                           title="Load selected playlist for break playback"
+                          aria-label="Load selected playlist for playback"
                           onClick={() => selectedBreakPlaylistId && loadBreakPlaylist(Number(selectedBreakPlaylistId))}
-                          disabled={!selectedBreakPlaylistId}
+                          disabled={!selectedBreakPlaylistId || breakManagerBusy}
                           style={{ padding: '10px 12px', minWidth: 44, flexShrink: 0 }}
                         >
                           <MaterialIcon name="download" />
@@ -6919,7 +7214,8 @@ function closeDetails(e: React.SyntheticEvent) {
                           className="control-btn"
                           type="button"
                           title="Save playlist"
-                          disabled={breakPlaylistTracks.length === 0}
+                          aria-label="Save playlist"
+                          disabled={breakPlaylistTracks.length === 0 || breakManagerBusy}
                           onClick={saveBreakPlaylist}
                           style={{ padding: '10px 12px', flexShrink: 0 }}
                         >
@@ -6929,7 +7225,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           className="control-btn"
                           type="button"
                           title="Shuffle playlist"
-                          disabled={breakPlaylistTracks.length < 2}
+                          disabled={breakPlaylistTracks.length < 2 || breakManagerBusy}
                           onClick={shuffleBreakPlaylist}
                           style={{ padding: '10px 12px', flexShrink: 0 }}
                         >
@@ -6938,14 +7234,39 @@ function closeDetails(e: React.SyntheticEvent) {
                         <button
                           className="control-btn"
                           type="button"
-                          title="Clear playlist"
-                          disabled={breakPlaylistTracks.length === 0}
+                          title={breakDraftMode ? 'Clear draft' : 'Clear running playlist'}
+                          disabled={breakPlaylistTracks.length === 0 || breakManagerBusy}
                           onClick={clearBreakPlaylist}
                           style={{ padding: '10px 12px', flexShrink: 0 }}
                         >
                           <MaterialIcon name="delete" />
                         </button>
                       </div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
+                        <button className="control-btn" type="button" disabled={breakManagerBusy} onClick={() => void refreshBreakMusicManager()}>
+                          Refresh
+                        </button>
+                        <button className="control-btn" type="button" disabled={breakManagerBusy} onClick={newBreakPlaylist}>
+                          New playlist
+                        </button>
+                        {breakDraftMode && (
+                          <button className="control-btn" type="button" disabled={breakManagerBusy} onClick={() => void editRunningBreakPlaylist()}>
+                            Edit running playlist
+                          </button>
+                        )}
+                        <label style={{ flex: '1 1 180px', fontSize: 13 }}>
+                          Playlist name
+                          <input className="form-input" aria-label="Playlist name" placeholder="Name to save"
+                            value={breakPlaylistName} disabled={breakManagerBusy}
+                            onChange={event => { setBreakPlaylistName(event.target.value); setBreakDraftDirty(true) }}
+                            style={{ marginBottom: 0, marginTop: 4 }} />
+                        </label>
+                      </div>
+                      <p style={{ color: 'var(--color-text-secondary)', fontSize: 12, margin: '10px 0 0' }}>
+                        {breakDraftMode
+                          ? 'Editing a separate draft. Save it, then Load it when you want to replace playback.'
+                          : 'Editing the running playlist. Changes apply immediately; Save keeps a named copy. New playlist leaves playback alone.'}
+                      </p>
                     </div>
 
                     <div className="break-manager-layout" ref={breakManagerLayoutRef}>
@@ -6954,7 +7275,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           <label className="form-label">Search Break Music</label>
                           <input
                             className="search-input"
-                            placeholder="Search break tracks..."
+                            placeholder="Search title, artist, genre, or folder path..."
                             value={breakSearchQuery}
                             onChange={(e) => setBreakSearchQuery(e.target.value)}
                             style={{ marginBottom: 0 }}
@@ -7108,16 +7429,15 @@ function closeDetails(e: React.SyntheticEvent) {
                           onDragOver={(ev) => {
                             if (!canDropOnBreakPlaylist(ev)) return
                             ev.preventDefault()
+                            ev.stopPropagation()
                           }}
                           onDrop={(ev) => {
                             ev.preventDefault()
+                            ev.stopPropagation()
                             if (breakDraggedPlaylistIndex !== null) {
                               const playlist = breakPlaylistTracksRef.current
                               if (breakDraggedPlaylistIndex < 0 || breakDraggedPlaylistIndex >= playlist.length) return
-                              const next = [...playlist]
-                              const [item] = next.splice(breakDraggedPlaylistIndex, 1)
-                              next.push(item)
-                              setBreakPlaylistTracksAndSync(next)
+                              moveBreakTrackToPlaylistIndex(breakDraggedPlaylistIndex, playlist.length - 1)
                               setBreakDraggedPlaylistIndex(null)
                               return
                             }
@@ -7129,7 +7449,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           }}
                           style={{ flex: 1, overflow: 'auto' }}
                         >
-                          {activeBreakPlaylistName && (
+                          {!breakDraftMode && activeBreakPlaylistName && (
                             <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--color-border)', fontSize: 12, color: 'var(--color-text-secondary)' }}>
                               Loaded playlist: <strong style={{ color: 'var(--color-text-primary)' }}>{activeBreakPlaylistName}</strong>
                             </div>
@@ -7144,7 +7464,7 @@ function closeDetails(e: React.SyntheticEvent) {
                               <div
                                 key={`${track.id}-${index}`}
                                 className={`break-playlist-row ${breakDraggedPlaylistIndex === index ? 'dragging' : ''} ${isCurrent ? 'current' : ''}`}
-                                draggable
+                                draggable={!isCurrent && !breakManagerBusy}
                                 onDragStart={() => {
                                   setBreakDraggedTrackId(null)
                                   setBreakDraggedPlaylistIndex(index)
@@ -7156,6 +7476,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 }}
                                 onDrop={(ev) => {
                                   ev.preventDefault()
+                                  ev.stopPropagation()
                                   if (breakDraggedPlaylistIndex !== null) {
                                     moveBreakTrackToPlaylistIndex(breakDraggedPlaylistIndex, index)
                                     setBreakDraggedPlaylistIndex(null)
@@ -7166,14 +7487,14 @@ function closeDetails(e: React.SyntheticEvent) {
                                   const draggedTrack = breakLibraryTracks.find((t) => t.id === trackId)
                                   if (!draggedTrack) return
                                   const next = [...breakPlaylistTracksRef.current]
-                                  next.splice(index, 0, draggedTrack)
+                                  next.splice(isCurrent ? index + 1 : index, 0, draggedTrack)
                                   setBreakPlaylistTracksAndSync(next)
                                   setBreakDraggedTrackId(null)
                                 }}
                               >
                                 <span
-                                  title="Drag to reorder playlist"
-                                  style={{ color: 'var(--color-text-secondary)', cursor: 'grab', fontSize: 16, textAlign: 'center' }}
+                                  title={isCurrent ? 'Currently playing song stays at the top' : 'Drag to reorder playlist'}
+                                  style={{ color: 'var(--color-text-secondary)', cursor: isCurrent ? 'default' : 'grab', fontSize: 16, textAlign: 'center' }}
                                 >
                                   <MaterialIcon name="drag_indicator" style={{ fontSize: 18 }} />
                                 </span>
@@ -7191,9 +7512,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                   </div>
                                 </div>
                                 <div style={{ display: 'flex', gap: 4 }}>
-                                  <button title="Move up" disabled={index === 0} onClick={() => moveBreakTrackInPlaylist(index, -1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}><MaterialIcon name="keyboard_arrow_up" style={{ fontSize: 18 }} /></button>
-                                  <button title="Move down" disabled={index === breakPlaylistTracks.length - 1} onClick={() => moveBreakTrackInPlaylist(index, 1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}><MaterialIcon name="keyboard_arrow_down" style={{ fontSize: 18 }} /></button>
-                                  <button title="Remove from playlist" onClick={() => removeBreakTrackFromPlaylist(index)} style={{ border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer' }}><MaterialIcon name="delete" style={{ fontSize: 18 }} /></button>
+                                  <button title="Move up" disabled={breakManagerBusy || isCurrent || index === 0 || (currentBreakPlaylistRowIndex === 0 && index === 1)} onClick={() => moveBreakTrackInPlaylist(index, -1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}><MaterialIcon name="keyboard_arrow_up" style={{ fontSize: 18 }} /></button>
+                                  <button title="Move down" disabled={breakManagerBusy || isCurrent || index === breakPlaylistTracks.length - 1} onClick={() => moveBreakTrackInPlaylist(index, 1)} style={{ border: 'none', background: 'transparent', color: 'var(--color-text-primary)', cursor: 'pointer' }}><MaterialIcon name="keyboard_arrow_down" style={{ fontSize: 18 }} /></button>
+                                  <button title="Remove from playlist" disabled={breakManagerBusy} onClick={() => removeBreakTrackFromPlaylist(index)} style={{ border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer' }}><MaterialIcon name="delete" style={{ fontSize: 18 }} /></button>
                                 </div>
                               </div>
                             )

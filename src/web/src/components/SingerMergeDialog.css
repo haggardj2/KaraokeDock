@@ -1,0 +1,22 @@
+.profile-dialog.singer-merge-dialog { width: min(640px, calc(100vw - 24px)); }
+.singer-merge-form { display: grid; gap: 12px; }
+.singer-merge-form p { margin: 0; line-height: 1.5; }
+.singer-merge-help, .singer-merge-detail { color: var(--color-text-secondary, #aaa); font-size: 13px; }
+.singer-merge-form input[type="search"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #444);
+  border-radius: 8px;
+  background: var(--color-bg-secondary, #252532);
+  color: inherit;
+}
+.singer-merge-options { margin: 0; padding: 8px; min-width: 0; max-height: 280px; overflow: auto; border: 1px solid var(--color-border, #444); border-radius: 8px; }
+.singer-merge-option { display: flex; gap: 10px; padding: 10px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere; }
+.singer-merge-option.selected { background: var(--color-bg-secondary, #252532); }
+.singer-merge-option input, .singer-merge-confirm input { flex: 0 0 auto; align-self: flex-start; margin-top: 4px; }
+.singer-merge-detail { display: block; margin-top: 3px; }
+.singer-merge-confirm { display: flex; gap: 10px; font-size: 13px; line-height: 1.5; }
+.singer-merge-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.singer-merge-actions button[type="submit"] { background: var(--color-accent, #6366f1); color: white; }

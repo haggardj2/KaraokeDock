@@ -257,6 +257,9 @@ export interface User {
   is_active: boolean;
   oidc_subject: string | null;
   oidc_issuer: string | null;
+  social_provider?: 'google' | 'facebook' | null;
+  social_subject?: string | null;
+  canonical_user_id?: number | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -307,8 +310,14 @@ export async function getUserById(id: number): Promise<User | null> {
   return res.rows[0] || null;
 }
 
-export async function listUsers(): Promise<User[]> {
-  const res = await query<User>('SELECT * FROM users ORDER BY created_at ASC');
+export async function listUsers(): Promise<(User & { singer_display_name: string | null })[]> {
+  const res = await query<User & { singer_display_name: string | null }>(
+    `SELECT u.*, s.display_name AS singer_display_name
+       FROM users u LEFT JOIN singers s ON s.id = u.singer_id
+      WHERE u.canonical_user_id IS NULL
+        AND (u.password_hash IS NOT NULL OR u.oidc_subject IS NOT NULL)
+      ORDER BY u.created_at ASC`
+  );
   return res.rows;
 }
 
@@ -367,16 +376,27 @@ export async function updateUser(id: number, updates: {
     `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
     values
   );
+  if (res.rows[0] && (updates.is_active === false || updates.role !== undefined)) {
+    await query('DELETE FROM sessions WHERE user_id = $1 OR login_user_id = $1', [id]);
+  }
   return res.rows[0] || null;
 }
 
 export async function deleteUser(id: number): Promise<void> {
-  await query('DELETE FROM users WHERE id = $1', [id]);
+  try {
+    await query('DELETE FROM users WHERE id = $1', [id]);
+  } catch (error: any) {
+    if (error?.code === '23503' && error?.constraint === 'users_canonical_user_id_fkey') {
+      throw Object.assign(new Error('Account has linked logins; deactivate the account instead'), { status: 409 });
+    }
+    throw error;
+  }
 }
 
 export async function countAdminUsers(): Promise<number> {
   const res = await query<{ c: string }>(
-    `SELECT COUNT(*)::text AS c FROM users WHERE role = 'admin' AND is_active = true`
+    `SELECT COUNT(*)::text AS c FROM users WHERE role = 'admin' AND is_active = true
+       AND canonical_user_id IS NULL AND (password_hash IS NOT NULL OR oidc_subject IS NOT NULL)`
   );
   return Number(res.rows[0].c);
 }
@@ -435,6 +455,7 @@ export interface Session {
   id: number;
   token: string;
   user_id: number | null;
+  login_user_id?: number | null;
   role: string | null;
   created_at: Date;
   expires_at: Date;
@@ -452,15 +473,15 @@ export interface SessionInfo {
  * Sessions expire after 30 days by default.
  * When no userId is provided this creates a legacy-style session treated as admin for backward compat.
  */
-export async function createSession(expiresInDays: number = 30, userId?: number, role: string = 'user'): Promise<string> {
+export async function createSession(expiresInDays: number = 30, userId?: number, role: string = 'user', loginUserId?: number): Promise<string> {
   const token = generateToken();
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + expiresInDays);
   const storedToken = hashSessionToken(token);
 
   await query(
-    'INSERT INTO sessions (token, expires_at, user_id, role) VALUES ($1, $2, $3, $4)',
-    [storedToken, expiresAt, userId ?? null, role]
+    'INSERT INTO sessions (token, expires_at, user_id, role, login_user_id) VALUES ($1, $2, $3, $4, $5)',
+    [storedToken, expiresAt, userId ?? null, role, loginUserId ?? null]
   );
 
   return token;
@@ -489,6 +510,20 @@ export async function validateSessionInfo(token: string): Promise<SessionInfo> {
   }
 
   const session = res.rows[0];
+  let role = session.role || 'admin';
+  if (session.user_id != null) {
+    const user = await getUserById(session.user_id);
+    // Old source sessions never gain privileges merely because an admin links the login.
+    if (!user?.is_active || user.canonical_user_id) return { valid: false, role: 'user' };
+    if (session.login_user_id != null) {
+      const login = await getUserById(session.login_user_id);
+      if (!login?.is_active || (login.canonical_user_id ?? login.id) !== user.id) {
+        return { valid: false, role: 'user' };
+      }
+    }
+    // Demotions take effect immediately; promotions require a fresh sign-in.
+    role = role === 'admin' && user.role === 'admin' && !user.social_provider ? 'admin' : 'user';
+  }
 
   // Update last accessed time
   if (session.token === token) {
@@ -498,8 +533,6 @@ export async function validateSessionInfo(token: string): Promise<SessionInfo> {
   }
 
   // Backward compat: sessions without user_id are legacy admin sessions
-  const role = session.role || 'admin';
-
   return {
     valid: true,
     userId: session.user_id ?? undefined,

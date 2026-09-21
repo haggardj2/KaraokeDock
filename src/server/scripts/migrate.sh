@@ -36,5 +36,9 @@ psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/019_add_fuzzy_search.sql
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/020_singer_profiles.sql
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/021_singer_identity_and_crop.sql
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/022_queue_manual_order.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/023_singer_social_login.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/024_shared_singer_identity.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/025_break_music_path_search.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/026_account_login_links.sql
 
 echo "Migrations completed successfully"
