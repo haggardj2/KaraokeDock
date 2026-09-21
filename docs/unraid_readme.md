@@ -9,6 +9,7 @@ This guide covers installing KaraokeDock on Unraid from **Community Applications
 - A PostgreSQL container
 - A share or folder for karaoke tracks
 - Optional folders for downloaded tracks and break music
+- Persistent writable folders for downloads, uploaded player images, and exported playlists
 
 ## Recommended shares and folders
 
@@ -19,6 +20,8 @@ Create a share such as `karaoke`, then create these folders:
 /mnt/user/karaoke/downloads
 /mnt/user/karaoke/Break Music
 /mnt/user/appdata/postgresql
+/mnt/user/appdata/karaokedock/images
+/mnt/user/appdata/karaokedock/playlists
 ```
 
 Recommended use:
@@ -28,6 +31,10 @@ Recommended use:
 | `/mnt/user/karaoke/Karaoke Tracks` | `/media/karaoke` | Read-only | Local karaoke library |
 | `/mnt/user/karaoke/downloads` | `/media/downloads` | Read/write | Downloaded/imported tracks |
 | `/mnt/user/karaoke/Break Music` | `/media/breakmusic` | Read-only | Break music |
+| `/mnt/user/appdata/karaokedock/images` | `/media/images` | Read/write | Uploaded player backgrounds |
+| `/mnt/user/appdata/karaokedock/playlists` | `/media/playlists` | Read/write | Break-music M3U exports |
+
+Singer profiles, login links, queue/history, settings, and saved playlist definitions are stored in PostgreSQL. Back up the database as well as writable media folders before upgrading. The application runs database migrations on startup.
 
 ## Install PostgreSQL
 
@@ -85,7 +92,7 @@ DB_HOST=postgresql_alpine
 DB_PORT=5432
 ```
 
-The KaraokeDock template defaults `DB_HOST` to `postgresql_alpine`.
+The template leaves `DB_HOST` blank deliberately: choose the correct address for your network. The default `bridge` network does not provide container-name DNS. Select the shared user-defined network for both containers in Unraid; if your setup uses Extra Parameters, use `--network=NETWORK_NAME`. Verify the running containers' network membership rather than assuming a container name will resolve.
 
 ## Install KaraokeDock from Community Applications
 
@@ -111,16 +118,20 @@ haggardj2/karaokedock:latest
 The Web UI opens at:
 
 ```text
-http://UNRAID_IP:5173
+http://UNRAID_IP:5173/admin
 ```
 
-### Required paths
+### Storage paths
 
 | Template field | Container path | Example host path |
 |---|---|---|
 | Karaoke Tracks | `/media/karaoke` | `/mnt/user/karaoke/Karaoke Tracks` |
 | Downloads | `/media/downloads` | `/mnt/user/karaoke/downloads` |
 | Break Music | `/media/breakmusic` | `/mnt/user/karaoke/Break Music` |
+| Uploaded Images | `/media/images` | `/mnt/user/appdata/karaokedock/images` |
+| Exported Playlists | `/media/playlists` | `/mnt/user/appdata/karaokedock/playlists` |
+
+Break Music is optional. The other mappings are required by the template. Existing installations should add the image and playlist mappings explicitly when updating their saved Unraid template. If Admin overrides either internal directory, map that directory too.
 
 ### Required database variables
 
@@ -141,6 +152,7 @@ For LAN-only access:
 ```text
 WEB_APP_URL=http://192.168.1.50:5173
 ORIGIN=http://192.168.1.50:5173,http://localhost:5173,http://127.0.0.1:5173
+TRUST_PROXY=false
 ```
 
 If using a reverse proxy:
@@ -152,6 +164,10 @@ TRUST_PROXY=1
 ```
 
 `ORIGIN` is comma-separated. Include every browser URL that will access the app so HTTP requests and WebSockets work correctly.
+
+The template leaves `WEB_APP_URL` and `ORIGIN` blank so you supply real browser-facing origins instead of accidentally using `localhost`. Do not add `/admin`, `/host`, or other paths. Google/Facebook sign-in and installation of the Host PWA require trusted HTTPS (except localhost for development).
+
+`TRUST_PROXY` defaults to `false` for direct access. Behind a reverse proxy, use the trusted proxy IP/CIDR or the correct hop count for your deployment; `1` assumes one trusted proxy hop. Ensure the proxy forwards WebSockets and prevent clients from bypassing it when relying on forwarded headers.
 
 ### Optional performance setting
 
@@ -167,6 +183,8 @@ Suggested values:
 
 Leave it blank to let KaraokeDock auto-pick a value.
 
+The advanced **Media Scan Interval (ms)** setting defaults to `900000` (15 minutes). Enable **periodic media library scan** in Admin separately; changing the interval alone does not enable scanning. The first enabled pass reconciles the library, and subsequent passes scan changed folders. Failed scans remain pending for retry.
+
 ## First startup
 
 1. Start PostgreSQL.
@@ -178,7 +196,7 @@ Leave it blank to let KaraokeDock auto-pick a value.
 http://UNRAID_IP:5173/admin
 ```
 
-5. Configure your local library path if needed.
+5. Add `/media/karaoke` as a local library in Admin, and `/media/breakmusic` as a break-music folder if used. Use container paths, not Unraid host paths.
 6. Run a library scan from the Admin page.
 7. Open the Host page:
 
@@ -198,6 +216,13 @@ Guests use:
 http://UNRAID_IP:5173/
 ```
 
+## Project and support
+
+- [Project](https://github.com/haggardj2/KaraokeDock)
+- [Issues and support](https://github.com/haggardj2/KaraokeDock/issues)
+- [Social/OIDC account linking and provider setup](SOCIAL_LOGIN.md)
+- [Host app installation](README.md#install-the-host-app)
+
 ## PostgreSQL connection troubleshooting
 
 ### KaraokeDock cannot connect to PostgreSQL
@@ -206,7 +231,7 @@ Check:
 
 - PostgreSQL container is running.
 - `DB_HOST` is correct.
-- `DB_PORT` matches the published PostgreSQL host port.
+- `DB_PORT` matches the published PostgreSQL host port when using the Unraid IP, or the internal service port when using container-name DNS.
 - `DB_NAME`, `DB_USER`, and `DB_PASSWORD` match the PostgreSQL container settings.
 - If using a container name for `DB_HOST`, both containers are on the same user-defined Docker network.
 

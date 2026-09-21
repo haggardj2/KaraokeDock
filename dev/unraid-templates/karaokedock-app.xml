@@ -1,4 +1,4 @@
-<?xml version="1.0" ?>
+<?xml version="1.0" encoding="UTF-8"?>
 <Container version="2">
   <Name>KaraokeDock</Name>
   <Repository>haggardj2/karaokedock:latest</Repository>
@@ -8,179 +8,87 @@
   <MyMAC />
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/haggardj2/docker-karaoke/issues</Support>
-  <Project>https://github.com/haggardj2/docker-karaoke</Project>
-  <ReadMe
-    >https://github.com/haggardj2/KaraokeDock/tree/main/docs/unraid_readme.md</ReadMe>
-  <Overview
-    >A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration. Requires a PostgreSQL database. See the Unraid README: https://github.com/haggardj2/KaraokeDock/blob/a1f5468ee4af65fcfc9b9a3189d09f86cf421eb5/docs/unraid_readme.md</Overview>
+  <Support>https://github.com/haggardj2/KaraokeDock/issues</Support>
+  <Project>https://github.com/haggardj2/KaraokeDock</Project>
+  <ReadMe>https://github.com/haggardj2/KaraokeDock/blob/main/docs/unraid_readme.md</ReadMe>
+  <Overview>KaraokeDock is a self-hosted karaoke system with singer requests, live host controls, rotation and history, MP4 and CDG+MP3 playback, online karaoke search, and break-music playlists.
+
+Requires a separate PostgreSQL database; create the database and user before starting. On default bridge networking, use the Unraid server IP and PostgreSQL's published host port. Container-name DNS requires a shared user-defined Docker network.
+
+Set WEB_APP_URL and ORIGIN to the actual browser-facing URL, not localhost. Trusted HTTPS is required for Google/Facebook sign-in and Host PWA installation. OIDC and optional social login are configured in Admin.
+
+First startup runs database migrations and logs a generated administrator password when creating the initial account. The WebUI opens Admin; use /host for show controls, /player for the display, and /requests for singers. Add /media/karaoke and /media/breakmusic in Admin, then scan. Periodic scanning is enabled separately in Admin.
+
+Keep downloads, uploaded images, exported playlists, and PostgreSQL data on persistent storage. Back up the database before upgrades. Setup and troubleshooting: https://github.com/haggardj2/KaraokeDock/blob/main/docs/unraid_readme.md</Overview>
   <Category>MediaApp:Music MediaServer:Other</Category>
-  <License>GPLv2</License>
-  <WebUI>http://[IP]:[PORT:5173]</WebUI>
-  <TemplateURL
-    >https://github.com/haggardj2/KaraokeDock/blob/main/dev/unraid-templates/karaokedock-app.xml</TemplateURL>
-  <Icon
-    >https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/docs/images/icon.png</Icon>
+  <License>MIT</License>
+  <WebUI>http://[IP]:[PORT:5173]/admin</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/haggardj2/KaraokeDock/main/dev/unraid-templates/karaokedock-app.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/haggardj2/KaraokeDock/main/src/web/public/android-chrome-512x512.png</Icon>
   <ExtraParams />
   <PostArgs />
   <CPUset />
-  <DateInstalled />
   <DonateText />
   <DonateLink />
   <Requires />
-  <Config
-        Name="WebUI Port"
-        Target="5173"
-        Default="5173"
-        Mode="tcp"
-        Description="Host port for the KaraokeDock web interface."
-        Type="Port"
-        Display="always"
-        Required="true"
-        Mask="false"
-    >5173</Config>
-  <Config
-        Name="Karaoke Tracks"
-        Target="/media/karaoke"
-        Default="/mnt/user/karaoke/Karaoke Tracks"
-        Mode="ro"
-        Description="Path to your karaoke tracks. Mounted read-only."
-        Type="Path"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Downloads"
-        Target="/media/downloads"
-        Default="/mnt/user/karaoke/downloads"
-        Mode="rw"
-        Description="Path for downloaded/imported tracks."
-        Type="Path"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Break Music"
-        Target="/media/breakmusic"
-        Default="/mnt/user/karaoke/Break Music"
-        Mode="ro"
-        Description="Path to break music. Mounted read-only."
-        Type="Path"
-        Display="always"
-        Required="false"
-        Mask="false"
-    />
-  <Config
-        Name="Database Host"
-        Target="DB_HOST"
-        Default="postgresql_alpine"
-        Mode=""
-        Description="PostgreSQL hostname or container name. "
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Database Port"
-        Target="DB_PORT"
-        Default="5432"
-        Mode=""
-        Description="PostgreSQL port. Use 5432 for the shared Postgres container."
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="false"
-    >5432</Config>
-  <Config
-        Name="Database Name"
-        Target="DB_NAME"
-        Default="karaoke"
-        Mode=""
-        Description="PostgreSQL database name."
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Database User"
-        Target="DB_USER"
-        Default="karaoke"
-        Mode=""
-        Description="PostgreSQL database username."
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Database Password"
-        Target="DB_PASSWORD"
-        Default=""
-        Mode=""
-        Description="PostgreSQL database password."
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="true"
-    />
-  <Config
-        Name="Web App URL"
-        Target="WEB_APP_URL"
-        Default="http://localhost:5173"
-        Mode=""
-        Description="Public URL for the app, such as http://192.168.100.63:5173 or https://karaoke.example.com."
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Allowed Origins"
-        Target="ORIGIN"
-        Default="http://localhost:5173,http://127.0.0.1:5173"
-        Mode=""
-        Description="Comma-separated CORS/WebSocket origins. Include your LAN URL and reverse proxy URL if used."
-        Type="Variable"
-        Display="always"
-        Required="true"
-        Mask="false"
-    />
-  <Config
-        Name="Host Key 8"
-        Target="MEDIA_PROBE_CONCURRENCY"
-        Default=""
-        Mode=""
-        Description="Use this rule of thumb:&#13;&#10;**4-core CPU:** 8 to 12, **6-core CPU:** 12 to 16, **8+ cores:** 16 to 24.&#13;&#10;&#13;&#10;If your server is otherwise idle and the media lives on fast storage, 20` or 24` is reasonable. If you notice high CPU, disk thrash, or sluggishness during scans, back it down.&#13;&#10;&#13;&#10;If you **don&#x2019;t set it at all**, the app now auto-picks a value based on CPU count, capped between **10** and **24**."
-        Type="Variable"
-        Display="always"
-        Required="false"
-        Mask="false"
-    />
-  <Config
-        Name="Media Root"
-        Target="MEDIA_ROOT"
-        Default="/media"
-        Mode=""
-        Description="Root media path inside the container."
-        Type="Variable"
-        Display="advanced"
-        Required="true"
-        Mask="false"
-    >/media</Config>
-  <Config
-        Name="Trust Proxy"
-        Target="TRUST_PROXY"
-        Default="1"
-        Mode=""
-        Description="Set to 1 when running behind a reverse proxy."
-        Type="Variable"
-        Display="advanced"
-        Required="true"
-        Mask="false"
-    >1</Config>
-  <TailscaleStateDir />
+
+  <Config Name="WebUI Port" Target="5173" Default="5173" Mode="tcp"
+    Description="Host port for the web interface, API, and WebSocket connections. Only one app port is needed."
+    Type="Port" Display="always" Required="true" Mask="false">5173</Config>
+  <Config Name="Karaoke Tracks" Target="/media/karaoke" Default="/mnt/user/karaoke/Karaoke Tracks" Mode="ro"
+    Description="Karaoke media, mounted read-only. Add /media/karaoke as a library in Admin. Supports MP4, ZIP CDG+MP3, and loose CDG+MP3 pairs."
+    Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Downloads" Target="/media/downloads" Default="/mnt/user/karaoke/downloads" Mode="rw"
+    Description="Persistent writable folder for downloaded/imported tracks. Must be writable by the container."
+    Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Break Music" Target="/media/breakmusic" Default="/mnt/user/karaoke/Break Music" Mode="ro"
+    Description="Optional break music, mounted read-only. Add /media/breakmusic as a break-music folder in Admin."
+    Type="Path" Display="always" Required="false" Mask="false" />
+  <Config Name="Uploaded Images" Target="/media/images" Default="/mnt/user/appdata/karaokedock/images" Mode="rw"
+    Description="Persistent writable storage for uploaded player background images. Keep this mapping when recreating or upgrading the container."
+    Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Exported Playlists" Target="/media/playlists" Default="/mnt/user/appdata/karaokedock/playlists" Mode="rw"
+    Description="Persistent writable storage for break-music M3U exports. Saved playlist definitions and ordering remain in PostgreSQL."
+    Type="Path" Display="always" Required="true" Mask="false" />
+
+  <Config Name="Database Host" Target="DB_HOST" Default="" Mode=""
+    Description="Required: Unraid server IP on default bridge networking, or PostgreSQL container name only when both containers share a user-defined Docker network."
+    Type="Variable" Display="always" Required="true" Mask="false" />
+  <Config Name="Database Port" Target="DB_PORT" Default="5432" Mode=""
+    Description="Use PostgreSQL's published host port when DB_HOST is the Unraid IP. Use its internal service port (usually 5432) when connecting by container name."
+    Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
+  <Config Name="Database Name" Target="DB_NAME" Default="karaoke" Mode=""
+    Description="Existing PostgreSQL database. Startup applies schema migrations; the database user must be allowed to create tables and required extensions."
+    Type="Variable" Display="always" Required="true" Mask="false">karaoke</Config>
+  <Config Name="Database User" Target="DB_USER" Default="karaoke" Mode=""
+    Description="PostgreSQL login for the KaraokeDock database."
+    Type="Variable" Display="always" Required="true" Mask="false">karaoke</Config>
+  <Config Name="Database Password" Target="DB_PASSWORD" Default="" Mode=""
+    Description="Required: password for the PostgreSQL user. Enter the actual password, not a URL-encoded value."
+    Type="Variable" Display="always" Required="true" Mask="true" />
+  <Config Name="Web App URL" Target="WEB_APP_URL" Default="" Mode=""
+    Description="Required: browser-facing origin, e.g. http://192.168.1.50:5173 or https://karaoke.example.com. No /host or /admin suffix. Use trusted HTTPS for social sign-in and PWA installation."
+    Type="Variable" Display="always" Required="true" Mask="false" />
+  <Config Name="Allowed Origins" Target="ORIGIN" Default="" Mode=""
+    Description="Required: exact browser origins separated by commas, including scheme and port. Include WEB_APP_URL and any LAN URL used. Do not use paths or a wildcard."
+    Type="Variable" Display="always" Required="true" Mask="false" />
+
+  <Config Name="Media Probe Concurrency" Target="MEDIA_PROBE_CONCURRENCY" Default="" Mode=""
+    Description="Optional parallel metadata probes. Blank selects automatically based on CPU count (10-24). Suggested: 4 cores 8-12, 6 cores 12-16, 8+ cores 16-24. Lower if CPU or storage is overloaded."
+    Type="Variable" Display="advanced" Required="false" Mask="false" />
+  <Config Name="Media Scan Interval (ms)" Target="BACKGROUND_MEDIA_SCAN_INTERVAL_MS" Default="900000" Mode=""
+    Description="Delay between periodic media-library scans in milliseconds; 900000 is 15 minutes. Enable periodic media scanning in Admin separately. Must be a positive integer."
+    Type="Variable" Display="advanced" Required="false" Mask="false">900000</Config>
+  <Config Name="Media Root" Target="MEDIA_ROOT" Default="/media" Mode=""
+    Description="Root media path inside the container. Keep /media with the supplied path mappings."
+    Type="Variable" Display="advanced" Required="true" Mask="false">/media</Config>
+  <Config Name="Image Uploads Directory" Target="IMAGE_UPLOADS_DIR" Default="/media/images" Mode=""
+    Description="Internal upload directory; must match the writable Uploaded Images mapping."
+    Type="Variable" Display="advanced" Required="true" Mask="false">/media/images</Config>
+  <Config Name="Break Playlist Export Directory" Target="BREAK_MUSIC_PLAYLISTS_FOLDER" Default="/media/playlists" Mode=""
+    Description="Default internal M3U export directory. If overridden in Admin, that folder must also have a persistent writable mapping."
+    Type="Variable" Display="advanced" Required="false" Mask="false">/media/playlists</Config>
+  <Config Name="Trust Proxy" Target="TRUST_PROXY" Default="false" Mode=""
+    Description="Use false for direct LAN access. For a reverse proxy, configure trusted proxy IPs/CIDRs or the correct hop count (often 1). Restrict direct access when trusting forwarded headers."
+    Type="Variable" Display="advanced" Required="true" Mask="false">false</Config>
 </Container>
