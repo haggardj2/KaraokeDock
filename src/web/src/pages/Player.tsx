@@ -38,6 +38,7 @@ type BreakMusicState = {
   crossfadeSeconds: number;
   volumePercent: number;
   elapsedSec: number;
+  currentStartedAt: string | null;
   currentTrack: {
     id: number;
     title: string;
@@ -441,6 +442,7 @@ export default function Player() {
     crossfadeSeconds: 3,
     volumePercent: 100,
     elapsedSec: 0,
+    currentStartedAt: null,
     currentTrack: null,
   });
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -737,6 +739,7 @@ export default function Player() {
             ? Math.max(0, Math.min(100, Math.round(state.volumePercent)))
             : 100,
         elapsedSec: typeof state.elapsedSec === "number" ? state.elapsedSec : 0,
+        currentStartedAt: typeof state.currentStartedAt === "string" ? state.currentStartedAt : null,
         currentTrack: state.currentTrack || null,
       });
     } catch {
@@ -1354,6 +1357,7 @@ export default function Player() {
     breakMusicState.crossfadeSeconds,
     breakMusicState.volumePercent,
     breakMusicState.elapsedSec,
+    breakMusicState.currentStartedAt,
     breakMusicState.currentTrack?.id,
     breakMusicState.currentTrack?.file_path,
   ]);

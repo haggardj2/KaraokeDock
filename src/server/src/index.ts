@@ -6,6 +6,8 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { Duplex } from 'node:stream';
 import { apiRouter, setPostQueueUpdate, syncRemoteGatewayTaskState } from './routes/api';
+import { socialAuthNoStore } from './routes/socialAuth.js';
+import { publicLegalRouter } from './routes/publicLegal.js';
 import { mediaRouter } from './routes/media';
 import { WebSocketServer } from 'ws';
 import { qrRouter } from './routes/qr';
@@ -163,6 +165,7 @@ const globalLimiter = rateLimit({
 });
 
 // Apply global rate limiter to all routes (after CORS)
+app.use(['/api/auth/social', '/api/admin/settings/social'], socialAuthNoStore);
 app.use(globalLimiter);
 app.use('/api/history', express.json({ limit: '50mb' }));
 app.use(express.json({ limit: '1mb' })); // Limit other request bodies to prevent DoS
@@ -190,6 +193,7 @@ app.use((req, _res, next) => {
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // routes
+app.use(publicLegalRouter);
 app.use('/api', apiRouter);
 app.use('/api', rotationRouter);
 app.use('/media', mediaRouter);  // ADD THIS LINE - mount media router at /media

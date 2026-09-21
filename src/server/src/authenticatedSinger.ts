@@ -1,21 +1,36 @@
 import { randomUUID } from 'crypto';
-import { query, withTransaction, validateSessionInfo, getUserById, type User } from './db.js';
+import type { PoolClient } from 'pg';
+import { query, validateSessionInfo, getUserById, type User } from './db.js';
 import { findOrCreateSinger, normalizeSingerName, normalizeSingerUuid, type SingerRow } from './queueIdentity.js';
 import { syncSingerProfileFromOidc } from './singerProfile.js';
 import { resolveGuestSinger } from './guestSinger.js';
+import { withQueueTransaction } from './rotation/queueTransaction.js';
 
 const requestError = (message: string, status: number) => Object.assign(new Error(message), { status });
 
 export async function ensureAuthenticatedSinger(user: User): Promise<SingerRow> {
   const displayName = (user.display_name?.trim() || user.username).trim().replace(/\s+/g, ' ');
   const normalizedName = normalizeSingerName(displayName);
-  const singer = await withTransaction(async (client) => {
+  const singer = await withQueueTransaction(async (client) => {
     const owner = await client.query<{ singer_id: string | null }>(
       'SELECT singer_id FROM users WHERE id = $1 FOR UPDATE', [user.id],
     );
     if (!owner.rows[0]) throw requestError('Authenticated user not found', 403);
-    let result = owner.rows[0].singer_id
+    const linked = owner.rows[0].singer_id
       ? await client.query<SingerRow>('SELECT * FROM singers WHERE id = $1', [owner.rows[0].singer_id])
+      : { rows: [] };
+    if (user.social_provider || linked.rows[0]?.identity_merged) {
+      if (!owner.rows[0].singer_id) throw requestError('Social singer is not linked', 409);
+      if (!linked.rows[0]) throw requestError('Authenticated singer not found', 409);
+      const singerId = BigInt(linked.rows[0].id);
+      await client.query(
+        `UPDATE queue SET requested_by = $2 WHERE singer_id = $1 AND status IN ('queued', 'playing')`,
+        [singerId, linked.rows[0].display_name],
+      );
+      return { ...linked.rows[0], id: singerId };
+    }
+    let result = owner.rows[0].singer_id
+      ? linked
       : await client.query<SingerRow>(
         `SELECT * FROM singers WHERE normalized_name = ANY($1::text[])
           ORDER BY CASE WHEN normalized_name = $2 THEN 0 ELSE 1 END LIMIT 1`,
@@ -30,6 +45,7 @@ export async function ensureAuthenticatedSinger(user: User): Promise<SingerRow> 
       result = await client.query<SingerRow>('SELECT * FROM singers WHERE normalized_name = $1', [normalizedName]);
     }
     const singerId = BigInt(result.rows[0].id);
+    if (result.rows[0].identity_merged) throw requestError('Singer requires an explicit administrator merge to link another account', 409);
     const otherOwner = await client.query(
       'SELECT id FROM users WHERE singer_id = $1 AND id <> $2 LIMIT 1', [singerId, user.id],
     );
@@ -82,32 +98,49 @@ export async function renameAuthenticatedSinger(user: User, name: string): Promi
   if (!displayName) throw requestError('name is required', 400);
   await ensureAuthenticatedSinger(user);
   try {
-    return await withTransaction(async (client) => {
+    return await withQueueTransaction(async (client) => {
       const owner = await client.query<{ singer_id: string | null }>(
         'SELECT singer_id FROM users WHERE id = $1 FOR UPDATE', [user.id],
       );
       if (!owner.rows[0]?.singer_id) throw requestError('Authenticated singer not found', 409);
       const singerId = BigInt(owner.rows[0].singer_id);
-      const normalizedName = normalizeSingerName(displayName);
-      const conflict = await client.query(
-        'SELECT id FROM singers WHERE normalized_name = $1 AND id <> $2 LIMIT 1',
-        [normalizedName, singerId],
-      );
-      if (conflict.rows.length) throw requestError('Singer name is already in use; choose a different name', 409);
-      await client.query('UPDATE users SET display_name = $1 WHERE id = $2', [displayName, user.id]);
-      const updated = await client.query<SingerRow>(
-        'UPDATE singers SET display_name = $1, normalized_name = $2 WHERE id = $3 RETURNING *',
-        [displayName, normalizedName, singerId],
-      );
-      if (!updated.rows[0]) throw requestError('Authenticated singer not found', 409);
-      await client.query(
-        `UPDATE queue SET requested_by = $1 WHERE singer_id = $2 AND status IN ('queued', 'playing')`,
-        [displayName, singerId],
-      );
-      return { ...updated.rows[0], id: singerId };
+      return renameSingerWithClient(client, singerId, displayName);
     });
   } catch (error: any) {
     if (error?.code === '23505') throw requestError('Singer name is already in use; choose a different name', 409);
+    throw error;
+  }
+}
+
+async function renameSingerWithClient(client: PoolClient, singerId: bigint, displayName: string): Promise<SingerRow> {
+  await client.query('SELECT id FROM users WHERE singer_id = $1 ORDER BY id FOR UPDATE', [singerId]);
+  const normalizedName = normalizeSingerName(displayName);
+  const conflict = await client.query(
+    'SELECT id FROM singers WHERE normalized_name = $1 AND id <> $2 LIMIT 1', [normalizedName, singerId],
+  );
+  if (conflict.rows.length) throw requestError('Singer name is already in use; choose a different name', 409);
+  const updated = await client.query<SingerRow>(
+    'UPDATE singers SET display_name = $1, normalized_name = $2 WHERE id = $3 RETURNING *',
+    [displayName, normalizedName, singerId],
+  );
+  if (!updated.rows[0]) throw requestError('Singer not found', 404);
+  await client.query('UPDATE users SET display_name = $1 WHERE singer_id = $2', [displayName, singerId]);
+  await client.query(
+    `UPDATE queue SET requested_by = $1 WHERE singer_id = $2 AND status IN ('queued', 'playing')`,
+    [displayName, singerId],
+  );
+  return { ...updated.rows[0], id: singerId };
+}
+
+export async function renameSingerById(singerId: bigint, name: string): Promise<SingerRow> {
+  const displayName = name.trim().replace(/\s+/g, ' ');
+  if (!displayName) throw requestError('displayName is required', 400);
+  try {
+    return await withQueueTransaction((client) => renameSingerWithClient(client, singerId, displayName));
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === '23505') {
+      throw requestError('Singer name is already in use; choose a different name', 409);
+    }
     throw error;
   }
 }
@@ -135,7 +168,11 @@ export async function resolveQueueRequester(token: unknown, body: QueueRequester
       const result = await query<SingerRow>('SELECT * FROM singers WHERE id = $1', [body.singerId]);
       if (!result.rows[0]) throw requestError('Singer not found', 404);
       const singer = { ...result.rows[0], id: BigInt(result.rows[0].id) };
-      const owners = await query<User>('SELECT * FROM users WHERE singer_id = $1 AND is_active = TRUE', [singer.id]);
+      const owners = await query<User>(
+        `SELECT u.* FROM users u JOIN singers s ON s.id = u.singer_id
+          WHERE u.singer_id = $1 AND u.is_active = TRUE
+            AND (NOT s.identity_merged OR s.profile_image_user_id = u.id) ORDER BY u.id LIMIT 1`, [singer.id],
+      );
       if (owners.rows[0]) await syncSingerProfileFromOidc(singer.id, owners.rows[0]);
       return singer;
     }
@@ -158,7 +195,11 @@ export async function resolveQueueRequester(token: unknown, body: QueueRequester
   if (singerUuid && singer.public_uuid !== singerUuid) {
     throw requestError('This singer name belongs to another profile', 409);
   }
-  const owners = await query<User>('SELECT * FROM users WHERE singer_id = $1 AND is_active = TRUE', [singer.id]);
+  const owners = await query<User>(
+    `SELECT u.* FROM users u JOIN singers s ON s.id = u.singer_id
+      WHERE u.singer_id = $1 AND u.is_active = TRUE
+        AND (NOT s.identity_merged OR s.profile_image_user_id = u.id) ORDER BY u.id LIMIT 1`, [singer.id],
+  );
   if (owners.rows[0]) await syncSingerProfileFromOidc(singer.id, owners.rows[0]);
   return singer;
 }

@@ -785,36 +785,40 @@ export async function scanPath(
       const mp3 = path.join(dir, `${stem}.mp3`);
       try {
         await fs.stat(mp3);
-        const { artist, title, discId } = parseFromFilename(basename, parseMode);
-        const artistId = artist ? await upsertArtist(artist) : null;
-        
-        // Skip duration extraction during scan for speed (lazy loading)
-        // Duration will be extracted in background or when song is queued
-        const duration_ms = null;
-        
-        await upsertTrack({
-          artist_id: artistId,
-          disc_id: discId,
-          title,
-          kind: 'cdgmp3',
-          duration_ms,
-          file_mp4: null,
-          file_cdg: abs,
-          file_mp3: mp3,
-          path: dir,
-          basename,
-          library_id: libraryId,
-        });
-        
-        // Track this file as scanned (using kind + path + basename as key)
-        scannedKeys.add(`cdgmp3:${dir}:${basename}`);
-        
-        loosePairsIndexed++;
-        console.log(`Indexed loose CDG+MP3: ${basename} (disc: ${discId}, duration: pending)`);
-        onProgress?.({ type: 'file', data: { kind: 'loosePair', file: abs } });
-      } catch {
-        console.warn(`CDG file missing matching MP3: ${basename}`);
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+          console.warn(`CDG file missing matching MP3: ${basename}`);
+          continue;
+        }
+        throw error;
       }
+      const { artist, title, discId } = parseFromFilename(basename, parseMode);
+      const artistId = artist ? await upsertArtist(artist) : null;
+
+      // Skip duration extraction during scan for speed (lazy loading)
+      // Duration will be extracted in background or when song is queued
+      const duration_ms = null;
+
+      await upsertTrack({
+        artist_id: artistId,
+        disc_id: discId,
+        title,
+        kind: 'cdgmp3',
+        duration_ms,
+        file_mp4: null,
+        file_cdg: abs,
+        file_mp3: mp3,
+        path: dir,
+        basename,
+        library_id: libraryId,
+      });
+
+      // Track this file as scanned (using kind + path + basename as key)
+      scannedKeys.add(`cdgmp3:${dir}:${basename}`);
+
+      loosePairsIndexed++;
+      console.log(`Indexed loose CDG+MP3: ${basename} (disc: ${discId}, duration: pending)`);
+      onProgress?.({ type: 'file', data: { kind: 'loosePair', file: abs } });
     }
   }
 

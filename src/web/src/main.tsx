@@ -9,10 +9,12 @@ import {
 } from "react-router-dom";
 import { useAuth, AuthProvider } from "./auth-context";
 import { api } from "./api";
+import { profileAssetUrl } from "./components/SingerAvatar";
 import Player from "./pages/Player";
 import Requests from "./pages/Requests";
 import Host from "./pages/Host";
 import Admin from "./pages/Admin";
+import HostInstall from "./components/HostInstall";
 
 const ACCOUNT_AVATAR_BACKGROUND = "#111827";
 
@@ -81,6 +83,7 @@ function Nav() {
   const avatarLabel =
     auth.profile.displayName || auth.profile.username || "Account";
   const avatarInitial = avatarLabel.trim().charAt(0).toUpperCase() || "👤";
+  const avatarUrl = profileAssetUrl(auth.profile.picture);
 
   useEffect(() => {
     setAvatarLoadFailed(false);
@@ -151,15 +154,21 @@ function Nav() {
 
       {/* Auth/Account button for Host and Admin pages */}
       {showAuthButton && auth.isLoggedIn && (
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", flex: "0 0 auto" }}>
           <button
             onClick={() => setShowAccountMenu(!showAccountMenu)}
             style={{
               width: 40,
               height: 40,
+              minWidth: 40,
+              minHeight: 40,
+              padding: 0,
+              boxSizing: "border-box",
+              flexShrink: 0,
+              overflow: "hidden",
               borderRadius: "50%",
               background:
-                auth.profile.picture && !avatarLoadFailed
+                avatarUrl && !avatarLoadFailed
                   ? ACCOUNT_AVATAR_BACKGROUND
                   : "linear-gradient(135deg, #6366f1, #8b5cf6)",
               border: "none",
@@ -174,15 +183,17 @@ function Nav() {
             }}
             title={avatarLabel}
           >
-            {auth.profile.picture && !avatarLoadFailed ? (
+            {avatarUrl && !avatarLoadFailed ? (
               <img
-                src={auth.profile.picture}
+                src={avatarUrl}
                 alt={avatarLabel}
                 referrerPolicy="no-referrer"
                 onError={() => setAvatarLoadFailed(true)}
                 style={{
                   width: "100%",
                   height: "100%",
+                  display: "block",
+                  flexShrink: 0,
                   objectFit: "cover",
                   borderRadius: "50%",
                 }}
@@ -346,6 +357,7 @@ function App() {
       <AuthProvider>
         <Nav />
         <SessionStatus />
+        <HostInstall />
         <Routes>
           <Route path="/" element={<Requests />} />
           <Route path="/player" element={<Player />} />

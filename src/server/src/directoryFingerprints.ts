@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { createHash } from 'node:crypto';
 
 export interface DirectoryFingerprint {
   path: string;
@@ -16,6 +17,7 @@ export interface DirectoryTreeEntry {
   exists: boolean;
   selfMtimeMs: number | null;
   relevantFileCount: number;
+  fileSignature?: string;
 }
 
 type SnapshotOptions = {
@@ -118,6 +120,7 @@ export async function snapshotDirectoryTree(
   rootPath: string,
   options: SnapshotOptions
 ): Promise<DirectoryTreeEntry[]> {
+  rootPath = path.resolve(rootPath);
   const rootStat = await statSafe(rootPath);
   if (!rootStat) {
     return [{ path: rootPath, exists: false, selfMtimeMs: null, relevantFileCount: 0 }];
@@ -135,8 +138,9 @@ export async function snapshotDirectoryTree(
     const currentStat = currentDir === rootPath ? rootStat : await statSafe(currentDir);
     const dirEntries = await fs.readdir(currentDir, { withFileTypes: true });
     let relevantFileCount = 0;
+    const files = createHash('sha256');
 
-    for (const entry of dirEntries) {
+    for (const entry of dirEntries.sort((a, b) => a.name.localeCompare(b.name))) {
       const absolutePath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         if (options.recursive) {
@@ -145,8 +149,11 @@ export async function snapshotDirectoryTree(
         continue;
       }
 
-      if (entry.isFile() && (!options.includeFile || options.includeFile(absolutePath))) {
+      if ((entry.isFile() || entry.isSymbolicLink()) && (!options.includeFile || options.includeFile(absolutePath))) {
+        const stat = await statSafe(absolutePath);
+        if (!stat?.isFile()) continue;
         relevantFileCount += 1;
+        files.update(JSON.stringify([entry.name, stat.size, stat.mtimeMs, stat.ctimeMs]));
       }
     }
 
@@ -155,6 +162,7 @@ export async function snapshotDirectoryTree(
       exists: true,
       selfMtimeMs: currentStat ? Math.trunc(currentStat.mtimeMs) : null,
       relevantFileCount,
+      fileSignature: files.digest('hex'),
     });
   }
 
@@ -163,7 +171,8 @@ export async function snapshotDirectoryTree(
 }
 
 function isPathWithinRoot(candidatePath: string, rootPath: string): boolean {
-  return candidatePath === rootPath || candidatePath.startsWith(`${rootPath}${path.sep}`);
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
 export function detectChangedDirectoryRoots(
@@ -172,7 +181,7 @@ export function detectChangedDirectoryRoots(
   rootPath: string
 ): string[] {
   if (!previous || previous.length === 0) {
-    return [];
+    return [rootPath];
   }
 
   const previousMap = new Map(previous.map((entry) => [entry.path, entry]));
@@ -181,7 +190,8 @@ export function detectChangedDirectoryRoots(
 
   for (const entry of current) {
     const prior = previousMap.get(entry.path);
-    if (!prior || JSON.stringify(prior) !== JSON.stringify(entry)) {
+    if (!prior || prior.exists !== entry.exists || prior.selfMtimeMs !== entry.selfMtimeMs ||
+        prior.relevantFileCount !== entry.relevantFileCount || prior.fileSignature !== entry.fileSignature) {
       changed.add(entry.path);
     }
   }

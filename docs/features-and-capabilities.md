@@ -42,6 +42,7 @@ KaraokeDock is a self-hosted, web-based karaoke hosting system designed to run a
 - Provides singer history management, including export/import, rename, merge, and clearing history.
 - Keeps individually removed singers in the database. Find Stored Singers retrieves their history and picture, restores them to rotation, or permanently deletes them.
 - Includes collapsible top controls for mobile space savings.
+- Uses compact mobile singer cards with icon-only counts, smaller avatars, and side-mounted actions. Long song titles scroll when they overflow; reduced-motion users can scroll the text manually instead.
 - Shows YouTube fallback download progress/errors on the host page when external playback fails.
 
 ### Player page
@@ -90,6 +91,8 @@ Rotation regressions include real PostgreSQL playback and HTTP route coverage. F
 - Pre-caches zipped CDG+MP3 media for faster playback startup.
 - Provides admin-managed library folders with manual scans and optional background scans.
 - Detects changed media folders with directory fingerprints so background scans only run when needed.
+- Periodic media scanning reconciles configured libraries on its first pass, then checks nested directories and relevant file names, sizes, and modification times. It indexes changed subtrees using the same scanner as manual scans, retries failed scans, and picks up files arriving during a scan on the next pass.
+- Enable **Periodic media library scan** in Admin. The default polling interval is 15 minutes after each pass; `BACKGROUND_MEDIA_SCAN_INTERVAL_MS` overrides it. This is polling, not an instant filesystem watcher. Older saved snapshots are reconciled automatically after upgrading.
 
 ### External karaoke and downloads
 

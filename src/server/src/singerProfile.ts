@@ -25,6 +25,8 @@ export function validateSingerProfileCrop(value: unknown): SingerProfileCrop {
 
 export type SingerProfileRow = {
   id: string | number | bigint;
+  identity_merged?: boolean;
+  profile_image_user_id?: number | null;
   profile_image_source?: string | null;
   profile_image_url?: string | null;
   profile_image_mime?: string | null;
@@ -112,7 +114,7 @@ export function singerProfileFromRow(row: SingerProfileRow): SingerProfileRespon
 
 export async function getSingerProfileRow(singerId: bigint): Promise<SingerProfileRow | null> {
   const result = await query<SingerProfileRow>(
-    `SELECT id, profile_image_source, profile_image_url, profile_image_mime,
+    `SELECT id, profile_image_source, profile_image_url, profile_image_mime, identity_merged, profile_image_user_id,
             profile_image_focus_x, profile_image_focus_y, profile_image_crop,
             profile_image_admin_override, profile_image_updated_at
        FROM singers
@@ -123,7 +125,8 @@ export async function getSingerProfileRow(singerId: bigint): Promise<SingerProfi
 }
 
 export async function syncSingerProfileFromOidc(singerId: bigint, user: User): Promise<void> {
-  if (!user.oidc_subject) return;
+  // 'oidc' is the existing external-image wire/storage format, also used for social providers.
+  if (!user.oidc_subject && !user.social_provider) return;
   const picture = typeof user.picture === 'string' ? user.picture.trim() : '';
   await query(
     `UPDATE singers
@@ -142,9 +145,21 @@ export async function syncSingerProfileFromOidc(singerId: bigint, user: User): P
               ELSE profile_image_updated_at
             END
       WHERE id = $1
+        AND (NOT identity_merged OR (profile_image_user_id = $3 AND NOT profile_image_admin_override))
         AND (profile_image_source IS NULL OR profile_image_source = 'oidc')`,
-    [singerId, picture],
+    [singerId, picture, user.id],
   );
+}
+
+export async function getUserSingerPresentation(user: User): Promise<{ displayName: string | null; picture: string | null }> {
+  const result = await query<SingerProfileRow & { display_name: string }>(
+    `SELECT s.* FROM users u JOIN singers s ON s.id = u.singer_id WHERE u.id = $1`,
+    [user.id],
+  );
+  const singer = result.rows[0];
+  return singer
+    ? { displayName: singer.display_name, picture: getSingerProfileImageUrl(singer) }
+    : { displayName: user.display_name, picture: user.picture };
 }
 
 export async function setSingerUploadedProfileImage(
@@ -226,7 +241,7 @@ export async function applyImportedSingerProfile(
 
   const crop = profile.crop === undefined ? undefined : validateSingerProfileCrop(profile.crop);
   const existing = await getSingerProfileRow(singerId);
-  if (existing?.profile_image_admin_override) return;
+  if (existing?.profile_image_admin_override || existing?.identity_merged) return;
   const importOptions = { preserveAdminOverride: true };
   if (profile.imageSource === undefined) {
     await setSingerProfileFocus(singerId, profile.focusX, profile.focusY, crop, importOptions);

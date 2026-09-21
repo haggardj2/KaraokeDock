@@ -91,11 +91,20 @@ describe('detectSingerProfileImageMime', () => {
   });
 
   describe('OIDC synchronization and imported crops', () => {
-    const user = { oidc_subject: 'subject', picture: ' https://id.example/avatar ' } as User;
+    const user = { id: 12, oidc_subject: 'subject', picture: ' https://id.example/avatar ' } as User;
+
+    it('synchronizes social pictures through the existing external image format without replacing uploads', async () => {
+      await syncSingerProfileFromOidc(7n, { ...user, oidc_subject: null, social_provider: 'google' });
+      expect(queryMock).toHaveBeenCalledWith(expect.stringContaining("THEN 'oidc' ELSE NULL END"), [7n, 'https://id.example/avatar', 12]);
+      expect(queryMock.mock.calls[0][0]).toContain("(profile_image_source IS NULL OR profile_image_source = 'oidc')");
+      queryMock.mockClear();
+      await syncSingerProfileFromOidc(7n, { ...user, oidc_subject: null, social_provider: 'facebook', picture: null });
+      expect(queryMock).toHaveBeenCalledWith(expect.any(String), [7n, '', 12]);
+    });
 
     it('synchronizes a provider URL without fetching images and resets crop only when the image changes', async () => {
       await syncSingerProfileFromOidc(7n, user);
-      expect(queryMock).toHaveBeenCalledWith(expect.stringContaining('profile_image_crop = CASE'), [7n, 'https://id.example/avatar']);
+      expect(queryMock).toHaveBeenCalledWith(expect.stringContaining('profile_image_crop = CASE'), [7n, 'https://id.example/avatar', 12]);
       const sql = queryMock.mock.calls[0][0];
       expect(sql).toContain("COALESCE(profile_image_url, '') IS DISTINCT FROM $2");
       expect(sql).toContain('THEN NULL ELSE profile_image_crop END');
@@ -106,7 +115,7 @@ describe('detectSingerProfileImageMime', () => {
       await syncSingerProfileFromOidc(7n, { ...user, oidc_subject: null });
       expect(queryMock).not.toHaveBeenCalled();
       await syncSingerProfileFromOidc(7n, { ...user, picture: null });
-      expect(queryMock).toHaveBeenCalledWith(expect.any(String), [7n, '']);
+      expect(queryMock).toHaveBeenCalledWith(expect.any(String), [7n, '', 12]);
     });
 
     it('imports OIDC crop and keeps original provider URL', async () => {

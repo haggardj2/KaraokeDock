@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS break_music_tracks (
 
 CREATE INDEX IF NOT EXISTS idx_break_music_tracks_title ON break_music_tracks (LOWER(title));
 CREATE INDEX IF NOT EXISTS idx_break_music_tracks_artist ON break_music_tracks (LOWER(artist));
+CREATE INDEX IF NOT EXISTS idx_break_music_tracks_file_path_trgm ON break_music_tracks USING gin (file_path gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS break_music_playlists (
   id SERIAL PRIMARY KEY,
@@ -248,6 +249,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS picture TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_subject TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_issuer TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS social_provider TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS social_subject TEXT;
 
 -- Constraint on role values
 DO $$
@@ -263,9 +266,40 @@ END $$;
 -- Index for OIDC subject lookups
 CREATE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_subject, oidc_issuer) WHERE oidc_subject IS NOT NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_social_identity
+  ON users(social_provider, social_subject) WHERE social_provider IS NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_social_identity_check' AND conrelid = 'users'::regclass) THEN
+    ALTER TABLE users ADD CONSTRAINT users_social_identity_check CHECK (
+      (social_provider IS NULL AND social_subject IS NULL) OR
+      (social_provider IS NOT NULL AND social_provider IN ('google', 'facebook')
+        AND social_subject IS NOT NULL AND LENGTH(social_subject) BETWEEN 1 AND 512
+        AND oidc_subject IS NULL AND oidc_issuer IS NULL)
+    );
+  END IF;
+END $$;
+
 -- Add user_id and role to sessions for role-based access control
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE CASCADE;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin';
+
+-- Explicit social credential links (migration 026); shared singers alone never grant account privileges.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS canonical_user_id INT REFERENCES users(id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS idx_users_canonical_user_id ON users(canonical_user_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'users'::regclass AND conname = 'users_social_account_link_check') THEN
+    ALTER TABLE users ADD CONSTRAINT users_social_account_link_check CHECK (
+      canonical_user_id IS NULL OR (
+        canonical_user_id <> id AND social_provider IS NOT NULL AND social_subject IS NOT NULL
+        AND password_hash IS NULL AND oidc_subject IS NULL
+      )
+    );
+  END IF;
+END $$;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS login_user_id INT REFERENCES users(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_sessions_login_user_id ON sessions(login_user_id);
 
 
 -- ============================================================================
@@ -324,7 +358,10 @@ ALTER TABLE singers
   ADD COLUMN IF NOT EXISTS profile_image_updated_at TIMESTAMPTZ;
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS singer_id BIGINT REFERENCES singers(id) ON DELETE SET NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_singer_id ON users(singer_id) WHERE singer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_singer_id ON users(singer_id) WHERE singer_id IS NOT NULL;
+ALTER TABLE singers
+  ADD COLUMN IF NOT EXISTS identity_merged BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS profile_image_user_id INT REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS song_requests (
   id                    BIGSERIAL PRIMARY KEY,
@@ -501,7 +538,9 @@ BEGIN
     UPDATE queue
        SET singer_id = sid
      WHERE COALESCE(requested_by, '') = r.rb
-       AND singer_id IS NULL;
+       AND singer_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM singers s WHERE s.id = sid AND s.identity_merged)
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.singer_id = sid AND u.social_provider IS NOT NULL);
   END LOOP;
 END $$;
 

@@ -5,7 +5,7 @@ ALTER TABLE singers
   ADD COLUMN IF NOT EXISTS profile_image_admin_override BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS singer_id BIGINT REFERENCES singers(id) ON DELETE SET NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_singer_id ON users(singer_id) WHERE singer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_singer_id ON users(singer_id) WHERE singer_id IS NOT NULL;
 
 DO $$
 BEGIN
@@ -40,6 +40,8 @@ WITH candidates AS (
       LOWER(REGEXP_REPLACE(TRIM(u.username), '\s+', ' ', 'g'))
     )
    WHERE u.singer_id IS NULL
+     AND to_jsonb(u)->>'social_provider' IS NULL
+     AND COALESCE((to_jsonb(s)->>'identity_merged')::boolean, FALSE) = FALSE
      AND NOT EXISTS (SELECT 1 FROM users owner WHERE owner.singer_id = s.id)
 )
 UPDATE users u SET singer_id = c.singer_id
@@ -49,6 +51,8 @@ UPDATE users u SET singer_id = c.singer_id
 UPDATE queue q SET singer_id = u.singer_id
   FROM users u JOIN singers s ON s.id = u.singer_id
  WHERE q.singer_id IS NULL
+   AND to_jsonb(u)->>'social_provider' IS NULL
+   AND COALESCE((to_jsonb(s)->>'identity_merged')::boolean, FALSE) = FALSE
    AND LOWER(REGEXP_REPLACE(TRIM(q.requested_by), '\s+', ' ', 'g')) = s.normalized_name;
 
 -- Populate queue avatars for users who already logged in before profile support existed.
@@ -59,6 +63,7 @@ UPDATE singers s
        profile_image_updated_at = NOW()
   FROM users u
  WHERE u.singer_id = s.id AND u.oidc_subject IS NOT NULL
+   AND COALESCE((to_jsonb(s)->>'identity_merged')::boolean, FALSE) = FALSE
    AND (s.profile_image_source IS NULL OR s.profile_image_source = 'oidc')
    AND (s.profile_image_url IS DISTINCT FROM NULLIF(TRIM(u.picture), '')
      OR s.profile_image_source IS DISTINCT FROM CASE WHEN NULLIF(TRIM(u.picture), '') IS NOT NULL THEN 'oidc' ELSE NULL END);
