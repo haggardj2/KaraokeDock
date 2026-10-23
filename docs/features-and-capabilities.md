@@ -50,7 +50,7 @@ KaraokeDock is a self-hosted, web-based karaoke hosting system designed to run a
 - Provides fullscreen playback for the show display.
 - Requests a screen wake lock while the Player is visible, including waiting screens; reacquires after returning to the app. Browser/OS restrictions are surfaced with a retry action. The Android TV APK retains its native keep-screen-on behavior.
 - Installs as a separate Player PWA on supported Android, iOS, Windows, and Linux browsers. Launches directly into `/player` in a standalone window; requires trusted HTTPS and a live server connection.
-- Provides an Android TV APK for NVIDIA Shield with KaraokeDock launcher artwork, first-launch server URL setup, saved settings, fullscreen playback, and a Back/Menu remote-control menu for changing the URL, reloading, or exiting. See [Android TV Player](../PlayerTV/README.md).
+- Provides an Android TV APK for NVIDIA Shield with KaraokeDock launcher artwork, first-launch server URL setup, saved settings, fullscreen playback, and a Back/Menu remote-control menu for changing the URL, reloading, or exiting. See [signed Player downloads](README.md#android-signed-apk-downloads), including the iKarao tablet APK.
 - Fits the visible mobile browser/PWA viewport in portrait and landscape, including browser toolbar height changes. Small screens use compact QR/scroller controls and waiting text; TV/desktop sizing remains unchanged. Tap the Player to reveal its fullscreen control (where supported by the browser).
 - Plays local MP4 karaoke videos.
 - Streams CDG+MP3 karaoke as generated MP4 playback.

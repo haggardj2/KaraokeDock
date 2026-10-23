@@ -8,8 +8,12 @@ out/
 .build/
 release/
 !PlayerTV/release/
-PlayerTV/release/*
-!PlayerTV/release/*-unsigned.apk
+# Only publish the two signed Player APKs.
+/PlayerTV/*
+!/PlayerTV/release/
+/PlayerTV/release/*
+!/PlayerTV/release/KaraokeDock-Player-1.1.3-v7-AndroidTV-universal-signed.apk
+!/PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-signed.apk
 *.AppImage
 *.snap
 *.flatpak
@@ -72,4 +76,5 @@ Thumbs.db
 /dev/install-dockerless.sh
 /build-and-publish.sh
 /redeploy-webkaraoke.sh
-PlayerTV/
+PlayerTV/release/KaraokeDock-Player-1.1.3-v7-unsigned.apk
+PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-unsigned.apk

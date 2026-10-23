@@ -101,7 +101,26 @@ The Host app requires a live server connection. It does not cache logins, queue 
 
 #### Install the Player app
 
-For **NVIDIA Shield / Android TV**, use the [Android TV Player APK](../PlayerTV/README.md) instead of browser PWA installation. It includes first-launch server URL setup, a remote-accessible settings menu, and a TV launcher icon.
+#### Android signed APK downloads
+
+| Device | Signed sideload APK |
+| --- | --- |
+| NVIDIA Shield / Android TV (Android 7.0+) | [Universal Android TV APK](../PlayerTV/release/KaraokeDock-Player-1.1.3-v7-AndroidTV-universal-signed.apk) |
+| iKarao S1 and other Android 13 iKarao devices | [Android 13 tablet APK](../PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-signed.apk) |
+
+Download the appropriate APK, transfer it to the device, allow installation from
+your file manager, and install it. Open **KaraokeDock Player**, enter your server
+address, and select **Save and open Player**. On TV, use Back/Menu for settings.
+Both packages support 32-bit and 64-bit devices without separate downloads and
+do not include Google Play's installer protection. A live KaraokeDock server and
+an up-to-date Android System WebView are required.
+
+If an existing Play-installed or debug-signed app has a different signing key,
+uninstall it before installing this APK; uninstalling clears the saved address.
+Only these two signed APKs are published under `PlayerTV/`; its source, build
+tools, other packages, and signing material are not included in Git.
+
+#### Browser Player installation
 
 Open `/player` at your server's trusted **HTTPS** address and select **Install Player app**. Android supports Chrome; Windows/Linux support Chrome or Edge. On iPhone/iPad, open `/player` in Safari and use **Share > Add to Home Screen**, enabling **Open as Web App** if offered.
 
@@ -394,7 +413,7 @@ After starting the containers for the first time:
 
 7. **Open a player window**
    - Open a browser tab to `http://your-server-ip:5173/player`
-   - If serving from an Android TV, you can use a [kiosk browser app](https://play.google.com/store/apps/details?id=de.ozerov.fully&hl=en_US) A native Android TV & Android Tablet application is currently in the works. Working on getting on the Google Play Store If anyone would like to sideload the beta apk please reach out. 
+   - For Android TV, NVIDIA Shield, or iKarao devices, install the appropriate [signed Player APK](#android-signed-apk-downloads).
 
 8. **Done!** Guests can now request songs via the Requests page
 
