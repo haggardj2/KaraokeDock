@@ -434,7 +434,12 @@ After starting the containers for the first time:
 - On Linux with SELinux, the `:Z` flag in volumes may help
 
 
-**Forgot Login**
+### Forgot Login
+
+Reset administrator credentials from the server terminal. Replace `KaraokeDock`
+with your running app container name. If the password form is disabled, also
+follow [Reenable Password Login](#reenable-password-login).
+
 ```bash
 # Run password reset helper:
 docker exec -it KaraokeDock npm run reset-credentials
@@ -444,11 +449,27 @@ docker exec -it KaraokeDock npm run reset-credentials -- --password supersecret
 docker exec -it KaraokeDock npm run reset-credentials -- --username admin --password supersecret
 ```
 
-**Reenable Password Login**
+The helper activates the selected account, restores its Admin role, and clears
+all active sessions. If the requested username does not exist, it can rename an
+existing administrator account; use `--username` with the existing administrator
+username to avoid that. Without `--password`, it generates and prints a secure
+password. Store it privately and change it after signing in.
+
+### Reenable Password Login
+
+Restore local username/password sign-in if SSO is unavailable after an update.
+This enables the password form without changing credentials or activating
+disabled accounts; use [Forgot Login](#forgot-login) if you also need an account
+reset.
+
 ```bash
 # Run the re-enable-login helper
 docker exec -it KaraokeDock npm run re-enable_login
 ```
+
+Replace `KaraokeDock` with your running app container name, then reload `/admin`
+and sign in locally. Correct the provider's group claims and re-enable affected
+OIDC accounts under **User Manager** before retrying SSO.
 
 ---
 ### Docker Compose Architecture

@@ -39,6 +39,24 @@ OIDC accounts must belong to at least one of these exact, case-sensitive groups:
 
 See [OIDC group setup](docs/SOCIAL_LOGIN.md#hostadmin-oidc-group-roles).
 
+**Locked out after upgrading?** Restore local username/password access from the
+server terminal:
+
+1. Follow [Reenable Password Login](docs/README.md#reenable-password-login) to
+   restore the password sign-in form.
+2. If you do not know the administrator credentials or the account is disabled,
+   follow [Forgot Login](docs/README.md#forgot-login) to reset administrator
+   access. The reset helper activates the account and restores its Admin role,
+   but also signs out all existing sessions. It can rename an existing Admin
+   account when the requested username does not exist; specify the existing
+   administrator username to avoid that.
+3. Reload `/admin`, sign in with the local credentials, then correct the OIDC
+   group configuration and re-enable affected accounts in **User Manager**.
+
+Re-enabling password login does not reset credentials, and resetting credentials
+does not re-enable password login; both steps may be necessary. Replace the
+example container name in those instructions with your running app container.
+
 #### Web page routing
 
 - Unknown web page paths now return HTTP 404 rather than the application shell.
@@ -56,9 +74,6 @@ See [OIDC group setup](docs/SOCIAL_LOGIN.md#hostadmin-oidc-group-roles).
 - Application version information in the Host, Admin, and Request profile menus,
   browser startup console, and server startup logs. Player has no visible
   version label.
-- Automatic patch-version increments in `dev/build-and-publish.sh`, synchronized
-  web/server package versions and lockfiles, and an image version label shared
-  across architectures. Failed builds retain their incremented version.
 
 ### Changed
 
