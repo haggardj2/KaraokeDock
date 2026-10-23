@@ -306,12 +306,6 @@ The profile menus on Host, Admin, and Request show `KaraokeDock vX.Y.Z`.
 Player has no visible version label. Browser load and server startup logs also
 report the version.
 
-The maintainer's `dev/build-and-publish.sh` increments the patch version once
-per build, synchronizes web/server manifests and lockfiles, and labels the image
-with `org.opencontainers.image.version`. All architectures share that version;
-the Docker tag is independent. Failed builds retain the increment. The script
-is local/ignored, not part of a fresh checkout. Direct Docker/npm builds use the
-checked-out package version without incrementing it.
 
 ## Troubleshooting
 
