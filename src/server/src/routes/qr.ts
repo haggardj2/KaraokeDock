@@ -39,7 +39,7 @@ qrRouter.get('/api/qr', async (req, res) => {
         webAppUrl = `${req.protocol}://${hostWithoutPort}:5173`;
       }
       
-      requestsUrl = `${webAppUrl.replace(/\/+$/, '')}/requests`;
+      requestsUrl = `${webAppUrl.replace(/\/+$/, '')}/request`;
     }
     
     console.log(`Generating QR code for: ${requestsUrl}`);

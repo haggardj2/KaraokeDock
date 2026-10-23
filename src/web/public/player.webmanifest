@@ -1,0 +1,16 @@
+{
+  "id": "/player",
+  "name": "KaraokeDock Player",
+  "short_name": "KD Player",
+  "description": "Display karaoke videos, lyrics, and the live singer rotation.",
+  "start_url": "/player",
+  "scope": "/player",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "lang": "en",
+  "icons": [
+    { "src": "/android-chrome-192x192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/android-chrome-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

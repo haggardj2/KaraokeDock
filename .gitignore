@@ -7,6 +7,9 @@ build/
 out/
 .build/
 release/
+!PlayerTV/release/
+PlayerTV/release/*
+!PlayerTV/release/*-unsigned.apk
 *.AppImage
 *.snap
 *.flatpak
@@ -69,3 +72,5 @@ Thumbs.db
 /dev/install-dockerless.sh
 /build-and-publish.sh
 /redeploy-webkaraoke.sh
+CHANGELOG.md
+PlayerTV/

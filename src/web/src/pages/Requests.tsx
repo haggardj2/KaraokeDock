@@ -14,6 +14,7 @@ import ProfileImageEditor from "../components/ProfileImageEditor";
 import ProfileDialog from "../components/ProfileDialog";
 import SocialProviderIcon from "../components/SocialProviderIcon";
 import PublicLegalLinks from "../components/PublicLegalLinks";
+import AppVersion from "../components/AppVersion";
 import {
   exchangeSocialLogin, startSocialLogin, takeSocialLoginCallback, visibleSocialProviders,
   SOCIAL_PROVIDER_NAMES, type SocialProvider, type SocialPublicConfig,
@@ -161,6 +162,37 @@ function normalizeArtistForGroup(artist: string): string {
 
 function groupKey(title: string, artist: string): string {
   return `${title.toLowerCase().trim()}|${normalizeArtistForGroup(artist)}`;
+}
+
+function searchRelevance(
+  query: string,
+  title: string,
+  artist: string,
+): number {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return 0;
+
+  const normalizedTitle = title.trim().toLowerCase();
+  const normalizedArtist = artist.trim().toLowerCase();
+  const combined = `${normalizedArtist} ${normalizedTitle}`.trim();
+  const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+
+  if (normalizedTitle === normalizedQuery) return 0;
+  if (normalizedArtist === normalizedQuery) return 1;
+  if (combined === normalizedQuery) return 2;
+  if (normalizedTitle.startsWith(normalizedQuery)) return 3;
+  if (normalizedArtist.startsWith(normalizedQuery)) return 4;
+  if (normalizedTitle.includes(normalizedQuery)) return 5;
+  if (normalizedArtist.includes(normalizedQuery)) return 6;
+  if (combined.includes(normalizedQuery)) return 7;
+  if (tokens.every((token) => combined.includes(token))) return 8;
+  return 9;
+}
+
+function formatTrackKind(kind: string | null | undefined): string {
+  if (kind === "mp4") return "Video";
+  if (kind === "cdgmp3") return "CDG";
+  return kind?.toUpperCase() ?? "";
 }
 
 function downloadJsonFile(filename: string, data: unknown) {
@@ -898,12 +930,23 @@ export default function Requests() {
       setBrowseBusy(true);
       setBrowseArtists([]);
       setLocalRows([]);
-      setBrowseSummary(`Artists starting with "${letter}"`);
+      setBrowseSummary(
+        q.trim() ? `Artists matching "${q.trim()}"` : `Artists starting with "${letter}"`,
+      );
       try {
         const kindQuery = kindFilter !== "all" ? `&kind=${kindFilter}` : "";
+        const searchQuery = q.trim()
+          ? `&q=${encodeURIComponent(q.trim())}`
+          : "";
         const result = await api(
-          `/api/search/browse/artists?letter=${encodeURIComponent(letter)}${kindQuery}`,
+          q.trim()
+            ? `/api/search?q=${encodeURIComponent(q.trim())}&field=artist${kindQuery}`
+            : `/api/search/browse/artists?letter=${encodeURIComponent(letter)}${searchQuery}${kindQuery}`,
         );
+        if (q.trim()) {
+          setLocalRows(Array.isArray(result) ? result : []);
+          return;
+        }
         const rawArtists: unknown[] = Array.isArray(result?.artists)
           ? result.artists
           : [];
@@ -941,7 +984,7 @@ export default function Requests() {
         setBrowseBusy(false);
       }
     },
-    [kindFilter],
+    [kindFilter, q],
   );
 
   const loadBrowseTitles = useCallback(
@@ -949,11 +992,16 @@ export default function Requests() {
       setBrowseBusy(true);
       setBrowseArtists([]);
       setLocalRows([]);
-      setBrowseSummary(`Titles starting with "${letter}"`);
+      setBrowseSummary(
+        q.trim() ? `Titles matching "${q.trim()}"` : `Titles starting with "${letter}"`,
+      );
       try {
         const kindQuery = kindFilter !== "all" ? `&kind=${kindFilter}` : "";
+        const searchQuery = q.trim()
+          ? `&q=${encodeURIComponent(q.trim())}`
+          : "";
         const result = await api(
-          `/api/search/browse/titles?letter=${encodeURIComponent(letter)}${kindQuery}`,
+          `/api/search/browse/titles?letter=${encodeURIComponent(letter)}${searchQuery}${kindQuery}`,
         );
         setLocalRows(Array.isArray(result) ? result : []);
       } catch (err) {
@@ -963,7 +1011,7 @@ export default function Requests() {
         setBrowseBusy(false);
       }
     },
-    [kindFilter],
+    [kindFilter, q],
   );
 
   const loadBrowseArtistTracks = useCallback(
@@ -994,7 +1042,18 @@ export default function Requests() {
     }
 
     if (localViewMode === "browse") {
-      return;
+      if (!q.trim()) {
+        setKaraokeNerdsRows([]);
+        return;
+      }
+      searchTimeoutRef.current = setTimeout(() => {
+        if (externalLibraryEnabled) doKaraokeNerdsSearch();
+      }, 350);
+      return () => {
+        if (searchTimeoutRef.current) {
+          clearTimeout(searchTimeoutRef.current);
+        }
+      };
     }
 
     searchTimeoutRef.current = setTimeout(() => {
@@ -1047,11 +1106,15 @@ export default function Requests() {
     }
 
     setSelectedBrowseArtist("");
-    if (browseCategory === "artist") {
-      loadBrowseArtists(selectedBrowseLetter);
-    } else {
-      loadBrowseTitles(selectedBrowseLetter);
-    }
+    const timeout = setTimeout(() => {
+      if (browseCategory === "artist") {
+        loadBrowseArtists(selectedBrowseLetter);
+      } else {
+        loadBrowseTitles(selectedBrowseLetter);
+      }
+    }, 250);
+
+    return () => clearTimeout(timeout);
   }, [
     localViewMode,
     browseCategory,
@@ -1166,9 +1229,28 @@ export default function Requests() {
     versions: SearchRow[];
     kind: string;
   };
+  const visibleLocalRows = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!isLocalBrowseMode || !query) return localRows;
+
+    return localRows.filter((row) => {
+      const value =
+        browseCategory === "artist" ? row.artist ?? "" : row.title ?? "";
+      return value.toLowerCase().includes(query);
+    });
+  }, [browseCategory, isLocalBrowseMode, localRows, q]);
+
+  const visibleBrowseArtists = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return browseArtists;
+    return browseArtists.filter((row) =>
+      row.artist.toLowerCase().includes(query),
+    );
+  }, [browseArtists, q]);
+
   const groupedLocalRows = useMemo((): GroupedResult[] => {
     const map = new Map<string, GroupedResult>();
-    for (const row of localRows) {
+    for (const row of visibleLocalRows) {
       const key = groupKey(row.title ?? "", row.artist ?? "");
       if (!map.has(key)) {
         map.set(key, {
@@ -1182,7 +1264,7 @@ export default function Requests() {
       map.get(key)!.versions.push(row);
     }
     return Array.from(map.values());
-  }, [localRows]);
+  }, [visibleLocalRows]);
 
   const groupedFuzzySuggestions = useMemo((): GroupedResult[] => {
     const map = new Map<string, GroupedResult>();
@@ -1209,9 +1291,18 @@ export default function Requests() {
     artist: string;
     versions: KaraokeNerdsTrack[];
   };
+  const visibleKaraokeNerdsRows = useMemo(() => {
+    if (!isLocalBrowseMode || !q.trim()) return karaokeNerdsRows;
+    const query = q.trim().toLowerCase();
+    return karaokeNerdsRows.filter((track) => {
+      const value = browseCategory === "artist" ? track.artist : track.title;
+      return (value ?? "").toLowerCase().includes(query);
+    });
+  }, [browseCategory, isLocalBrowseMode, karaokeNerdsRows, q]);
+
   const groupedKnRows = useMemo((): GroupedKnResult[] => {
     const map = new Map<string, GroupedKnResult>();
-    for (const track of karaokeNerdsRows) {
+    for (const track of visibleKaraokeNerdsRows) {
       const key = groupKey(track.title ?? "", track.artist ?? "");
       if (!map.has(key)) {
         map.set(key, {
@@ -1224,11 +1315,14 @@ export default function Requests() {
       map.get(key)!.versions.push(track);
     }
     return Array.from(map.values());
-  }, [karaokeNerdsRows]);
+  }, [visibleKaraokeNerdsRows]);
 
   const combinedSearchGroups = useMemo((): CombinedSearchGroup[] => {
     const tracks: CombinedSearchTrack[] = [];
-    if (localLibraryEnabled && sourceFilter !== "online") {
+    if (
+      localLibraryEnabled &&
+      (isLocalBrowseMode || sourceFilter !== "online")
+    ) {
       for (const row of localRows) {
         tracks.push({
           type: "local",
@@ -1241,8 +1335,11 @@ export default function Requests() {
         });
       }
     }
-    if (externalLibraryEnabled && sourceFilter !== "local") {
-      for (const track of karaokeNerdsRows) {
+    if (
+      externalLibraryEnabled &&
+      (isLocalBrowseMode || sourceFilter !== "local")
+    ) {
+      for (const track of visibleKaraokeNerdsRows) {
         tracks.push({
           type: "online",
           key: `kn-${track.url}`,
@@ -1290,21 +1387,19 @@ export default function Requests() {
         }),
       }))
       .sort((a, b) => {
-        const artistCompare = a.artist.localeCompare(b.artist, undefined, {
-          sensitivity: "base",
-          numeric: true,
-        });
-        if (artistCompare !== 0) return artistCompare;
-        return a.title.localeCompare(b.title, undefined, {
-          sensitivity: "base",
-          numeric: true,
-        });
+        const relevance =
+          searchRelevance(q, a.title, a.artist) -
+          searchRelevance(q, b.title, b.artist);
+        if (relevance !== 0) return relevance;
+        return 0;
       });
   }, [
     localRows,
-    karaokeNerdsRows,
+    visibleKaraokeNerdsRows,
     localLibraryEnabled,
     externalLibraryEnabled,
+    isLocalBrowseMode,
+    q,
     sourceFilter,
   ]);
 
@@ -1799,6 +1894,7 @@ export default function Requests() {
                 setProfileMenuOpen(false); openNameDialog();
               }}>Edit Name</button>
               <button type="button" onClick={() => void logOffSingerProfile()}>Logout</button>
+              <div className="request-profile-version"><AppVersion /></div>
             </nav>
           )}
         </div>
@@ -2416,17 +2512,21 @@ export default function Requests() {
                   )}
                 </nav>
 
-                {!isLocalBrowseMode && (
+                <div className="search-toolbar">
                   <div className="search-wrapper">
                     <input
                       className="search-input"
                       type="text"
                       placeholder={
-                        localLibraryEnabled && externalLibraryEnabled
-                          ? "Search local library & Online…"
-                          : localLibraryEnabled
-                            ? "Search local songs…"
-                            : "Search Online…"
+                        isLocalBrowseMode
+                          ? browseCategory === "artist"
+                            ? "Filter artists…"
+                            : "Filter song titles…"
+                          : localLibraryEnabled && externalLibraryEnabled
+                            ? "Search local library & Online…"
+                            : localLibraryEnabled
+                              ? "Search local songs…"
+                              : "Search Online…"
                       }
                       value={q}
                       onChange={(e) => {
@@ -2439,8 +2539,10 @@ export default function Requests() {
                           clearTimeout(searchTimeoutRef.current);
                         }
                         event.currentTarget.blur();
-                        if (localLibraryEnabled) void doLocalSearch();
-                        if (externalLibraryEnabled) void doKaraokeNerdsSearch();
+                        if (!isLocalBrowseMode) {
+                          if (localLibraryEnabled) void doLocalSearch();
+                          if (externalLibraryEnabled) void doKaraokeNerdsSearch();
+                        }
                       }}
                       autoComplete="off"
                       autoCorrect="off"
@@ -2454,35 +2556,37 @@ export default function Requests() {
                         title="Clear search"
                         onClick={() => {
                           setQ("");
-                          setLocalRows([]);
-                          setKaraokeNerdsRows([]);
-                          setFuzzySuggestions([]);
+                          if (!isLocalBrowseMode) {
+                            setLocalRows([]);
+                            setKaraokeNerdsRows([]);
+                            setFuzzySuggestions([]);
+                          }
                         }}
                       >
                         ×
                       </button>
                     )}
                   </div>
-                )}
 
-                {/* Search Filters */}
-                {localLibraryEnabled && (
-                  <div className="search-filters">
+                  {localLibraryEnabled && (
                     <button
-                      className="filter-toggle"
+                      className={`filter-toggle ${showFilters ? "active" : ""}`}
+                      type="button"
                       onClick={() => setShowFilters(!showFilters)}
                       aria-label="Toggle filters"
+                      aria-expanded={showFilters}
+                      title="Filters"
                     >
-                      <span className="filter-icon">⚙️</span>
-                      <span>Filters</span>
-                      <span className="filter-chevron">
-                        {showFilters ? "▼" : "▶"}
-                      </span>
+                      <span className="filter-icon" aria-hidden="true">⚙️</span>
                     </button>
+                  )}
+                </div>
 
-                    {showFilters && (
-                      <div className="filter-options">
-                        <div className="filter-group">
+                {/* Search Filters */}
+                {localLibraryEnabled && showFilters && (
+                  <div className="search-filters">
+                    <div className="filter-options">
+                      <div className="filter-group">
                           {localLibraryEnabled && externalLibraryEnabled && (
                             <>
                               <label className="filter-label">Source</label>
@@ -2512,30 +2616,34 @@ export default function Requests() {
                             </>
                           )}
 
-                          <label className="filter-label">Search In</label>
-                          <div
-                            className="filter-chips"
-                            style={{ marginBottom: 14 }}
-                          >
-                            <button
-                              className={`filter-chip ${searchFieldFilter === "all" ? "active" : ""}`}
-                              onClick={() => setSearchFieldFilter("all")}
-                            >
-                              <span>All</span>
-                            </button>
-                            <button
-                              className={`filter-chip ${searchFieldFilter === "artist" ? "active" : ""}`}
-                              onClick={() => setSearchFieldFilter("artist")}
-                            >
-                              <span>Artist</span>
-                            </button>
-                            <button
-                              className={`filter-chip ${searchFieldFilter === "title" ? "active" : ""}`}
-                              onClick={() => setSearchFieldFilter("title")}
-                            >
-                              <span>Song Title</span>
-                            </button>
-                          </div>
+                          {!isLocalBrowseMode && (
+                            <>
+                              <label className="filter-label">Search In</label>
+                              <div
+                                className="filter-chips"
+                                style={{ marginBottom: 14 }}
+                              >
+                                <button
+                                  className={`filter-chip ${searchFieldFilter === "all" ? "active" : ""}`}
+                                  onClick={() => setSearchFieldFilter("all")}
+                                >
+                                  <span>All</span>
+                                </button>
+                                <button
+                                  className={`filter-chip ${searchFieldFilter === "artist" ? "active" : ""}`}
+                                  onClick={() => setSearchFieldFilter("artist")}
+                                >
+                                  <span>Artist</span>
+                                </button>
+                                <button
+                                  className={`filter-chip ${searchFieldFilter === "title" ? "active" : ""}`}
+                                  onClick={() => setSearchFieldFilter("title")}
+                                >
+                                  <span>Song Title</span>
+                                </button>
+                              </div>
+                            </>
+                          )}
 
                           <label className="filter-label">Format</label>
                           <div className="filter-chips">
@@ -2549,18 +2657,17 @@ export default function Requests() {
                               className={`filter-chip ${kindFilter === "mp4" ? "active" : ""}`}
                               onClick={() => setKindFilter("mp4")}
                             >
-                              <span>🎬 MP4 Video</span>
+                              <span>🎬 Video</span>
                             </button>
                             <button
                               className={`filter-chip ${kindFilter === "cdgmp3" ? "active" : ""}`}
                               onClick={() => setKindFilter("cdgmp3")}
                             >
-                              <span>📀 CDG+MP3</span>
+                              <span>📀 CDG</span>
                             </button>
                           </div>
-                        </div>
                       </div>
-                    )}
+                    </div>
                   </div>
                 )}
 
@@ -2573,25 +2680,27 @@ export default function Requests() {
                           : "Browse by Artist"
                         : "Browse by Song"}
                     </h2>
-                    <select
-                      className="initial-selector browse-letter-select"
-                      aria-label="Browse letters"
-                      value={selectedBrowseLetter}
-                      onChange={(event) => {
-                        setSelectedBrowseLetter(event.currentTarget.value);
-                        setSelectedBrowseArtist("");
-                      }}
-                    >
-                      {BROWSE_LETTERS.map((letter) => (
-                        <option
-                          key={letter}
-                          value={letter}
-                          disabled={!availableBrowseLetters.has(letter)}
-                        >
-                          {letter}
-                        </option>
-                      ))}
-                    </select>
+                    {!q.trim() && (
+                      <select
+                        className="initial-selector browse-letter-select"
+                        aria-label="Browse letters"
+                        value={selectedBrowseLetter}
+                        onChange={(event) => {
+                          setSelectedBrowseLetter(event.currentTarget.value);
+                          setSelectedBrowseArtist("");
+                        }}
+                      >
+                        {BROWSE_LETTERS.map((letter) => (
+                          <option
+                            key={letter}
+                            value={letter}
+                            disabled={!availableBrowseLetters.has(letter)}
+                          >
+                            {letter}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     {selectedBrowseArtist && (
                       <div className="browse-subheader">
                         <button
@@ -2613,25 +2722,22 @@ export default function Requests() {
                         >
                           ← Artists
                         </button>
-                        <span className="active-filter-badge">
-                          {selectedBrowseLetter}
-                        </span>
                       </div>
                     )}
                   </div>
                 )}
 
                 {/* Results */}
-                {isLocalBrowseMode ? (
+                {isLocalBrowseMode && !q.trim() ? (
                   showingBrowseArtistList ? (
                     isLoading ? (
                       <div className="loading-container">
                         <div className="loading-spinner"></div>
                         <div className="loading-text">Loading artists...</div>
                       </div>
-                    ) : browseArtists.length > 0 ? (
+                    ) : visibleBrowseArtists.length > 0 ? (
                       <div className="results-container">
-                        {browseArtists.map((artist) => {
+                        {visibleBrowseArtists.map((artist) => {
                           const songCount = artist.songCount ?? 0;
                           return (
                             <button
@@ -2672,7 +2778,7 @@ export default function Requests() {
                         <div className="empty-icon">🎙️</div>
                         <div className="empty-title">No artists found</div>
                         <div className="empty-message">
-                          No artists were found under "{selectedBrowseLetter}".
+                          No artists match "{q.trim() || selectedBrowseLetter}".
                         </div>
                       </div>
                     )
@@ -2690,7 +2796,7 @@ export default function Requests() {
                           {groupedLocalRows.length}{" "}
                           {groupedLocalRows.length === 1 ? "song" : "songs"}{" "}
                           found
-                          {groupedLocalRows.length < localRows.length && (
+                          {groupedLocalRows.length < visibleLocalRows.length && (
                             <span
                               style={{
                                 marginLeft: 6,
@@ -2699,7 +2805,7 @@ export default function Requests() {
                                 fontWeight: 400,
                               }}
                             >
-                              ({localRows.length} versions)
+                              ({visibleLocalRows.length} versions)
                             </span>
                           )}
                         </span>
@@ -2710,7 +2816,7 @@ export default function Requests() {
                         )}
                         {kindFilter !== "all" && (
                           <span className="active-filter-badge">
-                            {kindFilter === "mp4" ? "🎬 MP4" : "📀 CDG+MP3"}
+                            {kindFilter === "mp4" ? "🎬 Video" : "📀 CDG"}
                           </span>
                         )}
                       </div>
@@ -2753,7 +2859,7 @@ export default function Requests() {
                                       )}
                                       {row.kind && (
                                         <span className="meta-tag">
-                                          {row.kind.toUpperCase()}
+                                          {formatTrackKind(row.kind)}
                                         </span>
                                       )}
                                     </>
@@ -2915,7 +3021,7 @@ export default function Requests() {
                                                   group.artist ||
                                                     "Unknown Artist",
                                                   row.disc_id,
-                                                  row.kind?.toUpperCase(),
+                                                  formatTrackKind(row.kind),
                                                 ]
                                                   .filter(Boolean)
                                                   .join(" · ")}
@@ -3115,8 +3221,8 @@ export default function Requests() {
                             {kindFilter !== "all" && (
                               <span className="active-filter-badge">
                                 {kindFilter === "mp4"
-                                  ? "🎬 MP4"
-                                  : "📀 CDG+MP3"}
+                                  ? "🎬 Video"
+                                  : "📀 CDG"}
                               </span>
                             )}
                           </div>
@@ -3539,8 +3645,8 @@ export default function Requests() {
                               {kindFilter !== "all" && (
                                 <span className="active-filter-badge">
                                   {kindFilter === "mp4"
-                                    ? "🎬 MP4"
-                                    : "📀 CDG+MP3"}
+                                    ? "🎬 Video"
+                                    : "📀 CDG"}
                                 </span>
                               )}
                               <span
@@ -3596,7 +3702,7 @@ export default function Requests() {
                                             )}
                                             {row.kind && (
                                               <span className="meta-tag">
-                                                {row.kind.toUpperCase()}
+                                                {formatTrackKind(row.kind)}
                                               </span>
                                             )}
                                           </>
@@ -3692,7 +3798,7 @@ export default function Requests() {
                                                       group.artist ||
                                                         "Unknown Artist",
                                                       row.disc_id,
-                                                      row.kind?.toUpperCase(),
+                                                      formatTrackKind(row.kind),
                                                     ]
                                                       .filter(Boolean)
                                                       .join(" · ")}
@@ -4279,7 +4385,7 @@ export default function Requests() {
                   : version.brand || "Karaoke Version";
                 const meta = [
                   !isLocal ? "🌐 Online" : null,
-                  isLocal ? version.kind?.toUpperCase() : null,
+                  isLocal ? formatTrackKind(version.kind) : null,
                 ]
                   .filter(Boolean)
                   .join(" · ");
@@ -4442,7 +4548,7 @@ export default function Requests() {
                         marginTop: 2,
                       }}
                     >
-                      {v.kind?.toUpperCase()}
+                      {formatTrackKind(v.kind)}
                     </div>
                   </div>
                   {addingLocal === v.id ? (

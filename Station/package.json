@@ -16,16 +16,16 @@
     "dist:appimage": "npm run stage:runtimes && npm run build:station && electron-builder --linux AppImage"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
-    "electron": "^43.1.1",
+    "@types/node": "^26.6.5",
+    "electron": "^45.0.0",
     "electron-builder": "^26.15.3",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "build": {
     "appId": "io.github.haggardj2.karaokedock.station",
     "productName": "KaraokeDock Station",
-  "icon": "../docs/images/icon.png",
-  "artifactName": "KaraokeDock-Station-${version}-${arch}.${ext}",
+    "icon": "../docs/images/icon.png",
+    "artifactName": "KaraokeDock-Station-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },

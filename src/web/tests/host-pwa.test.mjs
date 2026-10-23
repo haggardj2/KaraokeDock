@@ -66,7 +66,8 @@ describe('Host PWA', () => {
       assert.equal(data.readUInt32BE(20), size)
     }
     const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
-    assert.match(html, /rel="manifest" href="\/host.webmanifest"/)
+    assert.match(html, /rel="manifest" id="app-manifest"/)
+    assert.doesNotMatch(html, /rel="manifest" href=/)
     assert.match(html, /rel="apple-touch-icon"/)
     assert.ok(existsSync(publicFile('apple-touch-icon.png')))
   })
@@ -95,10 +96,38 @@ describe('Host PWA', () => {
   it('never intercepts API, media, authentication callbacks, other pages, or non-navigation requests', () => {
     const sw = serviceWorker(() => { assert.fail('Must not intercept') })
     for (const url of ['/api/queue', '/media/song.mp4', '/admin', '/requests', '/host?oidc_code=secret',
-      '/host?social_code=secret', 'https://provider.example/host']) {
+      '/host?social_code=secret', '/player?code=secret', '/player/other', 'https://provider.example/host']) {
       assert.equal(sw.request(url), undefined)
     }
     assert.equal(sw.request('/host', { method: 'POST' }), undefined)
     assert.equal(sw.request('/host', { mode: 'cors' }), undefined)
+  })
+
+  it('gives Player a separate identity and standalone launch without changing Host', () => {
+    const player = JSON.parse(readFileSync(publicFile('player.webmanifest'), 'utf8'))
+    assert.equal(player.id, '/player')
+    assert.notEqual(player.id, manifest.id)
+    assert.equal(player.start_url, '/player')
+    assert.equal(player.scope, '/player')
+    assert.equal(player.display, 'standalone')
+    assert.equal(player.name, 'KaraokeDock Player')
+    assert.deepEqual(player.icons, manifest.icons)
+    assert.equal(player.orientation, undefined)
+  })
+
+  it('uses the shared network-only worker for Player and reconnects to Player offline', async () => {
+    const live = new Response('live player')
+    const online = serviceWorker(async () => live)
+    assert.equal(await online.request('/player'), live)
+    const offline = serviceWorker(async () => { throw new TypeError('Network unavailable') })
+    for (const path of ['/player', '/player/']) {
+      const response = await offline.request(path)
+      assert.equal(response.status, 503)
+      assert.equal(response.headers.get('Cache-Control'), 'no-store')
+      const html = await response.text()
+      assert.match(html, /Player is offline/)
+      assert.match(html, /href="\/player"/)
+      assert.doesNotMatch(html, /Reconnect to Host/)
+    }
   })
 })

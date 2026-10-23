@@ -5,6 +5,7 @@ A modern, full-featured web-based karaoke system with support for multiple media
 
 ##  Table of Contents
 
+- [Changelog and upgrade notes](../CHANGELOG.md)
 - [Features](#features)
 - [Web Pages Overview](#web-pages-overview)
 - [Quick Start with Docker](#quick-start-with-docker)
@@ -24,7 +25,7 @@ I also wanted a platform that could run anywhere, on almost anything, while stil
 ## Recent platform updates add:
 
 - 🔐 **Library Browse** Added browse tab to request page
-- 🔐 **OIDC/SSO authentication** with auto-provisioning options, role defaults, and optional password-login fallback
+- 🔐 **OIDC/SSO authentication** with auto-provisioning, group-based roles (`karaokedock_admin` / `karaokedock_user`), and optional password-login fallback
 - 🔄 **Advanced rotation engine** with multiple rotation types (strict round robin, least recently sung, signup order, song-queue-only, manual, and hybrid) plus host overrides
 - 🎶 **Break music management** with playlists, active playlist sync, volume control, and crossfade settings between karaoke tracks
 - 🖥️ **Player/overlay controls** for QR visibility, ticker controls, queue privacy options, and live settings propagation over WebSocket
@@ -98,6 +99,18 @@ Select **Dismiss** to hide the installation prompt on this browser, including af
 
 The Host app requires a live server connection. It does not cache logins, queue data, media, or offline control actions. An offline launch shows a reconnect page. Installation is available from production builds, not the Vite development server.
 
+#### Install the Player app
+
+For **NVIDIA Shield / Android TV**, use the [Android TV Player APK](../PlayerTV/README.md) instead of browser PWA installation. It includes first-launch server URL setup, a remote-accessible settings menu, and a TV launcher icon.
+
+Open `/player` at your server's trusted **HTTPS** address and select **Install Player app**. Android supports Chrome; Windows/Linux support Chrome or Edge. On iPhone/iPad, open `/player` in Safari and use **Share > Add to Home Screen**, enabling **Open as Web App** if offered.
+
+Player has its own app identity and can be installed alongside Host. Its icon launches directly into `/player` in a standalone window, rather than opening a secondary browser window from Host. Portrait and landscape are supported; tap the Player to reveal the fullscreen control where supported.
+
+The install prompt floats above the Player without changing the display size. **Dismiss** hides it on this browser without dismissing the Host prompt. Browser-menu installation remains available. Player requires a live server connection and does not cache songs, credentials, or queue state; an offline launch shows a reconnect page. Browser audio/autoplay restrictions still apply, and the Player follows the same live show as other connected displays.
+
+The Player requests a screen wake lock while visible, including between songs and during countdowns. It reacquires the lock when returning to the foreground and releases it when leaving the Player. This requires a supporting browser and trusted HTTPS; the OS can still deny or release it for battery/power policies. If unavailable, the Player displays a warning and retry action. It cannot override the power button or keep a hidden/backgrounded PWA unlocked. The Android TV APK uses Android's native keep-screen-on flag instead.
+
 #### Manage break music
 ![Break Settings](screenshots/break_mgmt.png)
 
@@ -143,7 +156,7 @@ Management interface for system configuration and media libraries.
 - User manager
 - OIDC/SSO settings
 - Optional Google/Facebook singer login: [provider setup guide](SOCIAL_LOGIN.md)
-- Host-approved singer merging links social/OIDC/password accounts to existing singer queues and history
+- Admin-approved singer merging links social/OIDC/password accounts to existing singer queues and history
 - Public privacy policy (`/privacy`), terms of service (`/terms`), and data-deletion instructions (`/privacy#data-deletion`)
 
 ---
@@ -274,10 +287,38 @@ docker compose restart
 ```
 
 **Build locally (development):**
+
+Use Node.js 26.x for parity with the containers and install dependencies with
+`npm ci` in each package you work on (`src/server`, `src/web`, `Gateway`, or
+`Station`). Builds use TypeScript 7; frontend test helpers use esbuild and Oxc
+instead of the removed TypeScript 6 JavaScript compiler API.
+
 ```bash
 docker build -f dev/Dockerfile -t haggardj2/karaokedock:latest .
 docker compose -f docker-compose.yml up -d
 ```
+
+### Application versions
+
+The app displays `KaraokeDock vX.Y.Z` at the bottom of the profile menu on Host,
+Admin, and Request pages, but not Player. All pages log it once to the browser
+console on load.
+API and standalone web-server startup logs also include the version.
+
+Run `bash dev/build-and-publish.sh` to build and publish a release. It requires
+Podman and npm. After input validation and registry login, it increments the web
+package's patch version (for example, `4.0.0` to `4.0.1`), synchronizes the server
+package version, and updates both npm lockfiles. All architectures in that build
+share the same version, also recorded in the image's
+`org.opencontainers.image.version` label. The Docker tag is independent of the
+application version.
+
+Commit the updated `src/{web,server}/package.json` and `package-lock.json` files
+with the release changes; the script does not create Git commits or tags.
+Failed builds keep the incremented version, and retries receive another patch
+number. Ordinary `npm run build` or direct Docker builds use the current version
+without incrementing it. This version is separate from the Android Player
+wrapper's version code.
 ---
 ## Configuration
 

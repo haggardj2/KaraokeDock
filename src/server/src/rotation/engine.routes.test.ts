@@ -2,6 +2,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { normalizeRotationConfig } from './types.js';
+import { getUserById, validateSessionInfo } from '../db.js';
 
 const mocks = vi.hoisted(() => ({
   service: Object.fromEntries([
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('./rotationService.js', () => mocks.service);
 vi.mock('../db.js', () => ({
   validateSessionInfo: vi.fn(async () => ({ valid: true, role: 'admin', userId: 1 })),
+  getUserById: vi.fn(async () => ({ id: 1, is_active: true, role: 'admin', oidc_subject: 'host' })),
 }));
 vi.mock('../routes/api.js', () => ({
   resortQueueByRotation: mocks.resort,
@@ -75,6 +77,10 @@ describe('rotation route queue synchronization', () => {
     ['POST', '/rotations/1/overrides', { singerId: '2' }, 'addManualOverride'],
     ['DELETE', '/rotations/1/overrides', undefined, 'clearManualOverrides'],
   ])('%s %s resorts and broadcasts only after successful mutation', async (method, path, body, service) => {
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, role: 'user', userId: 1 });
+    vi.mocked(getUserById).mockResolvedValue({
+      id: 1, is_active: true, role: 'user', oidc_subject: 'host',
+    } as NonNullable<Awaited<ReturnType<typeof getUserById>>>);
     const response = await request(path as string, method as string, body);
     expect(response.ok).toBe(true);
     expect(mocks.service[service as string]).toHaveBeenCalledOnce();
@@ -82,6 +88,15 @@ describe('rotation route queue synchronization', () => {
     expect(mocks.broadcast).toHaveBeenCalledWith('queue.updated');
     expect(mocks.service[service as string].mock.invocationCallOrder[0]).toBeLessThan(mocks.resort.mock.invocationCallOrder[0]);
     expect(mocks.resort.mock.invocationCallOrder[0]).toBeLessThan(mocks.broadcast.mock.invocationCallOrder[0]);
+  });
+
+  it('denies rotation edits to singer-only accounts', async () => {
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, role: 'user', userId: 1 });
+    vi.mocked(getUserById).mockResolvedValue({
+      id: 1, is_active: true, role: 'user', social_provider: 'google',
+    } as NonNullable<Awaited<ReturnType<typeof getUserById>>>);
+    expect((await request('/rotations', 'POST', { name: 'Unauthorized' })).status).toBe(403);
+    expect(mocks.service.createRotation).not.toHaveBeenCalled();
   });
 
   it('propagates resort failures instead of reporting an updated queue', async () => {

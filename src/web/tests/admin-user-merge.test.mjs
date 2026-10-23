@@ -1,21 +1,34 @@
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import ts from 'typescript'
+import { parseSync } from 'oxc-parser'
+import { transpile } from './transpile.mjs'
 
 const source = readFileSync(new URL('../src/pages/Admin.tsx', import.meta.url), 'utf8')
-const ast = ts.createSourceFile('Admin.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+function parse(source) {
+  const result = parseSync('component.tsx', source)
+  assert.deepEqual(result.errors, [])
+  return result.program
+}
+const ast = parse(source)
 function findNode(predicate, node = ast) {
+  if (!node || typeof node !== 'object') return
   if (predicate(node)) return node
-  return ts.forEachChild(node, child => findNode(predicate, child))
+  for (const value of Object.values(node)) {
+    for (const child of Array.isArray(value) ? value : [value]) {
+      if (!child?.type) continue
+      const found = findNode(predicate, child)
+      if (found) return found
+    }
+  }
 }
 function loadFunction(name, environment, textSource = source) {
-  const tree = ts.createSourceFile('component.tsx', textSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const tree = parse(textSource)
   const node = findNode(node =>
-    (ts.isFunctionDeclaration(node) || ts.isVariableDeclaration(node)) && node.name?.getText(tree) === name, tree)
+    (node.type === 'FunctionDeclaration' || node.type === 'VariableDeclarator') && node.id?.name === name, tree)
   assert.ok(node, `Missing ${name}`)
-  const text = ts.isVariableDeclaration(node) ? `const ${node.getText(tree)}` : node.getText(tree)
-  const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const text = textSource.slice(node.start, node.end)
+  const js = transpile(node.type === 'VariableDeclarator' ? `const ${text}` : text, 'esm')
   return new Function(...Object.keys(environment), `${js}; return ${name}`)(...Object.values(environment))
 }
 
@@ -58,10 +71,11 @@ describe('Admin User Manager singer merging', () => {
   })
 
   it('links by actual account ID even when two sign-ins already share the same singer', () => {
-    const dialog = findNode(node => ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === 'AccountLinkDialog')
+    const dialog = findNode(node => node.type === 'JSXOpeningElement' && node.name.name === 'AccountLinkDialog')
     assert.ok(dialog)
-    const targetId = dialog.attributes.properties.find(property => property.name?.getText(ast) === 'userId')
-    assert.equal(targetId.initializer.expression.getText(ast), 'mergeUser.id')
+    const targetId = dialog.attributes.find(property => property.name?.name === 'userId')
+    const expression = targetId.value.expression
+    assert.equal(source.slice(expression.start, expression.end), 'mergeUser.id')
   })
 
   it('has no account merge dialog or trigger on Host', () => {

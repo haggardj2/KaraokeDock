@@ -54,8 +54,10 @@ import {
 import { findOrCreateSinger, ensureSingerInActiveRotation, normalizeSingerName, normalizeSingerUuid, type SingerRow } from '../queueIdentity.js';
 import { parseZipMediaRef } from '../zipMediaRef.js';
 import { buildOidcGrantCallbackUrl } from '../oidcRedirect.js';
-import { getOidcProfileClaims } from '../oidcProfile.js';
-import { createSocialAuthRouter } from './socialAuth.js';
+import { getOidcProfileClaims, getOidcGroupRole } from '../oidcProfile.js';
+import { hostGuard } from '../middleware/hostGuard.js';
+import { canAccessHost } from '../permissions.js';
+import { createSocialAuthRouter, socialAuthNoStore } from './socialAuth.js';
 import { maskSocialConfig, SOCIAL_CONFIG_KEY, type SocialConfig } from '../socialAuthConfig.js';
 import {
   getQueueState,
@@ -1836,6 +1838,7 @@ apiRouter.get(
     res.json({
       valid: true,
       role: info.role,
+      canHost: canAccessHost(user, info.role),
       username: user?.username || null,
       ...(user ? await getUserSingerPresentation(user) : { displayName: null, picture: null }),
     });
@@ -2156,6 +2159,7 @@ apiRouter.get(
 apiRouter.get(
   '/admin/settings/oidc',
   adminGuard,
+  socialAuthNoStore,
   ah(async (_req, res) => {
     if (process.env.STATION_MODE === 'true') {
       return res.json({
@@ -2167,13 +2171,12 @@ apiRouter.get(
         buttonText: 'Login with SSO',
         buttonColor: '#6366f1',
         autoCreateUsers: false,
-        defaultRole: 'user',
         passwordLoginEnabled: true,
         stationMode: true,
       });
     }
 
-    const [enabled, issuer, clientId, clientSecret, redirectUri, buttonText, buttonColor, autoCreate, defaultRole, passwordLoginEnabled] =
+    const [enabled, issuer, clientId, clientSecret, redirectUri, buttonText, buttonColor, autoCreate, passwordLoginEnabled] =
       await Promise.all([
         getSetting('oidc.enabled'),
         getSetting('oidc.issuer'),
@@ -2183,7 +2186,6 @@ apiRouter.get(
         getSetting('oidc.button_text'),
         getSetting('oidc.button_color'),
         getSetting('oidc.auto_create_users'),
-        getSetting('oidc.default_role'),
         getSetting('auth.password_login_enabled'),
       ]);
     res.json({
@@ -2195,7 +2197,6 @@ apiRouter.get(
       buttonText: buttonText || 'Login with SSO',
       buttonColor: buttonColor || '#6366f1',
       autoCreateUsers: autoCreate !== false,
-      defaultRole: defaultRole || 'user',
       passwordLoginEnabled: passwordLoginEnabled !== false,
     });
   })
@@ -2219,7 +2220,6 @@ apiRouter.put(
       buttonText,
       buttonColor,
       autoCreateUsers,
-      defaultRole,
       passwordLoginEnabled
     } = req.body;
 
@@ -2234,7 +2234,6 @@ apiRouter.put(
     if (typeof buttonText === 'string') tasks.push(setSetting('oidc.button_text', buttonText.trim() || 'Login with SSO'));
     if (typeof buttonColor === 'string') tasks.push(setSetting('oidc.button_color', buttonColor));
     if (typeof autoCreateUsers === 'boolean') tasks.push(setSetting('oidc.auto_create_users', autoCreateUsers));
-    if (defaultRole === 'admin' || defaultRole === 'user') tasks.push(setSetting('oidc.default_role', defaultRole));
     if (typeof passwordLoginEnabled === 'boolean') tasks.push(setSetting('auth.password_login_enabled', passwordLoginEnabled));
 
     await Promise.all(tasks);
@@ -2310,7 +2309,8 @@ apiRouter.get(
 
       const authUrl = oidc.buildAuthorizationUrl(config, {
         redirect_uri: new URL(redirectUri).href,
-        scope: 'openid email profile',
+        scope: config.serverMetadata().scopes_supported?.includes('groups')
+          ? 'openid email profile groups' : 'openid email profile',
         state,
         code_challenge: codeChallenge,
         code_challenge_method: 'S256',
@@ -2394,6 +2394,15 @@ apiRouter.get(
 
       // Find or create user
       let user = await getUserByOidcSubject(sub, issuerUrl);
+      const groupRole = getOidcGroupRole(claims.groups);
+      if (!groupRole) {
+        if (user) {
+          await query('DELETE FROM sessions WHERE user_id = $1', [user.id]);
+          await updateUser(user.id, { role: 'user' });
+        }
+        const frontendUrl = await getOidcFrontendUrl(req);
+        return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=Membership+in+karaokedock_admin+or+karaokedock_user+is+required`);
+      }
       if (!user) {
         const autoCreate = await getSetting('oidc.auto_create_users');
         if (autoCreate === false) {
@@ -2401,7 +2410,6 @@ apiRouter.get(
           const frontendUrl = await getOidcFrontendUrl(req);
           return res.redirect(`${frontendUrl}${stored.returnTo}?oidc_error=User+not+found`);
         }
-        const defaultRole = (await getSetting('oidc.default_role')) || 'user';
         const username = await findAvailableOidcUsername(baseUsername);
         if (!username) {
           const frontendUrl = await getOidcFrontendUrl(req);
@@ -2409,7 +2417,7 @@ apiRouter.get(
         }
         user = await createUser({
           username,
-          role: defaultRole as 'admin' | 'user',
+          role: groupRole,
           oidc_subject: sub,
           oidc_issuer: issuerUrl,
           display_name: displayName,
@@ -2426,10 +2434,10 @@ apiRouter.get(
           username: nextUsername,
           display_name: displayName,
           picture,
+          role: groupRole,
         });
-        if (updatedUser) {
-          user = updatedUser;
-        }
+        if (!updatedUser) throw new Error('Could not synchronize SSO account roles');
+        user = updatedUser;
       }
 
       if (!user.is_active) {
@@ -2526,7 +2534,7 @@ async function getPublicRequestsUrl(req: express.Request): Promise<string> {
   if (gatewayEnabled === true && normalizedGatewayUrl) {
     return normalizedGatewayUrl;
   }
-  return `${getPublicWebAppUrl(req)}/requests`;
+  return `${getPublicWebAppUrl(req)}/request`;
 }
 
 function sseSend(res: express.Response, event: string, data: any) {
@@ -2733,12 +2741,22 @@ apiRouter.get(
     let rankedSearchConditions = `
       LOWER(t.title) LIKE '%' || LOWER($1) || '%'
       OR LOWER(a.name) LIKE '%' || LOWER($1) || '%'
+      OR NOT EXISTS (
+        SELECT 1
+          FROM unnest(regexp_split_to_array(LOWER($1), '\\s+')) AS term
+         WHERE LOWER(CONCAT_WS(' ', a.name, t.title)) NOT LIKE '%' || term || '%'
+      )
       OR t.disc_id ILIKE '%' || $1 || '%'
       OR to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1)
     `;
     let fallbackSearchConditions = `
       t.title ILIKE '%' || $1 || '%'
       OR a.name ILIKE '%' || $1 || '%'
+      OR NOT EXISTS (
+        SELECT 1
+          FROM unnest(regexp_split_to_array(LOWER($1), '\\s+')) AS term
+         WHERE LOWER(CONCAT_WS(' ', a.name, t.title)) NOT LIKE '%' || term || '%'
+      )
       OR t.disc_id ILIKE '%' || $1 || '%'
     `;
     const queryParams: any[] = [q];
@@ -2768,16 +2786,6 @@ apiRouter.get(
     }
 
     try {
-      // Enhanced search with better ranking
-      // Priority order:
-      // 1. Exact title match (highest)
-      // 2. Title starts with query
-      // 3. Title contains query
-      // 4. Full-text search match in title
-      // 5. Exact artist match
-      // 6. Artist starts with query
-      // 7. Artist contains query
-      // 8. Disc ID match
       const searchResults = await query(
         `
         WITH ranked_results AS (
@@ -2790,21 +2798,29 @@ apiRouter.get(
                  CASE
                    -- Exact title match (case-insensitive)
                    WHEN LOWER(t.title) = LOWER($1) THEN 1
-                   -- Title starts with query
-                   WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 2
-                   -- Contains query in title
-                   WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 3
-                   -- Full-text search in title
-                   WHEN to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1) THEN 4
                    -- Exact artist match
-                   WHEN LOWER(a.name) = LOWER($1) THEN 5
+                   WHEN LOWER(a.name) = LOWER($1) THEN 2
+                   -- Exact "artist title" query
+                   WHEN LOWER(CONCAT_WS(' ', a.name, t.title)) = LOWER($1) THEN 3
+                   -- Title starts with query
+                   WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 4
                    -- Artist starts with query
-                   WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 6
+                   WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 5
+                   -- Contains query in title
+                   WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 6
                    -- Contains query in artist
                    WHEN LOWER(a.name) LIKE '%' || LOWER($1) || '%' THEN 7
+                   -- Query words match across artist and title
+                   WHEN NOT EXISTS (
+                     SELECT 1
+                       FROM unnest(regexp_split_to_array(LOWER($1), '\\s+')) AS term
+                      WHERE LOWER(CONCAT_WS(' ', a.name, t.title)) NOT LIKE '%' || term || '%'
+                   ) THEN 8
+                   -- Full-text search in title
+                   WHEN to_tsvector('english', COALESCE(t.title,'')) @@ plainto_tsquery('english', $1) THEN 9
                    -- Disc ID match
-                   WHEN t.disc_id ILIKE '%' || $1 || '%' THEN 8
-                   ELSE 9
+                   WHEN t.disc_id ILIKE '%' || $1 || '%' THEN 10
+                   ELSE 11
                  END AS rank
             FROM tracks t
             LEFT JOIN artists a ON a.id = t.artist_id
@@ -2814,8 +2830,13 @@ apiRouter.get(
         )
         SELECT id, title, disc_id, kind, artist
           FROM ranked_results
-         ORDER BY rank ASC, 
-                  LOWER(artist) NULLS LAST, 
+         ORDER BY rank ASC,
+                  CASE
+                    WHEN STRPOS(LOWER(CONCAT_WS(' ', artist, title)), LOWER($1)) = 0
+                      THEN 2147483647
+                    ELSE STRPOS(LOWER(CONCAT_WS(' ', artist, title)), LOWER($1))
+                  END,
+                  LOWER(artist) NULLS LAST,
                   LOWER(title)
          LIMIT 1000
         `,
@@ -2839,7 +2860,18 @@ apiRouter.get(
          WHERE (t.source IS NULL OR t.source = 'local')
            AND (${fallbackSearchConditions})
             ${filterConditions}
-         ORDER BY a.name NULLS LAST, t.title
+         ORDER BY
+           CASE
+             WHEN LOWER(t.title) = LOWER($1) THEN 1
+             WHEN LOWER(a.name) = LOWER($1) THEN 2
+             WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 3
+             WHEN LOWER(a.name) LIKE LOWER($1) || '%' THEN 4
+             WHEN LOWER(t.title) LIKE '%' || LOWER($1) || '%' THEN 5
+             WHEN LOWER(a.name) LIKE '%' || LOWER($1) || '%' THEN 6
+             ELSE 7
+           END,
+           LOWER(a.name) NULLS LAST,
+           LOWER(t.title)
          LIMIT 1000
         `,
         queryParams
@@ -2991,13 +3023,17 @@ apiRouter.get(
       return res.status(403).json({ error: 'Local library browse is disabled' });
     }
 
+    const searchTerm = String(req.query.q ?? '').trim();
     const letter = normalizeBrowseLetter(req.query.letter);
-    if (!letter) {
-      return res.status(400).json({ error: 'A browse letter is required' });
+    if (!letter && !searchTerm) {
+      return res.status(400).json({ error: 'A browse letter or search term is required' });
     }
 
     const kindFilter = parseLocalKindFilter(req.query.kind);
-    const params: any[] = [letter];
+    const params: any[] = [searchTerm || letter];
+    const browseClause = searchTerm
+      ? `LOWER(a.name) LIKE '%' || LOWER($1) || '%'`
+      : `${ARTIST_BROWSE_LETTER_SQL} = $1`;
     let kindClause = '';
 
     if (kindFilter) {
@@ -3020,11 +3056,17 @@ apiRouter.get(
            WHERE (t.source IS NULL OR t.source = 'local')
              AND a.name IS NOT NULL
              AND BTRIM(a.name) <> ''
-             AND ${ARTIST_BROWSE_LETTER_SQL} = $1
+             AND ${browseClause}
              ${kindClause}
            GROUP BY a.name
         ) artists
-       ORDER BY sort_artist
+       ORDER BY
+         CASE
+           WHEN LOWER(artist) = LOWER($1) THEN 1
+           WHEN LOWER(artist) LIKE LOWER($1) || '%' THEN 2
+           ELSE 3
+         END,
+         sort_artist
       `,
       params
     );
@@ -3050,13 +3092,17 @@ apiRouter.get(
       return res.status(403).json({ error: 'Local library browse is disabled' });
     }
 
+    const searchTerm = String(req.query.q ?? '').trim();
     const letter = normalizeBrowseLetter(req.query.letter);
-    if (!letter) {
-      return res.status(400).json({ error: 'A browse letter is required' });
+    if (!letter && !searchTerm) {
+      return res.status(400).json({ error: 'A browse letter or search term is required' });
     }
 
     const kindFilter = parseLocalKindFilter(req.query.kind);
-    const params: any[] = [letter];
+    const params: any[] = [searchTerm || letter];
+    const browseClause = searchTerm
+      ? `LOWER(t.title) LIKE '%' || LOWER($1) || '%'`
+      : `${TITLE_BROWSE_LETTER_SQL} = $1`;
     let kindClause = '';
 
     if (kindFilter) {
@@ -3076,9 +3122,17 @@ apiRouter.get(
        WHERE (t.source IS NULL OR t.source = 'local')
          AND t.title IS NOT NULL
          AND BTRIM(t.title) <> ''
-         AND ${TITLE_BROWSE_LETTER_SQL} = $1
+         AND ${browseClause}
          ${kindClause}
-       ORDER BY LOWER(t.title), LOWER(a.name) NULLS LAST, t.disc_id NULLS LAST
+       ORDER BY
+         CASE
+           WHEN LOWER(t.title) = LOWER($1) THEN 1
+           WHEN LOWER(t.title) LIKE LOWER($1) || '%' THEN 2
+           ELSE 3
+         END,
+         LOWER(t.title),
+         LOWER(a.name) NULLS LAST,
+         t.disc_id NULLS LAST
       `,
       params
     );
@@ -3565,7 +3619,7 @@ apiRouter.delete(
 
 apiRouter.get(
   '/singers/archived',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     const activeRotation = await query<{ id: string }>(
       `SELECT id FROM rotations WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`,
@@ -3621,7 +3675,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/singers/:id/profile/image',
-  adminGuard,
+  hostGuard,
   express.raw({ type: 'image/*', limit: SINGER_PROFILE_IMAGE_MAX_BYTES }),
   ah(async (req, res) => {
     const singerId = Number(req.params.id);
@@ -3643,7 +3697,7 @@ apiRouter.post(
 
 apiRouter.patch(
   '/singers/:id/profile/focus',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerId = Number(req.params.id);
     if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -3657,7 +3711,7 @@ apiRouter.patch(
 
 apiRouter.delete(
   '/singers/:id/profile/image',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerId = Number(req.params.id);
     if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -3671,7 +3725,7 @@ apiRouter.delete(
 
 apiRouter.post(
   '/singers/:id/restore',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerId = Number(req.params.id);
     if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -3686,7 +3740,7 @@ apiRouter.post(
 
 apiRouter.delete(
   '/singers/:id',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerId = Number(req.params.id);
     if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -3784,7 +3838,7 @@ apiRouter.post(
 
 apiRouter.get(
   '/history/singers/:id/export',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerId = String(req.params.id ?? '').trim();
     if (!/^\d+$/.test(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -3798,7 +3852,7 @@ apiRouter.get(
 
 apiRouter.get(
   '/history/export-all',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     const data = await buildSingerHistoryKdFile({ includeSingerInfo: true });
     res.json(data);
@@ -3807,7 +3861,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/history/export',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerIds = Array.isArray(req.body?.singerIds)
       ? req.body.singerIds.map((id: unknown) => String(id).trim()).filter((id: string) => /^\d+$/.test(id))
@@ -3820,7 +3874,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/history/import',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const data = req.body?.data;
     if (!isSingerHistoryKdFile(data)) return res.status(400).json({ error: 'Invalid .kd singer history file' });
@@ -3833,7 +3887,7 @@ apiRouter.post(
 
 apiRouter.patch(
   '/singers/:id/rename',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     if (typeof req.body?.displayName !== 'string') return res.status(400).json({ error: 'displayName is required' });
     const singer = await renameSingerById(parseSingerId(req.params.id), req.body.displayName);
@@ -3848,7 +3902,7 @@ apiRouter.patch(
 // ---------------------------------------------------------------------------
 apiRouter.delete(
   '/singers/:id/history',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -3871,7 +3925,7 @@ apiRouter.delete(
 // ---------------------------------------------------------------------------
 apiRouter.patch(
   '/queue/:id/status',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid queue id' });
@@ -3894,7 +3948,7 @@ apiRouter.patch(
 // ---------------------------------------------------------------------------
 apiRouter.patch(
   '/singers/:singerId/song-order',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const singerId = Number(req.params.singerId);
     if (!Number.isFinite(singerId)) return res.status(400).json({ error: 'Invalid singer id' });
@@ -4195,6 +4249,7 @@ apiRouter.get(
       `
       SELECT q.id,
              q.track_id,
+             q.singer_id,
              q.requested_by,
              q.status,
              q.position,
@@ -4209,14 +4264,28 @@ apiRouter.get(
              t.path,
              t.external_url,
              t.source,
-             a.name AS artist
+             a.name AS artist,
+             jsonb_build_object(
+               'id', s.id::text,
+               'profile_image_source', s.profile_image_source,
+               'profile_image_url', s.profile_image_url,
+               'profile_image_mime', s.profile_image_mime,
+               'profile_image_focus_x', s.profile_image_focus_x,
+               'profile_image_focus_y', s.profile_image_focus_y,
+               'profile_image_crop', s.profile_image_crop,
+               'profile_image_updated_at', s.profile_image_updated_at
+             ) AS singer_profile
         FROM queue q
         JOIN tracks t ON t.id = q.track_id
         LEFT JOIN artists a ON a.id = t.artist_id
+        LEFT JOIN singers s ON s.id = q.singer_id
        ORDER BY q.position
       `
     );
-    res.json(result.rows);
+    res.json(result.rows.map(({ singer_profile, ...song }) => ({
+      ...song,
+      profile: singer_profile?.id ? singerProfileFromRow(singer_profile) : null,
+    })));
   })
 );
 
@@ -4369,7 +4438,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/reorder',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     const newPosition = toInt(req.body?.newPosition);
@@ -4400,7 +4469,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/rename',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     const requestedBy = String(req.body?.requestedBy ?? '').trim();
@@ -4414,7 +4483,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/update-key',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     const keyAdjustment = toInt(req.body?.keyAdjustment);
@@ -4430,7 +4499,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/replace',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     const requestedTrackId = toInt(req.body?.trackId);
@@ -4491,7 +4560,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/delete',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = toInt(req.body?.id);
     if (id == null) return res.status(400).send('id required');
@@ -4505,7 +4574,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/queue/clear',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     await clearLiveQueue();
     songState.clear();
@@ -4542,7 +4611,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/player/play',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const id = req.body?.id == null ? null : normalizeQueueId(req.body.id);
     if (req.body?.id != null && id == null) return res.status(400).json({ error: 'Invalid queue item id' });
@@ -4632,7 +4701,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/pause',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const queueId = normalizeQueueId(req.body?.queueId);
     const paused = req.body?.paused;
@@ -4650,7 +4719,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/next',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     manualStopActive = false;
     await setSetting('player.manual_stop', 'false');
@@ -4672,7 +4741,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/stop',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     manualStopActive = true;
     await setSetting('player.manual_stop', 'true');
@@ -4796,7 +4865,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/player/background/settings',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const {
       mode,
@@ -4861,7 +4930,7 @@ apiRouter.post(
 
 apiRouter.get(
   '/player/background/library-images',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     const images = await listPlayerBackgroundLibraryImages();
     res.json({
@@ -4918,7 +4987,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/player/background/image',
-  adminGuard,
+  hostGuard,
   express.raw({ type: 'image/*', limit: PLAYER_BACKGROUND_IMAGE_MAX_BYTES }),
   ah(async (req, res) => {
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
@@ -4943,7 +5012,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/background/image/select',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const image = await getPlayerBackgroundLibraryImage(req.body?.filename);
     if (!image) {
@@ -4962,7 +5031,7 @@ apiRouter.post(
 
 apiRouter.delete(
   '/player/background/image',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     await Promise.all([
       setSetting('player.backgroundImageMime', ''),
@@ -4999,7 +5068,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/player/background/slideshow-images/select',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const requestedFilenames = Array.isArray(req.body?.filenames)
       ? req.body.filenames
@@ -5040,7 +5109,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/player/background/slideshow-images',
-  adminGuard,
+  hostGuard,
   express.raw({ type: 'image/*', limit: PLAYER_BACKGROUND_IMAGE_MAX_BYTES }),
   ah(async (req, res) => {
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
@@ -5067,7 +5136,7 @@ apiRouter.post(
 
 apiRouter.delete(
   '/player/background/slideshow-images/:id',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const requestedId = String(req.params.id || '');
     const slideshowImages = await getStoredPlayerBackgroundSlideshowImages();
@@ -5088,7 +5157,7 @@ apiRouter.delete(
 
 apiRouter.delete(
   '/player/background/slideshow-images',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     await setSetting('player.backgroundSlideshowImages', []);
     if ((await getSetting('player.backgroundMode')) === 'slideshow') {
@@ -5506,7 +5575,7 @@ apiRouter.get(
 // Update overlay settings (requires admin)
 apiRouter.post(
   '/overlay/settings',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const {
       visible,
@@ -5677,7 +5746,7 @@ apiRouter.get(
 // Update autoplay settings (requires admin)
 apiRouter.post(
   '/autoplay/settings',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const { enabled, delay } = req.body;
     
@@ -5762,8 +5831,9 @@ apiRouter.post(
 
 // Download video using yt-dlp
 apiRouter.post(
-  '/admin/ytdlp/download',
-  adminGuard,
+  ['/admin/ytdlp/download', '/host/download'],
+  (req, res, next) => req.path === '/host/download'
+    ? hostGuard(req, res, next) : adminGuard(req, res, next),
   ah(async (req, res) => {
     const { url, format, title, artist, brand, discId } = req.body;
     
@@ -5871,16 +5941,32 @@ apiRouter.get(
   })
 );
 
+apiRouter.get(
+  '/host/settings',
+  hostGuard,
+  socialAuthNoStore,
+  ah(async (_req, res) => {
+    const keys = ['libraries.local_enabled', 'libraries.external_enabled', 'ytdlp.allow_downloads'];
+    const values = await Promise.all(keys.map(key => getSetting(key)));
+    res.json(Object.fromEntries(keys.map((key, index) => [key, values[index] ?? true])));
+  }),
+);
+
 // Get all settings (admin only)
 apiRouter.get(
   '/admin/settings',
   adminGuard,
+  socialAuthNoStore,
   ah(async (req, res) => {
     const result = await query('SELECT key, value FROM settings ORDER BY key');
     const settings: Record<string, any> = {};
     for (const row of result.rows) {
-      settings[row.key] = row.key === SOCIAL_CONFIG_KEY
-        ? maskSocialConfig(row.value as SocialConfig) : row.value;
+      if (row.key === 'oidc.client_secret') {
+        settings[row.key] = row.value ? '***' : '';
+      } else {
+        settings[row.key] = row.key === SOCIAL_CONFIG_KEY
+          ? maskSocialConfig(row.value as SocialConfig) : row.value;
+      }
     }
     settings['station.mode'] = process.env.STATION_MODE === 'true';
     settings['images.upload_dir'] = settings['images.upload_dir'] || DEFAULT_IMAGE_UPLOADS_DIR;
@@ -5924,6 +6010,9 @@ apiRouter.put(
     }
     if (key === 'social' || key.startsWith('social.')) {
       return res.status(400).json({ error: 'Use /api/admin/settings/social to update social sign-in settings' });
+    }
+    if (key === 'oidc' || key.startsWith('oidc.')) {
+      return res.status(400).json({ error: 'Use /api/admin/settings/oidc to update OIDC settings' });
     }
     
     await setSetting(key, value);
@@ -6069,7 +6158,7 @@ apiRouter.post(
 
 apiRouter.get(
   '/break-music/search',
-  sessionGuard,
+  hostGuard,
   searchLimiter,
   ah(async (req, res) => {
     const q = String(req.query.q ?? '').trim();
@@ -6137,7 +6226,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/break-music/settings',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const hasCrossfadeSeconds = req.body?.crossfadeSeconds !== undefined;
     const hasVolumePercent = req.body?.volumePercent !== undefined;
@@ -6185,7 +6274,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/break-music/control',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const action = String(req.body?.action || '').trim();
     if (action === 'pause') {
@@ -6233,7 +6322,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/break-music/auto-next',
-  adminGuard,
+  hostGuard,
   ah(async (_req, res) => {
     await resolveBreakMusicPlaybackState(1);
     postQueueUpdate('break_music.updated');
@@ -6243,7 +6332,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/break-music/timing',
-  adminGuard,
+  hostGuard,
   ah(async (req, res) => {
     const trackId = toInt(req.body?.trackId);
     const currentTime = Number(req.body?.currentTime);
@@ -6261,7 +6350,7 @@ apiRouter.post(
 
 apiRouter.get(
   '/break-music/playlists',
-  sessionGuard,
+  hostGuard,
   ah(async (_req, res) => {
     const r = await query<{ id: number; name: string; created_at: string; updated_at: string }>(
       `SELECT id, name, created_at, updated_at
@@ -6274,7 +6363,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/break-music/playlists',
-  sessionGuard,
+  hostGuard,
   ah(async (req, res) => {
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
     if (!name) return res.status(400).json({ error: 'name required' });
@@ -6294,7 +6383,7 @@ apiRouter.post(
 
 apiRouter.post(
   '/break-music/playlists/load',
-  sessionGuard,
+  hostGuard,
   ah(async (req, res) => {
     const playlistId = req.body?.playlistId;
     if (!isPositiveTrackId(playlistId)) return res.status(400).json({ error: 'playlistId must be a positive safe integer' });
@@ -6326,7 +6415,7 @@ apiRouter.post(
 
 apiRouter.get(
   '/break-music/playlist/active',
-  sessionGuard,
+  hostGuard,
   ah(async (_req, res) => {
     const state = await getBreakMusicState();
     let tracks = await getOrderedBreakTracks(state.playlistTrackIds);
@@ -6354,7 +6443,7 @@ apiRouter.get(
 
 apiRouter.post(
   '/break-music/playlist/active',
-  sessionGuard,
+  hostGuard,
   ah(async (req, res) => {
     const requestedTrackIds = validateBreakTrackIds(req.body?.trackIds, true);
     const tracks = await getOrderedBreakTracks(requestedTrackIds);

@@ -48,7 +48,6 @@ type OidcConfig = {
   buttonText: string;
   buttonColor: string;
   autoCreateUsers: boolean;
-  defaultRole: string;
   passwordLoginEnabled: boolean;
 };
 type OidcPublicConfig = {
@@ -285,7 +284,6 @@ export default function Admin() {
     buttonText: 'Login with SSO',
     buttonColor: '#6366f1',
     autoCreateUsers: true,
-    defaultRole: 'user',
     passwordLoginEnabled: true,
   });
   const [oidcClientSecretChanged, setOidcClientSecretChanged] = useState(false);
@@ -2949,11 +2947,12 @@ export default function Admin() {
                         </label>
                       </div>
                       <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Default role for new SSO users</label>
-                        <select className="form-input" value={oidcSettings.defaultRole} onChange={(e) => setOidcSettings({ ...oidcSettings, defaultRole: e.target.value })} style={{ cursor: 'pointer' }}>
-                          <option value="user">User</option>
-                          <option value="admin">Admin</option>
-                        </select>
+                        <label className="form-label">SSO group roles</label>
+                        <p><code>karaokedock_admin</code>: Admin (Host and Admin pages).</p>
+                        <p><code>karaokedock_user</code>: User (all Host controls).</p>
+                        <p>The provider must supply a groups claim. Admin wins when both
+                          groups are present. Roles sync on every SSO login; accounts with
+                          neither group cannot sign in.</p>
                       </div>
                     </div>
 

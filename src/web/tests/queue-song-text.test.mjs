@@ -2,14 +2,12 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import ts from 'typescript'
+import { transpile } from './transpile.mjs'
 
 const require = createRequire(import.meta.url)
 const source = readFileSync(new URL('../src/components/QueueSongText.tsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../src/components/QueueSongText.css', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
-}).outputText
+const compiled = transpile(source)
 
 function mount(viewportWidth, textWidth) {
   const viewport = { clientWidth: viewportWidth }
@@ -27,11 +25,11 @@ function mount(viewportWidth, textWidth) {
     observe(element) { observed.push(element) }
     disconnect() { disconnected = true }
   }
-  new Function('require', 'exports', 'ResizeObserver', compiled)(name => {
+  new Function('require', 'module', 'ResizeObserver', compiled)(name => {
     if (name === 'react') return hooks
     if (name.endsWith('.css')) return {}
     return require(name)
-  }, module.exports, ResizeObserver)
+  }, module, ResizeObserver)
   function render(label = 'Next: Long Song - Artist') {
     refIndex = 0
     return module.exports.default({ label, children: 'Long Song - Artist' })

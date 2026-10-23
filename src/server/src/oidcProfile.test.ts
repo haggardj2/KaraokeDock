@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchUserInfo } from 'openid-client';
-import { getOidcProfileClaims } from './oidcProfile.js';
+import { getOidcProfileClaims, getOidcGroupRole } from './oidcProfile.js';
 
 vi.mock('openid-client', () => ({ fetchUserInfo: vi.fn() }));
 
@@ -18,7 +18,7 @@ describe('OIDC profile claims', () => {
   });
 
   it('does not fetch provider images or UserInfo when profile claims are already supplied', async () => {
-    const claims = { sub: 'subject', email: 'host@example.com', name: 'Host', picture: 'https://id.example/picture' };
+    const claims = { sub: 'subject', email: 'host@example.com', name: 'Host', picture: 'https://id.example/picture', groups: ['karaokedock_user'] };
     expect(await getOidcProfileClaims(config, token(claims))).toEqual(claims);
     expect(fetchUserInfo).not.toHaveBeenCalled();
   });
@@ -32,5 +32,26 @@ describe('OIDC profile claims', () => {
     vi.mocked(fetchUserInfo).mockRejectedValue(new Error('subject mismatch'));
     await expect(getOidcProfileClaims(config, token({ sub: 'subject' }))).rejects.toThrow('subject mismatch');
     await expect(getOidcProfileClaims(config, token({}))).rejects.toThrow('Missing subject');
+  });
+
+  it('retrieves groups from subject-validated UserInfo even with a complete profile', async () => {
+    vi.mocked(fetchUserInfo).mockResolvedValue({ sub: 'subject', groups: ['karaokedock_admin'] });
+    const claims = await getOidcProfileClaims(config, token({
+      sub: 'subject', email: 'host@example.com', name: 'Host', picture: 'https://id.example/picture',
+    }));
+    expect(getOidcGroupRole(claims.groups)).toBe('admin');
+  });
+
+  it.each([
+    [['karaokedock_admin'], 'admin'],
+    [['karaokedock_user'], 'user'],
+    [['karaokedock_user', 'karaokedock_admin'], 'admin'],
+    ['karaokedock_user', 'user'],
+    [undefined, null],
+    [[], null],
+    [['other', 'KaraokeDock_Admin', '/karaokedock_admin'], null],
+    [{ karaokedock_admin: true }, null],
+  ])('maps exact group memberships %j to %s', (groups, role) => {
+    expect(getOidcGroupRole(groups)).toBe(role);
   });
 });

@@ -12,6 +12,10 @@ import { parseZipMediaRef } from "../zipMediaRef";
 import SingerAvatar, { type SingerProfile } from "../components/SingerAvatar";
 import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, playSingerMedia, prepareSingerIframe, canReportSingerTiming, restoreSingerPosition, type PlayerPlaybackState } from "../playerPlayback";
 import { createBreakMusicPlayback, shouldRunBreakMusic } from "../breakMusicPlayback";
+import { observePlayerViewport } from "../playerViewport";
+import "./Player.css";
+import PlayerBackgroundImage from "../components/PlayerBackgroundImage";
+import { keepPlayerScreenAwake } from "../playerWakeLock";
 
 type QItem = {
   id: number | string;
@@ -29,6 +33,7 @@ type QItem = {
   source?: string;
   duration_ms?: number | null;
   key_adjustment?: number;
+  profile?: SingerProfile | null;
 };
 
 type BreakMusicState = {
@@ -78,9 +83,9 @@ type PlayerBackgroundSettings = {
 
 function getDefaultRequestsUrl(): string {
   if (typeof window === "undefined" || !window.location?.origin) {
-    return "/requests";
+    return "/request";
   }
-  return new URL("/requests", window.location.origin).toString();
+  return new URL("/request", window.location.origin).toString();
 }
 
 function formatRequestsUrlForDisplay(value: string): string {
@@ -92,13 +97,13 @@ function formatRequestsUrlForDisplay(value: string): string {
         : "http://localhost",
     );
     const trimmedPath = parsed.pathname
-      .replace(/\/requests\/?$/i, "")
+      .replace(/\/requests?\/?$/i, "")
       .replace(/\/$/, "");
     return `${parsed.host}${trimmedPath}`;
   } catch {
     return value
       .replace(/^https?:\/\//i, "")
-      .replace(/\/requests\/?$/i, "")
+      .replace(/\/requests?\/?$/i, "")
       .replace(/\/$/, "");
   }
 }
@@ -333,11 +338,6 @@ function getApiAssetUrl(pathOrUrl: string | null): string | null {
   return `${API_BASE}${pathOrUrl}`;
 }
 
-function getBackgroundImageCss(url: string): string {
-  const escapedUrl = url.replace(/["\\]/g, "\\$&");
-  return `linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), url("${escapedUrl}")`;
-}
-
 function getSingerTickerToken(name: string | null | undefined, short = false): string {
   if (!name) return "Anonymous";
   return `[[SINGER:${encodeURIComponent(name)}:${short ? "1" : "0"}]]`;
@@ -425,6 +425,9 @@ export default function Player() {
   );
   const [playerBackgroundSettings, setPlayerBackgroundSettings] =
     useState<PlayerBackgroundSettings>(DEFAULT_PLAYER_BACKGROUND_SETTINGS);
+  const [backgroundSettingsError, setBackgroundSettingsError] = useState(false);
+  const [wakeLockMessage, setWakeLockMessage] = useState<string | null>(null);
+  const wakeLockRef = useRef<ReturnType<typeof keepPlayerScreenAwake> | null>(null);
   const [playerBackgroundSlideIndex, setPlayerBackgroundSlideIndex] =
     useState(0);
   const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
@@ -467,24 +470,24 @@ export default function Player() {
     () => formatRequestsUrlForDisplay(requestsUrl),
     [requestsUrl],
   );
-  const playerBackgroundStyle = useMemo<React.CSSProperties>(() => {
-    const imageUrl = getApiAssetUrl(playerBackgroundSettings.imageUrl);
-    if (playerBackgroundSettings.mode !== "image" || !imageUrl) {
-      return { background: "#000" };
-    }
-    return {
-      backgroundColor: "#000",
-      backgroundImage: getBackgroundImageCss(imageUrl),
-      backgroundPosition: "center",
-      backgroundRepeat: "no-repeat",
-      backgroundSize: "cover",
-    };
-  }, [playerBackgroundSettings]);
   const isCustomPlayerBackground =
     (playerBackgroundSettings.mode === "image" &&
       !!playerBackgroundSettings.imageUrl) ||
     (playerBackgroundSettings.mode === "slideshow" &&
       playerBackgroundSettings.slideshowImages.length > 0);
+
+  useLayoutEffect(() => {
+    if (containerRef.current) return observePlayerViewport(containerRef.current);
+  }, [!!now]);
+
+  useEffect(() => {
+    const wakeLock = keepPlayerScreenAwake(setWakeLockMessage);
+    wakeLockRef.current = wakeLock;
+    return () => {
+      wakeLockRef.current = null;
+      wakeLock.dispose();
+    };
+  }, []);
 
   useEffect(() => {
     setPlayerBackgroundSlideIndex(0);
@@ -604,13 +607,21 @@ export default function Player() {
   };
 
   const renderPlayerBackground = () => {
+    const error = backgroundSettingsError ? <div role="alert" className="player-background-error">
+        Player background settings could not load.{' '}
+        <button type="button" onClick={() => void refreshPlayerBackground()}>Retry settings</button>
+      </div> : null;
+    if (playerBackgroundSettings.mode === "image") {
+      const imageUrl = getApiAssetUrl(playerBackgroundSettings.imageUrl);
+      return <>{error}{imageUrl && <PlayerBackgroundImage src={imageUrl} />}</>;
+    }
     if (playerBackgroundSettings.mode !== "slideshow") {
-      return null;
+      return error;
     }
 
     const images = playerBackgroundSettings.slideshowImages;
     if (images.length === 0) {
-      return null;
+      return error;
     }
 
     const transitionDurationMs = Math.round(
@@ -628,8 +639,9 @@ export default function Player() {
     };
 
     return (
+      <>
+      {error}
       <div
-        aria-hidden="true"
         style={{
           position: "absolute",
           inset: 0,
@@ -649,18 +661,17 @@ export default function Player() {
                 position: "absolute",
                 inset: 0,
                 backgroundColor: "#000",
-                backgroundImage: getBackgroundImageCss(imageUrl),
-                backgroundPosition: "center",
-                backgroundRepeat: "no-repeat",
-                backgroundSize: "cover",
                 opacity: active ? 1 : 0,
                 transform: getTransform(active),
                 transition,
               }}
-            />
+            >
+              <PlayerBackgroundImage src={imageUrl} active={active} />
+            </div>
           );
         })}
       </div>
+      </>
     );
   };
 
@@ -763,15 +774,29 @@ export default function Player() {
       });
   }, []);
 
-  useEffect(() => {
-    api("/api/player/background/settings")
+  const refreshPlayerBackground = useCallback(() =>
+    api("/api/player/background/settings", { cache: "no-store" })
       .then((settings: PlayerBackgroundSettings) => {
         setPlayerBackgroundSettings(normalizePlayerBackgroundSettings(settings));
+        setBackgroundSettingsError(false);
       })
-      .catch(() => {
-        // Use the default splash on error
-      });
-  }, []);
+      .catch((error: unknown) => {
+        console.error("Player background settings failed to load:", error);
+        setBackgroundSettingsError(true);
+      }), []);
+
+  useEffect(() => {
+    void refreshPlayerBackground();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshPlayerBackground();
+    };
+    window.addEventListener("online", refreshPlayerBackground);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("online", refreshPlayerBackground);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refreshPlayerBackground]);
 
   useEffect(() => {
     api("/api/settings/public")
@@ -853,6 +878,7 @@ export default function Player() {
               }
             }
             if (msg.type === "player.background.settings") {
+              setBackgroundSettingsError(false);
               setPlayerBackgroundSettings(
                 normalizePlayerBackgroundSettings(msg),
               );
@@ -878,6 +904,7 @@ export default function Player() {
           console.log("WebSocket connected");
           refresh().catch(() => {});
           refreshBreakMusicState();
+          void refreshPlayerBackground();
           // Start heartbeat - send a message every 45 seconds to keep connection alive
           // This is in addition to server's ping/pong mechanism
           wsHeartbeatRef.current = setInterval(() => {
@@ -1561,6 +1588,13 @@ export default function Player() {
   ]);
 
   // Render the overlay (shown always, unless visibility is false)
+  const renderWakeLockNotice = () => wakeLockMessage && (
+    <div role="status" className="player-wake-lock-notice">
+      {wakeLockMessage}{" "}
+      <button type="button" onClick={() => wakeLockRef.current?.retry()}>Keep screen awake</button>
+    </div>
+  );
+
   const renderOverlay = () => {
     if (!overlaySettings.visible) {
       return null;
@@ -1600,7 +1634,9 @@ export default function Player() {
         {/* QR Code */}
         {overlaySettings.showQrCode && (
           <div
+            className="player-qr"
             style={{
+              "--player-qr-size": `${qrSizeValue}px`,
               position: "absolute",
               left: `${qrOffset}px`,
               bottom: `${qrOffset}px`,
@@ -1610,7 +1646,7 @@ export default function Player() {
               borderRadius: `${qrBorderRadius}px`,
               padding: `${qrPadding}px`,
               boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-            }}
+            } as React.CSSProperties}
           >
             <img
               src={`${API_BASE}/api/qr`}
@@ -1629,6 +1665,7 @@ export default function Player() {
         )}
 
         <div
+          className="player-overlay-row"
           style={{
             height: `${overlaySettings.height}px`,
             display: "flex",
@@ -1641,6 +1678,7 @@ export default function Player() {
           {/* Ticker container - takes full remaining width */}
           {overlaySettings.showRoller && (
             <div
+              className="player-ticker"
               style={{
                 flex: 1,
                 height: `${tickerHeight}px`,
@@ -1670,8 +1708,10 @@ export default function Player() {
           )}
 
           {/* Fullscreen button - only rendered when controls are shown to avoid gap */}
-          {showControls && (
+          {showControls && (document.fullscreenEnabled || isFullscreen) && (
             <button
+              className="player-fullscreen"
+              aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
               onClick={toggleFullscreen}
               style={{
                 flexShrink: 0,
@@ -1694,7 +1734,10 @@ export default function Player() {
                 e.currentTarget.style.transform = "scale(1)";
               }}
             >
-              {isFullscreen ? "⊗ Exit Fullscreen" : "⛶ Fullscreen"}
+              <span aria-hidden="true">{isFullscreen ? "⊗" : "⛶"}</span>
+              <span className="player-fullscreen-label">
+                {isFullscreen ? " Exit Fullscreen" : " Fullscreen"}
+              </span>
             </button>
           )}
         </div>
@@ -1725,13 +1768,12 @@ export default function Player() {
 
         <div
           ref={containerRef}
+          className="player-screen"
+          onPointerDown={handleMouseMove}
           onMouseMove={handleMouseMove}
           onMouseEnter={() => setShowControls(true)}
           style={{
-            position: "relative",
-            height: "100vh",
-            width: "100vw",
-            ...playerBackgroundStyle,
+            background: "#000",
             color: "#e5e7eb",
             display: "grid",
             placeItems: "center",
@@ -1745,9 +1787,11 @@ export default function Player() {
             style={{ display: "none" }}
           />
           {renderPlayerBackground()}
+          {renderWakeLockNotice()}
           {/* Show waiting screen - queue is displayed in the roller overlay */}
           {upNext.length > 0 ? (
             <div
+              className="player-waiting"
               style={{
                 position: "relative",
                 zIndex: 1,
@@ -1763,6 +1807,7 @@ export default function Player() {
               {/* Countdown timer when autoplay is enabled and not manually stopped */}
               {autoPlay && countdown !== null && !manualStop && (
                 <div
+                  className="player-countdown"
                   style={{
                     fontSize: "clamp(24px, 4vw, 40px)",
                     background: "linear-gradient(135deg, #10b981, #34d399)",
@@ -1795,7 +1840,13 @@ export default function Player() {
 
               {/* Show only the first singer */}
               <div style={{ textAlign: "center" }}>
+                {overlaySettings.showProfilePictures && upNext[0].profile?.imageUrl && (
+                  <div className="player-up-next-avatar">
+                    <SingerAvatar name={upNext[0].requested_by || "Anonymous"} profile={upNext[0].profile} size="100%" />
+                  </div>
+                )}
                 <div
+                  className="player-waiting-name"
                   style={{
                     fontSize: "clamp(24px, 4vw, 48px)",
                     fontWeight: 700,
@@ -1820,6 +1871,7 @@ export default function Player() {
             </div>
           ) : isCustomPlayerBackground ? null : (
             <div
+              className="player-waiting"
               style={{
                 position: "relative",
                 zIndex: 1,
@@ -1852,6 +1904,7 @@ export default function Player() {
               </p>
               {overlaySettings.showRequestsUrl && (
                 <p
+                  className="player-requests-url"
                   style={{
                     fontSize: "clamp(16px, 2.1vw, 24px)",
                     color: "rgba(226, 232, 240, 0.95)",
@@ -1922,6 +1975,8 @@ export default function Player() {
         }
 
         .play-button-overlay {
+          border: 0;
+          padding: 0;
           position: absolute;
           top: 50%;
           left: 50%;
@@ -1955,13 +2010,12 @@ export default function Player() {
 
       <div
         ref={containerRef}
+        className="player-screen"
+        onPointerDown={handleMouseMove}
         onMouseMove={handleMouseMove}
         onMouseEnter={() => setShowControls(true)}
         style={{
-          position: "relative",
-          height: "100vh",
-          width: "100vw",
-          ...playerBackgroundStyle,
+          background: "#000",
           color: "#e5e7eb",
           overflow: "hidden",
           cursor: showControls ? "default" : "none",
@@ -1969,6 +2023,7 @@ export default function Player() {
       >
         <audio ref={breakAudioRef} preload="auto" style={{ display: "none" }} />
         {renderPlayerBackground()}
+        {renderWakeLockNotice()}
         {isYouTube && youtubeVideoId ? (
           <iframe
             key={`${now.id}-${youtubeVideoId}`}
@@ -2003,7 +2058,8 @@ export default function Player() {
               left: 0,
               width: "100%",
               height: "100%",
-              objectFit: "contain",
+              objectFit: "cover",
+              background: "#000",
               zIndex: 1,
             }}
           />
@@ -2011,9 +2067,9 @@ export default function Player() {
 
         {/* Play button overlay when autoplay is blocked (only for video element) */}
         {needsUserInteraction && !isPlaying && !singerPaused && (
-          <div className="play-button-overlay" onClick={handlePlayClick}>
+          <button type="button" aria-label="Start playback" className="play-button-overlay" onClick={handlePlayClick}>
             <div className="play-icon" />
-          </div>
+          </button>
         )}
 
         {/* Always show the overlay with ticker */}

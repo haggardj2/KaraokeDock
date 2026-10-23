@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import ts from 'typescript'
+import { transpile } from './transpile.mjs'
 import { matchesBreakTrack, optionalPlaylistId, samePlaylistOrder } from '../src/break-playlist.ts'
 
 const track = (id, file_path = `/music/80s/song-${id}.mp3`) => ({
@@ -37,7 +37,7 @@ function functionSource(name) {
 function harness(names, overrides = {}) {
   const state = { selection: '7', activeId: 7, name: 'Draft', tracks: [track(1), track(2)], error: '', notice: '', playlists: [{ id: 7, name: 'Running' }], draft: false, dirty: false, polls: 0, writes: [] }
   const environment = {
-    auth: { sessionToken: 'host', isLoggedIn: true },
+    auth: { sessionToken: 'host', isLoggedIn: true, canHost: true },
     headers: {},
     window: { confirm: () => true },
     breakManagerBusyRef: { current: false },
@@ -70,7 +70,7 @@ function harness(names, overrides = {}) {
     api: async () => ({ playlistId: 8, warning: 'M3U folder is read-only' }),
     ...overrides,
   }
-  const js = ts.transpileModule(names.map(functionSource).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const js = transpile(names.map(functionSource).join('\n'), 'esm')
   const functions = new Function(...Object.keys(environment), `${js}; return {${names.join(',')}}`)(...Object.values(environment))
   return { state, environment, ...functions }
 }

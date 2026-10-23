@@ -9,20 +9,20 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "axios": "^1.16.1",
-    "better-sqlite3": "^12.5.0",
+    "axios": "^1.20.0",
+    "better-sqlite3": "^13.0.3",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",
     "croppie": "2.6.5",
-    "express": "^5.2.1",
-    "helmet": "^8.2.0"
+    "express": "^5.3.0",
+    "helmet": "^8.3.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/node": "^25.9.1",
-    "tsx": "^4.22.3",
-    "typescript": "^6.0.3"
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

@@ -1,0 +1,138 @@
+.player-screen {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  height: var(--player-viewport-height, 100dvh);
+  overflow: hidden;
+}
+
+.player-screen .player-ticker {
+  min-width: 0;
+}
+
+.player-background-error {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 12;
+  padding: 8px;
+  background: #341b1b;
+  color: white;
+  font: 14px system-ui;
+}
+
+.player-up-next-avatar {
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 12px;
+}
+
+.player-wake-lock-notice {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  max-width: min(420px, calc(100% - 16px));
+  box-sizing: border-box;
+  padding: 8px;
+  border-radius: 8px;
+  background: #352a11;
+  color: white;
+  font: 14px system-ui;
+  z-index: 15;
+}
+
+.player-wake-lock-notice button {
+  min-height: 44px;
+}
+
+/* Include short landscape phone windows, not just narrow portrait screens. */
+@media (max-width: 600px), (max-width: 1000px) and (max-height: 500px) {
+  .player-screen {
+    container-type: size;
+  }
+
+  .player-screen .controls-overlay {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 8px;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    box-sizing: border-box;
+  }
+
+  .player-screen .player-qr {
+    position: static !important;
+    flex: 0 0 auto;
+    width: min(var(--player-qr-size), 64px, 20cqh) !important;
+    height: min(var(--player-qr-size), 64px, 20cqh) !important;
+    padding: 4px !important;
+    border-radius: 8px !important;
+  }
+
+  .player-screen .player-overlay-row {
+    flex: 1;
+    min-width: 0;
+    height: auto !important;
+    padding: 0 !important;
+    gap: 8px !important;
+    align-items: center !important;
+  }
+
+  .player-screen .player-ticker {
+    height: 44px !important;
+    padding: 0 !important;
+  }
+
+  .player-screen .ticker-text {
+    font-size: 14px !important;
+  }
+
+  .player-screen .player-fullscreen {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px !important;
+    font-size: 14px !important;
+  }
+
+  .player-screen .player-fullscreen-label {
+    display: none;
+  }
+
+  .player-screen .player-waiting {
+    box-sizing: border-box;
+    max-width: 100%;
+    max-height: 100%;
+    min-width: 0;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    padding: 12px !important;
+    padding-bottom: 96px !important;
+    gap: 8px !important;
+  }
+
+  .player-screen .player-waiting h1,
+  .player-screen .player-waiting h2 {
+    font-size: clamp(22px, 7cqh, 32px) !important;
+    margin-bottom: 8px !important;
+  }
+
+  .player-screen .player-waiting-name,
+  .player-screen .player-countdown {
+    font-size: clamp(18px, 6cqh, 28px) !important;
+  }
+
+  .player-screen .player-up-next-avatar {
+    width: clamp(32px, 12cqh, 64px);
+    height: clamp(32px, 12cqh, 64px);
+    margin-bottom: 4px;
+  }
+
+  .player-screen .player-requests-url {
+    margin-top: 8px !important;
+    padding: 6px 12px !important;
+    font-size: 16px !important;
+  }
+}
