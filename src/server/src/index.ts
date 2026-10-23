@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { Duplex } from 'node:stream';
+import { createRequire } from 'node:module';
 import { apiRouter, setPostQueueUpdate, syncRemoteGatewayTaskState } from './routes/api';
 import { socialAuthNoStore } from './routes/socialAuth.js';
 import { publicLegalRouter } from './routes/publicLegal.js';
@@ -15,6 +16,7 @@ import { rotationRouter } from './routes/rotation';
 import { logger, setLogLevel, type LogLevel } from './logger';
 import { ensureAdminUser, getSetting, validateSessionInfo } from './db';
 import { syncBackgroundTaskState } from './backgroundTasks';
+import { createWebAppRouter } from './webApp';
 
 // Helper to add timestamps to console logs
 function timestamp() {
@@ -36,7 +38,6 @@ const runtimeApiBase = process.env.WEB_RUNTIME_API_BASE;
 const injectedRuntimeConfigScript = runtimeApiBase === undefined
   ? '<script>window.__ENV__={API_BASE:window.location.origin}</script>'
   : `<script>window.__ENV__={API_BASE:${JSON.stringify(runtimeApiBase.trim())}}</script>`;
-let cachedSpaHtmlPromise: Promise<string> | null = null;
 
 async function writeBootstrapCredentialsFile(bootstrapAdmin: { username: string; password: string }) {
   const credentialsFile = process.env.BOOTSTRAP_CREDENTIALS_FILE?.trim();
@@ -54,33 +55,6 @@ async function writeBootstrapCredentialsFile(bootstrapAdmin: { username: string;
     { mode: 0o600 },
   );
   await fs.chmod(credentialsFile, 0o600);
-}
-
-function shouldServeSpaFallback(requestPath: string) {
-  if (
-    requestPath === '/health' ||
-    requestPath === '/ws' ||
-    requestPath.startsWith('/api/') ||
-    requestPath.startsWith('/media/')
-  ) {
-    return false;
-  }
-
-  return !path.posix.basename(requestPath).includes('.');
-}
-
-async function getSpaHtml(distDir: string) {
-  if (!cachedSpaHtmlPromise) {
-    const indexPath = path.join(distDir, 'index.html');
-    cachedSpaHtmlPromise = fs.readFile(indexPath, 'utf8').then((html) => {
-      const withoutExistingRuntimeConfig = html.replace(/<script>window\.__ENV__=.*?<\/script>/g, '');
-      if (withoutExistingRuntimeConfig.includes('</head>')) {
-        return withoutExistingRuntimeConfig.replace('</head>', `${injectedRuntimeConfigScript}</head>`);
-      }
-      return `${injectedRuntimeConfigScript}${withoutExistingRuntimeConfig}`;
-    });
-  }
-  return cachedSpaHtmlPromise;
 }
 
 // Configure trust proxy for apps behind reverse proxies/load balancers
@@ -200,17 +174,7 @@ app.use('/media', mediaRouter);  // ADD THIS LINE - mount media router at /media
 app.use(qrRouter);
 
 if (webDistDir) {
-  app.use(express.static(webDistDir, { index: false }));
-  app.get('/{*path}', async (req, res, next) => {
-    if (!shouldServeSpaFallback(req.path)) {
-      return next();
-    }
-    try {
-      res.type('html').send(await getSpaHtml(webDistDir));
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.use(createWebAppRouter(webDistDir, injectedRuntimeConfigScript));
 }
 
 // websockets: broadcast exact message types Player expects
@@ -233,6 +197,8 @@ setPostQueueUpdate((type = 'queue.updated', data?: any) => {
 });
 
 function onServerListening() {
+  const { version }: { version: string } = createRequire(import.meta.url)('../package.json');
+  console.log(`KaraokeDock v${version}`);
   console.log(`API running on http://${bindHost || 'localhost'}:${port}`);
   if (webDistDir) {
     console.log(`Serving web app from ${webDistDir}`);

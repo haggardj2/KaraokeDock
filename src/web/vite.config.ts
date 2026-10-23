@@ -1,8 +1,43 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+
+function routePages(req: IncomingMessage, res: ServerResponse, next: () => void) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next()
+  const url = req.url || '/'
+  const pathname = url.split('?')[0]
+  const query = url.slice(pathname.length)
+  if (/^\/requests\/?$/.test(pathname)) {
+    res.writeHead(308, { Location: `/request${query}` })
+    res.end()
+    return
+  }
+  if (/^\/(?:player\/?|host\/?|admin\/?|request\/?)?$/.test(pathname)) {
+    req.url = `/index.html${query}`
+  } else {
+    try {
+      if (/\.html?$/i.test(decodeURIComponent(pathname))) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('404 - Page not found')
+        return
+      }
+    } catch {
+      res.writeHead(400)
+      res.end()
+      return
+    }
+  }
+  next()
+}
 
 export default defineConfig({
+  appType: 'mpa',
   plugins: [
+    {
+      name: 'registered-page-routes',
+      configureServer(server) { server.middlewares.use(routePages) },
+      configurePreviewServer(server) { server.middlewares.use(routePages) },
+    },
     {
       name: 'croppie-metadata-only',
       enforce: 'pre',

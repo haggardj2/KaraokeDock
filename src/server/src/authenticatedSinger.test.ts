@@ -64,23 +64,31 @@ describe('queue requester identity', () => {
 
   it.each([
     { singerId: '9' }, { requestAsHost: true, requestedBy: 'New' },
-  ])('rejects non-admin targeting %j', async (body) => {
+  ])('rejects singer-only social accounts targeting %j', async (body) => {
     vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    vi.mocked(getUserById).mockResolvedValue({
+      ...user, role: 'user', oidc_subject: null, social_provider: 'google',
+    });
     await expect(resolveQueueRequester('user-token', body)).rejects.toMatchObject({ status: 403 });
     expect(queryMock).not.toHaveBeenCalled();
     expect(findOrCreateSinger).not.toHaveBeenCalled();
   });
 
-  it('rejects unauthenticated, invalid, expired and demoted admin sessions', async () => {
+  it('rejects unauthenticated, expired and disabled sessions', async () => {
     await expect(resolveQueueRequester(undefined, { requestAsHost: true })).rejects.toMatchObject({ status: 403 });
     vi.mocked(validateSessionInfo).mockResolvedValueOnce({ valid: false, role: 'admin' });
     await expect(resolveQueueRequester('expired', { singerId: '9' })).rejects.toMatchObject({ status: 403 });
-    vi.mocked(getUserById).mockResolvedValueOnce({ ...user, role: 'user' });
-    await expect(resolveQueueRequester('demoted', { singerId: '9' })).rejects.toMatchObject({ status: 403 });
     vi.mocked(getUserById).mockResolvedValueOnce({ ...user, is_active: false });
     await expect(resolveQueueRequester('disabled', { singerId: '9' })).rejects.toMatchObject({ status: 403 });
   });
 
+  it('allows a managed User to target another singer, including a demoted Admin', async () => {
+    vi.mocked(getUserById).mockResolvedValue({ ...user, role: 'user' });
+    queryMock.mockResolvedValueOnce({ rows: [target] } as any);
+    expect(await resolveQueueRequester('demoted-admin', { singerId: '9' })).toEqual(target);
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    expect(await resolveQueueRequester('host-user', { requestAsHost: true, requestedBy: 'Selected Singer' })).toEqual(target);
+  });
   it.each([null, 9, '', '-1', '1.2', '1e2', '9223372036854775808'])('rejects invalid singerId %j', async (singerId) => {
     await expect(resolveQueueRequester('admin-token', { singerId })).rejects.toMatchObject({ status: 400 });
   });

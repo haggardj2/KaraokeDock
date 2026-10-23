@@ -48,6 +48,10 @@ KaraokeDock is a self-hosted, web-based karaoke hosting system designed to run a
 ### Player page
 
 - Provides fullscreen playback for the show display.
+- Requests a screen wake lock while the Player is visible, including waiting screens; reacquires after returning to the app. Browser/OS restrictions are surfaced with a retry action. The Android TV APK retains its native keep-screen-on behavior.
+- Installs as a separate Player PWA on supported Android, iOS, Windows, and Linux browsers. Launches directly into `/player` in a standalone window; requires trusted HTTPS and a live server connection.
+- Provides an Android TV APK for NVIDIA Shield with KaraokeDock launcher artwork, first-launch server URL setup, saved settings, fullscreen playback, and a Back/Menu remote-control menu for changing the URL, reloading, or exiting. See [signed Player downloads](README.md#android-signed-apk-downloads), including the iKarao tablet APK.
+- Fits the visible mobile browser/PWA viewport in portrait and landscape, including browser toolbar height changes. Small screens use compact QR/scroller controls and waiting text; TV/desktop sizing remains unchanged. Tap the Player to reveal its fullscreen control (where supported by the browser).
 - Plays local MP4 karaoke videos.
 - Streams CDG+MP3 karaoke as generated MP4 playback.
 - Plays external YouTube/Karaoke Nerds entries when possible.
@@ -57,6 +61,8 @@ KaraokeDock is a self-hosted, web-based karaoke hosting system designed to run a
 - Supports auto-play progression and configurable delays.
 - Shows configurable overlay elements such as QR code, request URL, custom messages, rotation scroller, and queue privacy options.
 - Player Settings includes a Show Profile Pictures toggle for the scroller. Pictures are shown by default; hiding them leaves singer names visible.
+- The Up Next/countdown screen also shows the queued singer's picture and saved crop when available, using the queue's singer ID rather than matching names. The Show Profile Pictures toggle applies here too.
+- Custom images and slideshow frames render as full-size image layers, with an explicit error and retry action if an image cannot load. Background settings refresh when the Player reconnects or returns to the foreground.
 
 ### Queue and rotation
 
@@ -133,7 +139,8 @@ Rotation regressions include real PostgreSQL playback and HTTP route coverage. F
 - Supports OIDC/SSO login with configurable provider settings.
 - Shares sign-in and logout across Host, Admin, and Requests tabs on the same browser origin. Requests restores the account name and picture even when the singer is not in the queue.
 - Migrates older tab-only sessions when the signed-in Host tab is reloaded after upgrading. Shared sessions still expire on the server; temporary connection failures can be retried without discarding the login.
-- Supports role-based access, including admin-only routes for sensitive operations.
+- Maps OIDC `groups` membership: `karaokedock_user` grants all Host controls; `karaokedock_admin` also grants Admin access. Admin wins when both are present.
+- Managed local User accounts also have full Host access. Standalone social singers remain request-page-only; administrative settings stay Admin-only. See [OIDC group setup](SOCIAL_LOGIN.md#hostadmin-oidc-group-roles).
 - Supports account profile data such as username, display name, and picture.
 - Includes password change, username change, logout, session validation, and credential reset tooling.
 - Applies rate limiting to authentication, search, and queue-sensitive routes.
@@ -151,10 +158,12 @@ Rotation regressions include real PostgreSQL playback and HTTP route coverage. F
 
 | Page | Path | Purpose |
 |---|---|---|
-| Request | `/` or `/requests` | Singer-facing song search, browse, request, and personal queue/history tools |
+| Request | `/` or `/request` | Singer-facing song search, browse, request, and personal queue/history tools |
 | Host | `/host` | Live show control, queue management, playback control, break music, and singer history |
 | Player | `/player` | Fullscreen playback and overlay display for TV/projector output |
 | Admin | `/admin` | System setup, libraries, scans, users, authentication, settings, and maintenance |
+
+Only these registered application pages receive the web app. Unknown paths return HTTP 404 without the navigation menu, including removed feature URLs. Existing `/requests` links redirect permanently to `/request`, preserving query parameters. Registered API/media/authentication routes, static assets, health checks, and the public `/privacy` and `/terms` pages remain available. This applies to the combined server, standalone web server, and Vite development/preview servers.
 
 ## Supported media and sources
 

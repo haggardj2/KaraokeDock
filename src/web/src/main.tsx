@@ -6,6 +6,8 @@ import {
   Route,
   Link,
   useLocation,
+  Navigate,
+  Outlet,
 } from "react-router-dom";
 import { useAuth, AuthProvider } from "./auth-context";
 import { api } from "./api";
@@ -14,7 +16,9 @@ import Player from "./pages/Player";
 import Requests from "./pages/Requests";
 import Host from "./pages/Host";
 import Admin from "./pages/Admin";
-import HostInstall from "./components/HostInstall";
+import AppInstall from "./components/AppInstall";
+import AppVersion, { APP_VERSION } from "./components/AppVersion";
+import { updateAppManifest } from "./appManifest";
 
 const ACCOUNT_AVATAR_BACKGROUND = "#111827";
 
@@ -33,7 +37,7 @@ function Nav() {
   useEffect(() => {
     const titles: Record<string, string> = {
       "/": "Request - KaraokeDock",
-      "/requests": "Request - KaraokeDock",
+      "/request": "Request - KaraokeDock",
       "/player": "Player - KaraokeDock",
       "/host": "Host - KaraokeDock",
       "/admin": "Admin - KaraokeDock",
@@ -119,12 +123,12 @@ function Nav() {
           Player
         </Link>
         <a
-          href="/requests"
+          href="/request"
           target="_blank"
           rel="noreferrer"
           style={{
             color:
-              location.pathname === "/requests" || location.pathname === "/"
+              location.pathname === "/request" || location.pathname === "/"
                 ? "#6366f1"
                 : "#a1a1aa",
             ...navLinkStyle,
@@ -141,7 +145,7 @@ function Nav() {
         >
           Host
         </Link>
-        <Link
+        {(!auth.isLoggedIn || auth.isAdmin) && <Link
           to="/admin"
           style={{
             color: location.pathname === "/admin" ? "#6366f1" : "#a1a1aa",
@@ -149,7 +153,7 @@ function Nav() {
           }}
         >
           Admin
-        </Link>
+        </Link>}
       </div>
 
       {/* Auth/Account button for Host and Admin pages */}
@@ -331,6 +335,9 @@ function Nav() {
                 >
                   <span>🚪</span> Logout
                 </button>
+                <div style={{ padding: "10px 12px", marginTop: 6, borderTop: "1px solid rgba(255, 255, 255, 0.1)" }}>
+                  <AppVersion />
+                </div>
               </div>
             </>
           )}
@@ -351,24 +358,41 @@ function SessionStatus() {
   );
 }
 
+function AppLayout() {
+  return (
+    <AuthProvider>
+      <Nav />
+      <SessionStatus />
+      <AppInstall />
+      <Outlet />
+    </AuthProvider>
+  );
+}
+
+function RequestRedirect() {
+  const location = useLocation();
+  return <Navigate replace to={{ pathname: "/request", search: location.search, hash: location.hash }} />;
+}
+
 function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <Nav />
-        <SessionStatus />
-        <HostInstall />
-        <Routes>
-          <Route path="/" element={<Requests />} />
-          <Route path="/player" element={<Player />} />
-          <Route path="/requests" element={<Requests />} />
-          <Route path="/host" element={<Host />} />
-          <Route path="/admin" element={<Admin />} />
-        </Routes>
-      </AuthProvider>
+      <Routes>
+        <Route element={<AppLayout />}>
+          <Route path="/" caseSensitive element={<Requests />} />
+          <Route path="/player" caseSensitive element={<Player />} />
+          <Route path="/request" caseSensitive element={<Requests />} />
+          <Route path="/host" caseSensitive element={<Host />} />
+          <Route path="/admin" caseSensitive element={<Admin />} />
+        </Route>
+        <Route path="/requests" caseSensitive element={<RequestRedirect />} />
+        <Route path="*" element={<main style={{ padding: 24, fontFamily: "system-ui" }}><h1>404 - Page not found</h1></main>} />
+      </Routes>
     </BrowserRouter>
   );
 }
 
 const root = createRoot(document.getElementById("root")!);
+console.info(`KaraokeDock v${APP_VERSION}`);
+updateAppManifest(window.location.pathname);
 root.render(<App />);

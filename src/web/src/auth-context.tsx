@@ -52,6 +52,7 @@ type AuthContextType = {
   role: string
   setRole: (role: string) => void
   isAdmin: boolean
+  canHost: boolean
   profile: AuthProfile
   setProfile: (profile: Partial<AuthProfile>) => void
   clearProfile: () => void
@@ -75,6 +76,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [isDefaultPassword, setIsDefaultPassword] = useState(false)
   const [role, setRole] = useState('user')
+  const [canHost, setCanHost] = useState(false)
   const [profile, setProfileState] = useState<AuthProfile>(() => readStoredAuthProfile())
   const [sessionError, setSessionError] = useState('')
   const [validationAttempt, setValidationAttempt] = useState(0)
@@ -89,6 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoggedIn(false)
     setIsDefaultPassword(false)
     setRole('user')
+    setCanHost(false)
     setProfileState(emptyProfile())
     setSessionError('')
     if (!token) clearStoredAuthProfile()
@@ -142,6 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (result.valid) {
           setIsLoggedIn(true)
           setRole(result.role || 'user')
+          setCanHost(result.canHost === true)
           const profile = {
             username: result.username || '',
             displayName: result.displayName || '',
@@ -158,6 +162,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.error('Could not validate sign-in session:', error)
         setIsLoggedIn(false)
         setRole('user')
+        setCanHost(false)
         setSessionError('Could not verify your sign-in. Check your connection and retry.')
       })
 
@@ -190,6 +195,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       role,
       setRole,
       isAdmin,
+      canHost,
       profile,
       setProfile,
       clearProfile,

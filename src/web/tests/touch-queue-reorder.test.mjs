@@ -2,13 +2,13 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { afterEach, beforeEach, describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import ts from 'typescript'
+import { transpile } from './transpile.mjs'
 
 const require = createRequire(import.meta.url)
 const source = readFileSync(new URL('../src/touch-queue-reorder.ts', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+const compiled = transpile(source)
 const module = { exports: {} }
-new Function('require', 'exports', compiled)(name => name === './queue-drag' ? require('../src/queue-drag.ts') : require(name), module.exports)
+new Function('require', 'module', compiled)(name => name === './queue-drag' ? require('../src/queue-drag.ts') : require(name), module)
 const { attachTouchQueueReorder } = module.exports
 
 describe('mobile whole-card reordering', () => {

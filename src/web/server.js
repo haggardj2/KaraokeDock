@@ -1,11 +1,12 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'node:module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
+export const app = express();
 const port = 5173;
 const HEALTH_PATH = '/health';
 
@@ -31,13 +32,34 @@ app.use((req, _res, next) => {
 app.get(HEALTH_PATH, (_req, res) => res.json({ ok: true }));
 
 // Serve static files from dist directory
-app.use(express.static(path.join(__dirname, 'dist')));
+const staticFiles = express.static(path.join(__dirname, 'dist'), { index: false, redirect: false });
+app.use((req, res, next) => {
+  let pathname;
+  try {
+    pathname = decodeURIComponent(req.path);
+  } catch {
+    return res.sendStatus(400);
+  }
+  if (/\.html?$/i.test(pathname)) return next();
+  staticFiles(req, res, next);
+});
 
-// Handle client-side routing - serve index.html for all routes (Express 5 compatible wildcard)
-app.get('/{*path}', (_req, res) => {
+app.get(/^\/requests\/?$/, (req, res) => {
+  res.redirect(308, `/request${req.url.slice(req.path.length)}`);
+});
+
+app.get(/^\/(?:player\/?|host\/?|admin\/?|request\/?)?$/, (_req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-app.listen(port, () => {
-  console.log(`Web server running on http://localhost:${port}`);
+app.use((_req, res) => {
+  res.status(404).type('text').send('404 - Page not found');
 });
+
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  app.listen(port, () => {
+    const { version } = createRequire(import.meta.url)('./package.json');
+    console.log(`KaraokeDock v${version}`);
+    console.log(`Web server running on http://localhost:${port}`);
+  });
+}

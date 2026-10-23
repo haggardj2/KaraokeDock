@@ -5,6 +5,7 @@ import { findOrCreateSinger, normalizeSingerName, normalizeSingerUuid, type Sing
 import { syncSingerProfileFromOidc } from './singerProfile.js';
 import { resolveGuestSinger } from './guestSinger.js';
 import { withQueueTransaction } from './rotation/queueTransaction.js';
+import { canAccessHost } from './permissions.js';
 
 const requestError = (message: string, status: number) => Object.assign(new Error(message), { status });
 
@@ -159,7 +160,9 @@ export async function resolveQueueRequester(token: unknown, body: QueueRequester
   }
   const targetProvided = body.singerId !== undefined;
   if (targetProvided || body.requestAsHost === true) {
-    if (!isAdmin) throw requestError('Admin session required to request for another singer', 403);
+    if (!canAccessHost(user, isAdmin ? 'admin' : user?.role ?? '')) {
+      throw requestError('Host session required to request for another singer', 403);
+    }
     if (targetProvided) {
       if (typeof body.singerId !== 'string' || !/^[1-9]\d*$/.test(body.singerId)
           || BigInt(body.singerId) > 9223372036854775807n) {

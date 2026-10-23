@@ -1,560 +1,442 @@
 # KaraokeDock
 
-A modern, full-featured web-based karaoke system with support for multiple media formats, real-time queue management, and external karaoke integration.
+Self-hosted karaoke with local media, online song search, singer profiles,
+rotation management, and a separate TV/projector Player.
 
+KaraokeDock brings local libraries and external karaoke sources together so hosts
+can manage the show from one screen while guests request songs from their phones.
 
-##  Table of Contents
+## Contents
 
+- [Changelog and upgrade notes](../CHANGELOG.md)
 - [Features](#features)
-- [Web Pages Overview](#web-pages-overview)
-- [Quick Start with Docker](#quick-start-with-docker)
-- [First-Time Setup](#first-time-setup)
+- [Web pages overview](#web-pages-overview)
+- [Quick start with Docker](#quick-start-with-docker)
+- [First-time setup](#first-time-setup)
+- [Authentication and roles](#authentication-and-roles)
+- [Install Host and Player apps](#install-host-and-player-apps)
+- [Configuration](#configuration)
+- [Managing the application](#managing-the-application)
+- [Troubleshooting and login recovery](#troubleshooting)
 - [Architecture](#architecture)
 - [Development](#development)
-- [Troubleshooting](#troubleshooting)
 
-## Overview
+## Features
 
-KaraokeDock started because none of the apps out there really fit the way I wanted to run a show. I wanted something that gave me full control without forcing me to stand there all night acting as the DJ/KJ. The goal was to make hosting feel easier, more flexible, and less tied to one specific machine, setup, or location.
+- Local MP4, CDG+MP3, and ZIP karaoke libraries, with FFmpeg transcoding and
+  pitch adjustment.
+- Combined local and Karaoke Nerds search, relevance-ranked results, and
+  artist/song browsing.
+- Live singer queues, drag-and-drop ordering, multiple rotation policies,
+  autoplay, singer recall, and history import/export.
+- Break music playlists, crossfades, and a choice to pause or silently advance
+  break music during a performance.
+- Singer profiles, pictures and crops, optional Google/Facebook login, and
+  administrator-managed account linking.
+- Local password login and OIDC group-based roles.
+- Fullscreen Player with QR code, scrolling queue, custom backgrounds, and
+  separate Host/Player PWA installation.
+- Signed sideload APKs for Android TV/NVIDIA Shield and Android 13 iKarao devices.
 
-I also wanted a platform that could run anywhere, on almost anything, while still supporting the collection I’ve built over time. Just as important, I wanted it to work alongside the awesome creations the karaoke community has already made. KaraokeDock brings that together with local library playback, external song sources, and live queue syncing between the host, player, and singer request pages.
+See [features and capabilities](features-and-capabilities.md) for the detailed
+reference.
 
----
+## Web pages overview
 
-## Recent platform updates add:
+Replace `your-server:5173` with your server address or public HTTPS hostname.
 
-- 🔐 **Library Browse** Added browse tab to request page
-- 🔐 **OIDC/SSO authentication** with auto-provisioning options, role defaults, and optional password-login fallback
-- 🔄 **Advanced rotation engine** with multiple rotation types (strict round robin, least recently sung, signup order, song-queue-only, manual, and hybrid) plus host overrides
-- 🎶 **Break music management** with playlists, active playlist sync, volume control, and crossfade settings between karaoke tracks
-- 🖥️ **Player/overlay controls** for QR visibility, ticker controls, queue privacy options, and live settings propagation over WebSocket
+| Page | Path | Purpose |
+| --- | --- | --- |
+| Request | `/request` or `/` | Search, request songs, and manage your singer profile/history |
+| Host | `/host` | Run the show, manage singers, playback, rotation, and break music |
+| Player | `/player` | Display karaoke on a TV or projector |
+| Admin | `/admin` | Configure libraries, users, authentication, and system settings |
 
-<a id="features"></a>
-## ✨ Features
+Old `/requests` links redirect to `/request`. Unknown page paths return 404.
+Public legal pages are available at `/privacy` and `/terms`.
 
-- 🎤 **Multi-format support**: MP4 videos, CDG+MP3 files (raw and zipped)
-- 🔄 **Real-time queue updates** via WebSocket
-- 📱 **Mobile-friendly interface** with QR code for easy guest access
-- 🌐 **External karaoke integration** (Karaoke Nerds)
-- ⚡ **Auto-play mode** with configurable delays
-- 🎚️ **Configurable rotation policies** with host controls
-- 🎶 **Break music playlists** with crossfade and live controls
-- 🎵 **CDG to MP4 streaming** transcoding on-the-fly
-- 🔐 **Flexible authentication**: local sessions + OIDC/SSO
-- 📊 **Admin dashboard** for library management and statistics
-- 🎯 **Host panel** for queue control and playback management
+The screenshots below were captured from the current UI on **2026-10-23** with
+fictional singers and sample catalog data, not a live venue or production account.
 
-<a id="web-pages-overview"></a>
-## Web Pages Overview
----
-### Requests Page
-**URL:** `http://your-server:5173/`
+### Request
 
-The main interface for guests to browse and request songs. Fully mobile-responsive and accessible via QR code.
+Search local and enabled online sources from the same page. Browse Artists and
+Browse Songs reuse the main query and restrict it to the selected field. Open
+the cog for search options; use the profile menu for name, picture, history,
+logout, and application version.
 
-![Requests Page](screenshots/requests-page.png)
+![Current Request page showing combined search and sample song results](screenshots/requests-page.png)
 
-**Functions:**
-- Search local karaoke library
-- Browse songs by title or artist
-- Filter results with advanced options
-- Submit song requests with your name
-- Switch to Karaoke Nerds for online songs
+### Host
 
-### Karaoke Nerds Integration
-**URL:** `http://your-server:5173/` (switch to Karaoke Nerds tab)
+Managed Users and Admins can add singers, reorder or clear queues, recall
+singers, manage history, and control playback. Drag a queue number or hold a
+singer card to reorder on supported touch devices.
 
-Access thousands of online karaoke tracks from Karaoke Nerds directly within the app.
-
-![Karaoke Nerds Page](screenshots/karaoke-nerds-page.png)
-
-**Functions:**
-- Search online karaoke catalog
-- Preview and add external songs
-- Seamless integration with your queue
-- No need to download files
----
-### Host Panel
-**URL:** `http://your-server:5173/host`
-
-The control center for managing the karaoke session.
-
-![Host Page](screenshots/host-page.png)
-
-**Functions:**
-- View real-time queue updates
-- Play, skip, and stop songs
-- Manage queue order (reorder, remove songs)
-- Enable auto-play mode
-- Manually add songs to the queue
-
-#### Install the Host app
-
-Open `/host` using your server's trusted **HTTPS** address and select **Install Host app**. Android uses Chrome's install menu; Windows and Linux support installation through Chrome or Edge. On iPhone/iPad, open `/host` in Safari and select **Share > Add to Home Screen** (enable **Open as Web App** if offered).
-
-The app launches directly into Host in a standalone window. Use the same public origin configured for social/OIDC callbacks. Sign in again if the installed app has separate browser storage. Plain HTTP LAN addresses are not installable; localhost is supported for local testing.
-
-Select **Dismiss** to hide the installation prompt on this browser, including after reloading. You can still install later using the browser's install menu or Safari's **Add to Home Screen**.
-
-The Host app requires a live server connection. It does not cache logins, queue data, media, or offline control actions. An offline launch shows a reconnect page. Installation is available from production builds, not the Vite development server.
+![Current Host page with a three-singer sample queue](screenshots/host-page.png)
 
 #### Manage break music
-![Break Settings](screenshots/break_mgmt.png)
 
-The manager opens the running playlist; editing it updates playback immediately. Select **New playlist** to build a separate draft without clearing or interrupting the running playlist. Enter a **Playlist name** and select **Save** to store it, then select it under **Saved Playlists** and use **Load** when ready to switch playback. A draft remains available when you close and reopen the manager in the same Host page; save it before reloading the page.
+The manager opens the running playlist; edits apply immediately. **New playlist**
+starts an independent draft without interrupting playback. Name and **Save** it,
+then select a saved playlist and **Load** when ready to switch.
 
-The running playlist keeps the currently playing song at the top. When it finishes or is skipped, it moves to the bottom and the next song takes its place. This rotation does not change saved playlists or independent drafts.
+The current song stays at the top of the running playlist and rotates to the
+bottom when finished or skipped. Saved playlists and independent drafts are
+unchanged. Save drafts before reloading the Host page.
 
-Search matches titles, artists, genres, and full indexed file paths, so entering a folder such as `/music/80s/` limits the library to that location. Enable the **Path** column to see matches. **Add All** adds the filtered results. Saved playlists are stored in the database; if the optional M3U file cannot be written to the configured playlist folder, the manager displays a warning while retaining the saved playlist.
+Search matches title, artist, genre, and indexed file path. Enable the **Path**
+column to inspect folder matches; **Add All** adds the filtered results. Playlists
+are stored in the database. If optional M3U export fails, the manager reports a
+warning without discarding the saved playlist.
 
-Existing installations need migration `025_break_music_path_search.sql` for the folder-path index; it is included in the normal migration runner (`npm run migrate` from `src/server`).
+![Current break music manager with a sample playlist](screenshots/break_mgmt.png)
 
 #### Configure playback settings
-![Player Settings](screenshots/player_mgmt.png)
 
----
-### Player Page
-**URL:** `http://your-server:5173/player`
+Use Host's settings control for autoplay, rotation, break music behavior,
+backgrounds, and QR/scroller options.
 
-Full-screen karaoke player optimized for display on TVs or projectors.
+![Current Player Settings dialog opened from Host](screenshots/player_mgmt.png)
 
-![Player Page](screenshots/player-page.png)
+### Player
 
-**Functions:**
-- Full-screen video playback
-- Display current song information
-- Show scrolling text when idle
-- QR code display for song requests
-- Automatic queue progression
+Open Player on the show display and control it from Host on another device.
+The QR code and scroller remain separate from video playback. Local video uses
+cover sizing, which can crop edges when aspect ratios differ.
 
----
-### Admin Dashboard
-**URL:** `http://your-server:5173/admin`
+![Current Player waiting screen with sample singer, QR code, and queue scroller](screenshots/player-page.png)
 
-Management interface for system configuration and media libraries.
+### Admin
 
-![Admin Page](screenshots/admin-page.png)
+Admins manage media libraries and scans, break music folders, accounts,
+authentication, library availability, and public legal information. Linking
+social logins to a managed account is an explicit Admin action; matching names
+does not automatically grant access.
 
-**Functions:**
-- View system statistics (artists, tracks, queue)
-- Add and manage media libraries
-- Add and manage break music
-- Scan directories for karaoke files & break music
-- User manager
-- OIDC/SSO settings
-- Optional Google/Facebook singer login: [provider setup guide](SOCIAL_LOGIN.md)
-- Host-approved singer merging links social/OIDC/password accounts to existing singer queues and history
-- Public privacy policy (`/privacy`), terms of service (`/terms`), and data-deletion instructions (`/privacy#data-deletion`)
+![Current Admin dashboard with sample library and statistics](screenshots/admin-page.png)
 
----
+## Quick start with Docker
 
-<a id="quick-start-with-docker"></a>
-## Quick Start with Docker
+You need Docker Engine with the Compose plugin, storage for PostgreSQL, and
+optional karaoke/break music files. See the official
+[Docker installation](https://docs.docker.com/engine/install/) instructions.
 
-### Prerequisites
+1. Create a deployment directory and download the configuration:
 
-- A Linux machine or WSL that can run Docker
-- Karaoke media files (MP4, CDG+MP3, or ZIP files) - optional
-
-### Installation Steps
-
-1. **Install Docker and the Docker Compose plugin.**
-
-   Follow the official Docker installation guide for your platform:
-   - [Docker Engine](https://docs.docker.com/engine/install/)
-   - [Docker Compose plugin](https://docs.docker.com/compose/install/)
-
-   Confirm both are available:
-   ```bash
-   docker --version
-   docker compose version
-   ```
-
-2. **Create a `karaokedock` folder** for your deployment files:
    ```bash
    mkdir -p ~/karaokedock
    cd ~/karaokedock
-   ```
-
-3. **Download or copy KaraokeDock's `docker-compose.yml` and `.env.example` into the `karaokedock` folder.**
-
-   Download them directly:
-   ```bash
-   curl -o docker-compose.yml https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/docker-compose.yml
-   curl -o .env.example https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/.env.example
-   ```
-
-   Or copy them from a local checkout:
-   ```bash
-   cp /path/to/KaraokeDock/docker-compose.yml .
-   cp /path/to/KaraokeDock/.env.example .
-   ```
-
-4. **Create `.env` from the new environment file:**
-   ```bash
+   curl -fLO https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/docker-compose.yml
+   curl -fLo .env.example https://raw.githubusercontent.com/haggardj2/KaraokeDock/refs/heads/main/.env.example
    cp .env.example .env
    ```
 
-5. **Edit `.env`** with your host paths and network settings:
-   ```bash
-   nano .env
-   ```
+2. Edit `.env`. Set a strong `POSTGRES_PASSWORD`, existing host media paths, and
+   writable `DB_PATH`, `DOWNLOADS_PATH`, and `IMAGES_PATH` directories. Use an
+   address guests can reach for `WEB_APP_URL` and `ORIGIN`, not `localhost`:
 
-   At minimum, review and update these values from `.env.example`:
    ```env
-   POSTGRES_PASSWORD=karaoke
-   DB_PATH=/home/user/karaokedock/db
+   WEB_APP_URL=http://192.168.1.20:5173
+   ORIGIN=http://192.168.1.20:5173
    APP_PORT=5173
-   MEDIA_ROOT=/media
-   KARAOKE_PATH=/mnt/karaoke/Karaoke Tracks
-   DOWNLOADS_PATH=/mnt/karaoke/downloads
-   BREAKMUSIC_PATH=/mnt/karaoke/Break Music
-   WEB_APP_URL=http://localhost:5173
-   ORIGIN=http://localhost:5173,http://127.0.0.1:5173
-   DB_PORT=5432
-   TRUST_PROXY=1
    ```
 
-   KaraokeDock serves the web app and API from the same container on port `5173`. To change the exposed host ports, update `APP_PORT` and `DB_PORT`.
+3. Start the stack and inspect its status:
 
-6. **Create the host directories you configured** if they do not already exist:
    ```bash
-   mkdir -p /home/user/karaokedock/db
-   mkdir -p /mnt/karaoke/downloads
+   docker compose up -d
+   docker compose ps
+   docker compose logs -f app
    ```
 
-7. **Start the stack with `docker-compose.yml`:**
-   ```bash
-   docker compose -f docker-compose.yml up -d
-   ```
+The Compose services are **`app`** and **`db`**; their container names are
+`karaokedock` and `karaokedock-db`. The combined web/API app uses port 5173.
+The database is PostgreSQL 18. Startup runs database migrations automatically.
 
-8. **Check container status:**
-   ```bash
-   docker compose -f docker-compose.yml ps
-   ```
+For Unraid, see the [Unraid setup guide](unraid_readme.md).
 
-   You should see two running containers:
-   - `karaokedock` (KaraokeDock app)
-   - `karaokedock-db` (PostgreSQL Database)
+## First-time setup
 
-9. **Access the application:**
-   - Web Interface: `http://your-server:5173`
-   - Admin Panel: `http://your-server:5173/admin`
-   - Host Panel: `http://your-server:5173/host`
-   - Player: `http://your-server:5173/player`
+1. Open `http://your-server:5173/admin`. On a fresh installation with no
+   configured administrator password, retrieve the generated bootstrap
+   credentials from `docker compose logs app`.
+2. Sign in and change the bootstrap password immediately.
+3. Add a karaoke library using its **container path**, normally `/media/karaoke`,
+   and scan it. Add `/media/breakmusic` as a break music folder if needed.
+4. Open `/host`, sign in, and configure rotation/playback.
+5. Open `/player` on the show display or install a [signed APK](#android-signed-apk-downloads).
+6. Direct singers to `/request` or the Player's QR code.
+
+## Authentication and roles
+
+**Upgrading an existing OIDC installation? Read the
+[breaking-change and recovery notes](../CHANGELOG.md#oidc-sign-in-now-requires-group-membership)
+before updating.**
+
+| Account | Access |
+| --- | --- |
+| Managed User | All Host functions; no Admin page |
+| Admin | Host and Admin |
+| Standalone social singer | Request/profile functions, not Host administration |
+
+OIDC requires exact, case-sensitive `groups` membership:
+`karaokedock_admin` maps to Admin; `karaokedock_user` maps to User. Admin wins
+when both are present. Roles synchronize on each OIDC login; the old default
+role setting no longer grants access.
+
+The provider must include the claim in its ID token or subject-validated
+UserInfo response. KaraokeDock requests the `groups` scope when discovery
+advertises it. Missing membership rejects login, revokes existing sessions,
+and removes Admin status without disabling the account. Previously disabled
+accounts still need administrator reactivation.
+
+Configure OIDC credentials through Admin; they remain in database settings and
+the secret is masked in responses. Rotate any previously exposed secret at the
+provider and save the replacement in Admin.
+
+See [OIDC and Google/Facebook configuration](SOCIAL_LOGIN.md). If locked out, use
+[Reenable Password Login](#reenable-password-login) and [Forgot Login](#forgot-login).
 
 
----
-### Managing the Application
+## PWA Browser installation
 
-**View logs:**
+Open `/host` or `/player` using trusted **HTTPS**, then select **Install Host app**
+or **Install Player app**. Chrome/Edge support installation where available;
+on iPhone/iPad use Safari's **Share > Add to Home Screen**, enabling **Open as Web
+App** if offered.
+
+Host and Player install separately and launch directly into their respective
+pages. **Dismiss** hides that app's prompt for the browser; browser-menu
+installation remains available. Production builds support installation; plain
+HTTP LAN addresses and the Vite development server do not, except localhost
+where the browser permits it.
+
+Both require a live server and do not cache songs, credentials, queue state, or
+offline actions. Offline launches show a reconnect page. Browser audio/autoplay
+restrictions still apply.
+
+Player fits the visible mobile viewport and supports portrait/landscape. Tap
+to reveal fullscreen controls where supported. It requests a screen wake lock
+while visible and reacquires it on return; browser/OS restrictions may deny or
+release it, with a visible retry option. It cannot override the power button or
+keep a hidden app awake.
+
+### Android signed APK downloads
+
+| Device | Signed sideload APK |
+| --- | --- |
+| NVIDIA Shield / Android TV (Android 7.0+) | [Universal Android TV APK](../PlayerTV/release/KaraokeDock-Player-1.1.3-v7-AndroidTV-universal-signed.apk) |
+| iKarao S1 and other Android 13 iKarao devices | [Android 13 tablet APK](../PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-signed.apk) |
+
+Download the appropriate APK, transfer it to the device, permit installation
+from your file manager, and install. Open **KaraokeDock Player**, enter the server
+address, and select **Save and open Player**. Use Back/Menu for TV settings.
+
+Both packages support 32-bit and 64-bit devices and do not include Google Play's
+installer protection. The TV package requires Leanback; the tablet package does
+not. Keep Android System WebView updated. A live server is required; the wrapper
+uses Android's native keep-screen-on behavior.
+
+If an existing Play-installed or debug-signed copy has a different signing key,
+uninstall it first; this clears its saved server address. Only these two signed
+APKs are published under `PlayerTV/`, not source, build tools, or signing material.
+
+Authorized Google Play testers can use the
+[testing app link](https://play.google.com/apps/test/com.karaokedock.player/7).
+Play-protected packages may redirect to the store if sideloaded; use the signed
+downloads above for sideloading.
+
+## Configuration
+
+Deployment settings come from `.env`/container environment variables. Libraries,
+users, OIDC/social credentials, and show settings are managed through the app and
+stored in PostgreSQL; they are not all configured through `.env`.
+
+| Variable | Purpose |
+| --- | --- |
+| `APP_PORT` | Published app port; default 5173 |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Bundled database credentials |
+| `DB_PATH` | Persistent host PostgreSQL storage |
+| `DB_PORT` | Published database port; default 5432 |
+| `KARAOKE_PATH` | Host library mounted read-only at `/media/karaoke` |
+| `DOWNLOADS_PATH` | Writable downloads mounted at `/media/downloads` |
+| `BREAKMUSIC_PATH` | Host music mounted read-only at `/media/breakmusic` |
+| `IMAGES_PATH` | Writable profile/background images mounted at `/media/images` |
+| `MEDIA_ROOT` | Container media root, normally `/media` |
+| `WEB_APP_URL` | Reachable web origin used for default request/QR URLs |
+| `ORIGIN` | Comma-separated allowed browser origins |
+| `TRUST_PROXY` | Proxy trust configuration; match your actual proxy topology |
+
+The Compose file builds `DATABASE_URL` from the database credentials. Other
+deployments can provide `DATABASE_URL` directly, or use `DB_HOST`, `DB_PORT`,
+`DB_NAME`, `DB_USER`, and `DB_PASSWORD`. In the latter case, `DB_PORT` is the
+database connection port, not the Compose host-port mapping.
+
+For a reverse proxy, forward HTTP and WebSocket traffic to app port 5173, set
+`WEB_APP_URL`/`ORIGIN` to the public HTTPS origin, and configure proxy trust for
+the real number of trusted hops. Do not expose PostgreSQL to untrusted networks.
+For Unraid external databases, attach the app to a network where the database
+hostname resolves.
+
+## Managing the application
+
+Run these commands from the directory containing your Compose file and `.env`:
+
 ```bash
-# All services
-docker compose logs -f
-
-# Specific service
-docker compose logs -f karaokedock
-docker compose logs -f karaokedock-db
+docker compose ps               # Status
+docker compose logs -f app       # App logs
+docker compose logs -f db        # Database logs
+docker compose restart app      # Restart the app
+docker compose down             # Stop the stack
 ```
 
-**Stop the application:**
-```bash
-docker compose down
-```
+Before upgrading, back up PostgreSQL and persistent media/images, and read the
+[changelog](../CHANGELOG.md). Then:
 
-**Update to latest version:**
 ```bash
 docker compose pull
 docker compose up -d
+docker compose logs -f app
 ```
 
-**Restart services:**
-```bash
-docker compose restart
-```
+### Application versions
 
-**Build locally (development):**
-```bash
-docker build -f dev/Dockerfile -t haggardj2/karaokedock:latest .
-docker compose -f docker-compose.yml up -d
-```
----
-## Configuration
+The profile menus on Host, Admin, and Request show `KaraokeDock vX.Y.Z`.
+Player has no visible version label. Browser load and server startup logs also
+report the version.
 
-### Environment Variables
 
-All configuration is managed through the `.env` file. Key variables:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `APP_PORT` | Host port published for the KaraokeDock app container | `5173` or `6173` |
-| `DB_PORT` | Host port published for PostgreSQL | `5432` or `6543` |
-| `KARAOKE_PATH` | Host path for the karaoke library mount | `/mnt/karaoke/Karaoke Tracks` |
-| `DOWNLOADS_PATH` | Host path for downloaded media | `/mnt/karaoke/downloads` |
-| `BREAKMUSIC_PATH` | Host path for break music | `/mnt/karaoke/Break Music` |
-| `MEDIA_ROOT` | Shared media root inside the container | `/media` |
-| `WEB_APP_URL` | Public URL for QR codes | `http://your-server-ip:5173` or `https://karaoke.example.com` |
-| `ORIGIN` | Allowed browser origins (comma-separated) | `http://your-server-ip:5173` or `https://karaoke.example.com` |
-| `POSTGRES_PASSWORD` | Database password for the bundled PostgreSQL container | `karaoke` (change in production) |
-| `DATABASE_URL` | Full PostgreSQL connection string for the app; overrides split DB variables when set | `postgres://karaoke:karaoke@db:5432/karaoke` |
-
-**Important Notes:**
-- Replace `your-server-ip` with your server's IP address for network access
-- Ensure `ORIGIN` includes every URL where the app will be opened
-- `KARAOKE_PATH`, `DOWNLOADS_PATH`, and `BREAKMUSIC_PATH` map to `/media/karaoke`, `/media/downloads`, and `/media/breakmusic`
-- Change `APP_PORT` / `DB_PORT` to remap host ports
-- Change default passwords before deploying to production
-
-If your container platform exposes environment variables more cleanly than full connection strings, the app can instead derive its database connection from `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. In that mode, `DB_PORT` is the database service port inside the app container, usually `5432`. If you are running PostgreSQL as a separate container, `DB_HOST` must be a hostname the app container can actually resolve on a shared network. For Unraid custom networks, the container must join that network with `--network=<name>` in Extra Parameters; setting the XML `<Network>` field to the custom name is not enough. The Docker Compose setup in this repo still uses `DATABASE_URL`, so existing installs do not need to change.
-
-### Network Configuration
-
-To access from other devices on your network:
-
-1. Set `WEB_APP_URL` to your server's IP: `http://your-server-ip:5173`
-2. Update `ORIGIN` to include your server's IP
-3. Ensure firewall allows port 5173
-
-To setup reverse proxy for SSL termination:
-
-1. Set `WEB_APP_URL` to your FQDN: `https://karaoke.example.com`
-2. Update `ORIGIN` to include that public URL
-3. Set `TRUST_PROXY=1` when running behind the proxy
-4. Point the proxy to the app container on port `5173`
-
----
-<a id="first-time-setup"></a>
-## First-Time Setup
-
-After starting the containers for the first time:
-
-1. **Navigate to the Admin page:**
-   ```
-   http://your-server:5173/admin
-   ```
-
-2. **Get the bootstrap admin password:**
-   - Username: `admin`
-   - Password: check the app container logs from the first boot:
-     ```bash
-     docker compose logs karaokedock
-     ```
-
-3. **⚠️ Change the bootstrap password immediately** after logging in
-
-4. **Add a media library:**
-   - Click "Add Library"
-   - Name: Give it a descriptive name (e.g., "My Karaoke Collection")
-   - Path: Enter `/media/karaoke` (this is the container path, not your host path)
-   - Click "Add Library"
-
-5. **Scan your files:**
-   - Click "Scan All Libraries"
-   - Wait for the scan to complete
-   - Refresh stats to see your track count
-
-6. **Access the Host panel:**
-   - Go to `http://your-server:5173/host`
-   - Login with your password
-
-7. **Open a player window**
-   - Open a browser tab to `http://your-server-ip:5173/player`
-   - If serving from an Android TV, you can use a [kiosk browser app](https://play.google.com/store/apps/details?id=de.ozerov.fully&hl=en_US)
-
-8. **Done!** Guests can now request songs via the Requests page
-
----
-<a id="troubleshooting"></a>
 ## Troubleshooting
 
-### Common Issues
+| Symptom | Check |
+| --- | --- |
+| QR points to localhost | Set a reachable `WEB_APP_URL`; check the request URL in Admin |
+| Another device cannot connect | Published app port, firewall, server address, and reverse proxy |
+| CORS/WebSocket origin errors | Include the exact browser origin in `ORIGIN` |
+| No songs after scanning | Host mounts, supported formats, container library path, and `docker compose logs app` |
+| Database startup failure | `docker compose ps` and `docker compose logs db`; credentials and writable storage |
+| File permission errors | Container read/write access; use appropriate SELinux labels where required |
+| OIDC membership error | Exact groups, provider claim configuration, fresh SSO login, and updated server |
+| APK opens Play Store | Use the signed sideload APK, not a sideloaded Play-protected package |
 
-**QR code shows localhost instead of server IP:**
-- Solution: Set `WEB_APP_URL` in `.env` to your server's IP address
+### Forgot Login
 
-**Cannot connect to API from other devices:**
-- Solution: Set `WEB_APP_URL` and `ORIGIN` to your server's IP or public URL
-- Check firewall allows port 5173
+From the deployment directory, reset administrator access:
 
-**CORS errors in browser console:**
-- Solution: Add your access URL to `ORIGIN` in `.env`
-
-**No songs appearing after scan:**
-- Check `KARAOKE_PATH` points to the correct host directory
-- Verify files are in supported formats
-- Check app logs: `docker compose logs karaokedock`
-
-**Database connection errors:**
-- Wait 10-15 seconds for database to initialize on first start
-- Restart the stack: `docker compose restart karaokedock karaokedock-db`
-
-**Permission denied errors:**
-- Ensure media files are readable by Docker
-- On Linux with SELinux, the `:Z` flag in volumes may help
-
-
-**Forgot Login**
 ```bash
-# Run password reset helper:
-docker exec -it KaraokeDock npm run reset-credentials
-# Defaults to username "admin" and generates a secure password if --password is omitted.
-docker exec -it KaraokeDock npm run reset-credentials -- --password supersecret
-# Or set a specific username/password:
-docker exec -it KaraokeDock npm run reset-credentials -- --username admin --password supersecret
+docker compose exec app npm run reset-credentials
+# Or target your existing administrator username:
+docker compose exec app npm run reset-credentials -- --username YOUR_ADMIN_USERNAME
 ```
 
-**Reenable Password Login**
+Without `--password`, the helper generates and prints a secure password.
+It defaults to username `admin`, activates the account, restores Admin access,
+and signs out all sessions. If the requested username does not exist, it can
+rename an existing administrator; specify your existing username to avoid that.
+Store the password privately and change it after signing in.
+
+For non-Compose containers, use
+`docker exec -it YOUR_CONTAINER_NAME npm run reset-credentials`.
+If the password form is disabled, also follow the next section.
+
+### Reenable Password Login
+
 ```bash
-# Run the re-enable-login helper
-docker exec -it KaraokeDock npm run re-enable_login
+docker compose exec app npm run re-enable_login
 ```
 
----
-### Docker Compose Architecture
+Without Compose, use
+`docker exec -it YOUR_CONTAINER_NAME npm run re-enable_login`.
 
-The application runs two Docker containers:
+This enables the password form without resetting credentials or activating
+disabled accounts. [Forgot Login](#forgot-login) restores administrator access;
+both steps may be needed. Reload `/admin`, sign in locally, correct OIDC groups,
+and re-enable affected accounts in **User Manager** before retrying SSO.
 
-```
-----------------------     ------------------
-|     karaokedock     |     | karaokedock-db |
-|   (Web + API App)   |---> |  (PostgreSQL)  |
-|     Port: 5173      |     |   Port: 5432   |
-----------------------     ------------------
-```
-
-**Container Details:**
-
-- **karaokedock**: Combined React frontend + Node.js/Express backend
-  - Image: `haggardj2/karaokedock:latest`
-  - Exposed port: 5173
-  - Mounts:
-    - `KARAOKE_PATH` → `/media/karaoke`
-    - `DOWNLOADS_PATH` → `/media/downloads`
-    - `BREAKMUSIC_PATH` → `/media/breakmusic`
-
-- **karaokedock-db**: PostgreSQL 18 database
-  - Image: `postgres:18`
-  - Exposed port: 5432
----
-<a id="architecture"></a>
 ## Architecture
 
-### Technology Stack
+The standard deployment uses two containers:
 
-**Frontend:**
-- React 19 with TypeScript
-- Vite for development and building
-- React Router for navigation
-- WebSocket for real-time updates
+```text
+Browser / Android Player
+          |
+          v
+app: React web + Express API + WebSocket + FFmpeg (5173)
+          |
+          v
+db: PostgreSQL 18 (5432)
+```
 
-**Backend:**
-- Node.js with Express
-- TypeScript for type safety
-- PostgreSQL for data persistence
-- WebSocket for live queue sync
-- Recompiled FFmpeg with rubberband for pitch adjustment
-- FFmpeg for CDG to MP4 transcoding
+Media is indexed in PostgreSQL. Request and Host actions update the queue, which
+is broadcast to connected clients. Player streams local video, transcoded CDG,
+or supported external content. Library mounts are read-only; downloads and image
+uploads use separate writable mounts.
 
-**Infrastructure:**
-- Docker for containerization
-- Docker Compose for orchestration
-- Pre-built images hosted on Docker Hub
+The web app uses React 19, TypeScript 7, and Vite. The server uses Node.js,
+Express, PostgreSQL, and FFmpeg with Rubber Band pitch shifting.
 
-### Supported File Formats
-
-- **MP4 videos**: Direct playback
-- **CDG+MP3 pairs**: Transcoded to MP4 on-the-fly
-- **ZIP archives**: Automatically extracted and processed
-- **Break Music**: mp3,flac,opus,wav
-- **External URLs**: From Karaoke Nerds and similar services
-
-### Data Flow
-
-1. Media files scanned and indexed into PostgreSQL
-2. Guests request songs via Requests page
-3. Queue updates broadcast via WebSocket
-4. Host controls playback from Host panel
-5. Player page displays current song
-6. CDG files transcoded to MP4 in real-time if needed
-
----
-<a id="development"></a>
 ## Development
 
-### Local Development (without Docker)
+Use Node.js 26.x for parity with the container images. Install dependencies with
+`npm ci` in each package you work on: `src/server`, `src/web`, `Gateway`, or
+`Station`. See [running without Docker](../dev/build-without-docker.md) for host
+dependencies, database configuration, and FFmpeg requirements.
 
-**Server:**
+For separate development processes, supply database/media environment variables
+to the server before running migrations and starting it:
+
 ```bash
 cd src/server
-npm install
-cp ../../.env.example .env
-# Edit .env with local settings
+npm ci
 npm run migrate
 npm run dev
 ```
 
-**Web:**
+In another terminal:
+
 ```bash
 cd src/web
-npm install
-npm run dev
+npm ci
+VITE_API_BASE=http://localhost:5174 npm run dev
 ```
 
-**Database:**
-```bash
-# Start PostgreSQL in Docker
-docker run -d \
-  --name karaokedock-db \
-  -e POSTGRES_DB=karaoke \
-  -e POSTGRES_USER=karaoke \
-  -e POSTGRES_PASSWORD=karaoke \
-  -p 5432:5432 \
-  postgres:18-alpine
-```
+The API defaults to 5174 and Vite to 5173 in this setup. Configure server
+`ORIGIN` accordingly. Copying `.env.example` alone does not export variables
+into these processes.
 
-### Building Docker Images
-
-To build the KaraokeDock image locally:
+To build the combined image from the repository root:
 
 ```bash
 docker build -f dev/Dockerfile -t haggardj2/karaokedock:latest .
 ```
 
-
-## Viewing Logs
+### Checks
 
 ```bash
-
-# Specific container
-docker compose logs -f karaokedock
-docker compose logs -f karaokedock-db
+cd src/server
+npx tsc --noEmit
+npm test
 ```
 
-## Security Considerations
+```bash
+cd src/web
+npm run build
+node --experimental-strip-types --test tests/*.test.mjs
+```
 
-- **Change default passwords** immediately after first login
-- **Change database password** in production environments
-- Use **HTTPS** with a reverse proxy (nginx, Traefik) for production
-- Keep Docker images updated: `docker compose pull`
-- Restrict network access to admin and host pages if needed
+Database-backed integration tests require their configured PostgreSQL test
+environment. Frontend test helpers use esbuild and Oxc rather than TypeScript's
+removed JavaScript compiler API.
 
-## License
+## Security and support
 
-See [LICENSE](LICENSE) file for details.
+Use trusted HTTPS, protect local configuration and database backups, change
+bootstrap credentials, and keep images/WebView updated. Public frontend assets
+are expected; authorization is enforced at protected API endpoints.
 
-## Contributing
+Report issues in [GitHub Issues](https://github.com/haggardj2/KaraokeDock/issues).
+Include the app version and relevant logs, with passwords, tokens, and personal
+information removed. Contributions are welcome.
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
-## Support
-
-For issues and questions:
-- Open an issue on GitHub
-- Check existing documentation in the repository
-- Review Docker logs for error messages
-
----
-
-**Docker Images:** 
-- KaraokeDock app: `haggardj2/karaokedock:latest`
-- Database base image: `postgres:18-alpine`
+See [LICENSE](../LICENSE).

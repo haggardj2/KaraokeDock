@@ -4,16 +4,14 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import ts from 'typescript'
+import { transpile } from './transpile.mjs'
 
 const require = createRequire(import.meta.url)
 const source = readFileSync(new URL('../src/components/QueueDragHandle.tsx', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
-}).outputText
+const compiled = transpile(source)
 let handlers
 const module = { exports: {} }
-new Function('require', 'exports', compiled)((name) => {
+new Function('require', 'module', compiled)((name) => {
   if (name === '../queue-drag') return require('../src/queue-drag.ts')
   if (name !== 'react/jsx-runtime') return require(name)
   const runtime = require(name)
@@ -21,7 +19,7 @@ new Function('require', 'exports', compiled)((name) => {
     if (type === 'button') handlers = props
     return runtime.jsx(type, props, key)
   } }
-}, module.exports)
+}, module)
 const QueueDragHandle = module.exports.default
 
 describe('queue drag handle', () => {

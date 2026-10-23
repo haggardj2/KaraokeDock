@@ -829,12 +829,12 @@ export default function Host() {
   useEffect(() => {
     async function loadSettings() {
       // Only load settings if authenticated
-      if (!auth.sessionToken || !auth.isLoggedIn) {
+      if (!auth.sessionToken || !auth.canHost) {
         return;
       }
 
       try {
-        const settings = await api('/api/admin/settings', { headers });
+        const settings = await api('/api/host/settings', { headers });
         const localEnabled = parseBooleanSetting(settings['libraries.local_enabled']);
         const externalEnabled = parseBooleanSetting(settings['libraries.external_enabled']);
         const downloadsAllowed = parseBooleanSetting(settings['ytdlp.allow_downloads']);
@@ -857,7 +857,7 @@ export default function Host() {
 
     loadSettings();
     loadBreakMusicState();
-  }, [auth.sessionToken, auth.isLoggedIn, headers])
+  }, [auth.sessionToken, auth.canHost, headers])
 
   async function loadBreakMusicState() {
     const request = ++breakStateRequestRef.current
@@ -889,7 +889,7 @@ export default function Host() {
   }
 
   async function updateBreakCrossfade(seconds: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     await api('/api/break-music/settings', {
       method: 'POST',
       headers,
@@ -898,7 +898,7 @@ export default function Host() {
   }
 
   async function updateBreakVolume(volumePercent: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     await api('/api/break-music/settings', {
       method: 'POST',
       headers,
@@ -907,7 +907,7 @@ export default function Host() {
   }
 
   async function updateBreakResumeDelay(resumeDelaySec: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     await api('/api/break-music/settings', {
       method: 'POST',
       headers,
@@ -916,7 +916,7 @@ export default function Host() {
   }
 
   async function updateBreakPauseDuringKaraoke(pauseDuringKaraoke: boolean) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setSavingBreakPlayback(true)
     try {
       await api('/api/break-music/settings', {
@@ -944,7 +944,7 @@ export default function Host() {
   }
 
   async function controlBreakMusic(action: 'pause' | 'resume' | 'skip' | 'previous') {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     await api('/api/break-music/control', {
       method: 'POST',
       headers,
@@ -954,7 +954,7 @@ export default function Host() {
   }
 
   async function loadBreakMusicLibrary(query: string = '') {
-    if (!auth.sessionToken || !auth.isLoggedIn) {
+    if (!auth.sessionToken || !auth.canHost) {
       console.warn('Cannot load break music library without authentication')
       return [] as BreakTrack[]
     }
@@ -1039,7 +1039,7 @@ export default function Host() {
   }
 
   async function saveBreakPlaylist() {
-    if (!auth.sessionToken || !auth.isLoggedIn || breakManagerBusyRef.current) return
+    if (!auth.sessionToken || !auth.canHost || breakManagerBusyRef.current) return
     const name = breakPlaylistName.trim()
     if (!name) {
       setBreakManagerError('Enter a playlist name before saving.')
@@ -1077,7 +1077,7 @@ export default function Host() {
   }
 
   async function loadBreakPlaylist(playlistId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn || breakManagerBusyRef.current) return
+    if (!auth.sessionToken || !auth.canHost || breakManagerBusyRef.current) return
     if (breakDraftDirty && !window.confirm('Discard unsaved playlist edits and load the selected playlist for playback?')) return
     breakManagerBusyRef.current = true
     setBreakManagerBusy(true)
@@ -1115,7 +1115,7 @@ export default function Host() {
 
   async function syncBreakActivePlaylist(nextTracks: BreakTrack[], requestId: number) {
     try {
-      if (!auth.sessionToken || !auth.isLoggedIn) throw new Error('Sign in to update the running playlist.')
+      if (!auth.sessionToken || !auth.canHost) throw new Error('Sign in to update the running playlist.')
       breakStateRequestRef.current++
       const result = await api('/api/break-music/playlist/active', {
         method: 'POST',
@@ -1418,7 +1418,7 @@ export default function Host() {
   }, [autoPlay])
 
   async function updateAutoPlaySettings(enabled: boolean, delay: number) {
-    if (! auth.sessionToken || ! auth.isLoggedIn) return
+    if (! auth.sessionToken || ! auth.canHost) return
     try {
       await api('/api/autoplay/settings', {
         method: 'POST',
@@ -1500,7 +1500,7 @@ export default function Host() {
   }
 
   async function loadArchivedSingers() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setHistoryManagerMode('archived')
     setArchivedSingersLoading(true)
     try {
@@ -1516,7 +1516,7 @@ export default function Host() {
   }
 
   async function restoreArchivedSinger(singerId: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
     try {
       await api(`/api/singers/${singerId}/restore`, { method: 'POST', headers })
@@ -1533,7 +1533,7 @@ export default function Host() {
   }
 
   async function deleteStoredSinger(singer: ArchivedSinger) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!confirm(`Permanently delete ${singer.displayName}, including all history and their profile image? This cannot be undone.`)) return
     setBusy(true)
     try {
@@ -1551,7 +1551,7 @@ export default function Host() {
   }
 
   async function saveSingerProfileImage(crop: ProfileCrop, image?: Blob) {
-    if (!selectedSingerId || !auth.sessionToken || !auth.isLoggedIn) throw new Error('Select a singer and sign in as host.')
+    if (!selectedSingerId || !auth.sessionToken || !auth.canHost) throw new Error('Select a singer and sign in as host.')
     const singerId = selectedSingerId
     if (image) {
       const result = await api(`/api/singers/${selectedSingerId}/profile/image`, {
@@ -1572,7 +1572,7 @@ export default function Host() {
   }
 
   async function removeSingerProfileImage() {
-    if (!selectedSingerId || !auth.sessionToken || !auth.isLoggedIn) throw new Error('Select a singer and sign in as host.')
+    if (!selectedSingerId || !auth.sessionToken || !auth.canHost) throw new Error('Select a singer and sign in as host.')
     const singerId = selectedSingerId
     const result = await api(`/api/singers/${singerId}/profile/image`, {
       method: 'DELETE', headers,
@@ -1583,7 +1583,7 @@ export default function Host() {
   }
 
   async function exportAllSingerHistory() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     try {
       const data = await api('/api/history/export-all', { headers })
       downloadJsonFile(`karaokedock-singer-history-${new Date().toISOString().slice(0, 10)}.kd`, data)
@@ -1598,7 +1598,7 @@ export default function Host() {
   }
 
   async function exportSelectedSingerHistory() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     const singerIds = Array.from(historyExportSelectedSingerIds)
     if (singerIds.length === 0) {
       setBanner('⚠️ Select at least one singer to export')
@@ -1641,7 +1641,7 @@ export default function Host() {
   }
 
   async function importPendingHostSingerHistory(importAll: boolean) {
-    if (!auth.sessionToken || !auth.isLoggedIn || !pendingHistoryImportData) return
+    if (!auth.sessionToken || !auth.canHost || !pendingHistoryImportData) return
     const sourceSingers = Array.isArray(pendingHistoryImportData.singers) ? pendingHistoryImportData.singers : []
     const selectedSingers = sourceSingers.filter((_: unknown, index: number) => historyImportSelectedIndexes.has(index))
     const data = importAll
@@ -1693,7 +1693,7 @@ export default function Host() {
   }
 
   async function renameSingerFromModal() {
-    if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerId) return
+    if (!auth.sessionToken || !auth.canHost || !selectedSingerId) return
     const nextName = editingSingerName.trim()
     if (!nextName) {
       setBanner('⚠️ Singer name is required')
@@ -1729,7 +1729,7 @@ export default function Host() {
       setModalSongDraggedId(null)
       return
     }
-    if (!auth.sessionToken || !auth.isLoggedIn || !selectedSingerHistory) {
+    if (!auth.sessionToken || !auth.canHost || !selectedSingerHistory) {
       setModalSongDraggedId(null)
       return
     }
@@ -1763,7 +1763,7 @@ export default function Host() {
 
   async function handleModalSongMoveInQueue(queueId: number, direction: 'up' | 'down') {
     if (!selectedSingerHistory || !selectedSingerId) return
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     const songs = selectedSingerHistory.queuedSongs.filter(s => s.status === 'queued')
     const idx = songs.findIndex(s => s.queueId === queueId)
     if (idx < 0) return
@@ -1786,7 +1786,7 @@ export default function Host() {
   }
 
   async function restoreSongToQueue(queueId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
     try {
       await api(`/api/queue/${queueId}/status`, {
@@ -1808,7 +1808,7 @@ export default function Host() {
   }
 
   async function removeSongFromQueue(queueId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
     try {
       await api(`/api/queue/${queueId}/status`, {
@@ -1830,7 +1830,7 @@ export default function Host() {
   }
 
   async function deleteSongFromHistory(queueId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!confirm('Remove this track from singer history?')) return
     setBusy(true)
     try {
@@ -1860,7 +1860,7 @@ export default function Host() {
   }
 
   async function moveSinger(singerId: string, direction: 'up' | 'down') {
-    if (!auth.sessionToken || !auth.isLoggedIn || !queueState?.activeRotation) return
+    if (!auth.sessionToken || !auth.canHost || !queueState?.activeRotation) return
     const rotationId = queueState.activeRotation.id
     const singers = queueState.queueOrder
     const idx = singers.findIndex(s => s.singerId === singerId)
@@ -1901,7 +1901,7 @@ export default function Host() {
     songDrop: (_source: string, _target: string) => {},
   })
   touchQueueCallbacks.current = {
-    enabled: () => auth.isLoggedIn && auth.isAdmin && !busy && !queueOrderSavingRef.current,
+    enabled: () => auth.canHost && !busy && !queueOrderSavingRef.current,
     singerDrop: (source, target) => { void reorderSingers(source, target) },
     songDrop: (source, target) => { void handleModalSongDrop(Number(target), Number(source)) },
   }
@@ -1916,7 +1916,7 @@ export default function Host() {
       onEnd: () => { setSingerDraggedId(null); setSingerDragOverId(null) },
       onDrop: (source, target) => touchQueueCallbacks.current.singerDrop(source, target),
     })
-  }, [auth.isLoggedIn, hasSingerQueue])
+  }, [auth.canHost, hasSingerQueue])
   useEffect(() => {
     if (!songQueueTouchRef.current) return
     return attachTouchQueueReorder(songQueueTouchRef.current, {
@@ -1950,7 +1950,7 @@ export default function Host() {
       setSingerDraggedId(null)
       return
     }
-    if (!auth.sessionToken || !auth.isLoggedIn || !queueState?.activeRotation) {
+    if (!auth.sessionToken || !auth.canHost || !queueState?.activeRotation) {
       setSingerDraggedId(null)
       return
     }
@@ -2137,7 +2137,7 @@ export default function Host() {
 
   useEffect(() => {
     loadPlayerBackgroundLibraryImages()
-  }, [auth.sessionToken, auth.isLoggedIn])
+  }, [auth.sessionToken, auth.canHost])
 
   useEffect(() => () => clearPlayerBackgroundSlideshowLongPressTimer(), [])
 
@@ -2154,7 +2154,7 @@ export default function Host() {
     showBreakMusicTrackVal?: boolean,
     showProfilePicturesVal?: boolean,
   ) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     try {
       await api('/api/overlay/settings', {
         method: 'POST',
@@ -2191,7 +2191,7 @@ export default function Host() {
   }
 
   async function loadPlayerBackgroundLibraryImages() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setPlayerBackgroundLibraryLoading(true)
     try {
       const result = await api('/api/player/background/library-images', { headers })
@@ -2215,7 +2215,7 @@ export default function Host() {
     slideshowIntervalSeconds?: number
     slideshowTransitionDurationSeconds?: number
   }) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     const previous = {
       mode: playerBackgroundMode,
       slideshowTransitionStyle: playerBackgroundSlideshowTransitionStyle,
@@ -2265,7 +2265,7 @@ export default function Host() {
   }
 
   async function uploadPlayerBackgroundImage(file: File) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!PLAYER_BACKGROUND_IMAGE_TYPES.has(file.type)) {
       setPlayerBackgroundError('Choose a PNG, JPEG, WebP, or GIF image.')
       return
@@ -2296,7 +2296,7 @@ export default function Host() {
   }
 
   async function uploadPlayerBackgroundSlideshowImages(files: File[]) {
-    if (!auth.sessionToken || !auth.isLoggedIn || files.length === 0) return
+    if (!auth.sessionToken || !auth.canHost || files.length === 0) return
     const invalidFile = files.find((file) => !PLAYER_BACKGROUND_IMAGE_TYPES.has(file.type))
     if (invalidFile) {
       setPlayerBackgroundError(`${invalidFile.name} is not a PNG, JPEG, WebP, or GIF image.`)
@@ -2334,7 +2334,7 @@ export default function Host() {
   }
 
   async function clearPlayerBackgroundImage() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setPlayerBackgroundError('')
     try {
       const settings = await api('/api/player/background/image', {
@@ -2348,7 +2348,7 @@ export default function Host() {
   }
 
   async function clearPlayerBackgroundSlideshowImages() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setPlayerBackgroundError('')
     try {
       const settings = await api('/api/player/background/slideshow-images', {
@@ -2393,7 +2393,7 @@ export default function Host() {
   }
 
   async function removePlayerBackgroundSlideshowImage(imageId: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setPlayerBackgroundError('')
     try {
       const settings = await api(`/api/player/background/slideshow-images/${encodeURIComponent(imageId)}`, {
@@ -2407,7 +2407,7 @@ export default function Host() {
   }
 
   async function selectPlayerBackgroundLibraryImage(filename: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setPlayerBackgroundError('')
     try {
       const settings = await api('/api/player/background/image/select', {
@@ -2422,7 +2422,7 @@ export default function Host() {
   }
 
   async function addPlayerBackgroundLibraryImageToSlideshow(filename: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setPlayerBackgroundError('')
     try {
       const settings = await api('/api/player/background/slideshow-images/select', {
@@ -2438,7 +2438,7 @@ export default function Host() {
 
   // Fetch active rotation settings
   useEffect(() => {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     api('/api/rotations', { headers })
       .then((rotations: { id: string | number; status: string; type?: string; config?: { type?: string } }[]) => {
         if (rotations && rotations.length > 0) {
@@ -2448,10 +2448,10 @@ export default function Host() {
         }
       })
       .catch((err) => { console.error('Failed to load rotation settings:', err) })
-  }, [auth.sessionToken, auth.isLoggedIn, headers])
+  }, [auth.sessionToken, auth.canHost, headers])
 
   async function updateRotationType(newType: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setSavingRotationType(true)
     try {
       let rotId = activeRotationId
@@ -2615,7 +2615,7 @@ export default function Host() {
   const playbackLabel = playbackAction === 'pause' ? 'Pause singer' : playbackAction === 'resume' ? 'Resume singer' : 'Play'
 
   const playNextSong = useCallback(async () => {
-    if (! auth.sessionToken || !auth.isLoggedIn) return
+    if (! auth.sessionToken || !auth.canHost) return
 
     const nextQueued = queue.find(r => r.status === 'queued')
     if (! nextQueued) return
@@ -2635,7 +2635,7 @@ export default function Host() {
       setBusy(false)
       await refreshQueue()
     }
-  }, [auth.sessionToken, headers, queue, auth.isLoggedIn])
+  }, [auth.sessionToken, headers, queue, auth.canHost])
 
   // Song timer management - DISABLED: Server now handles autoplay via /player/timing endpoint
   // This ensures autoplay works even when Host page is not open
@@ -2730,7 +2730,7 @@ export default function Host() {
   }, [manualRequestUrl, manualRequestMode, manualRequestTitle])
 
   async function replaceSong(queueId: number, newTrackId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
 
     setBusy(true)
     try {
@@ -2749,7 +2749,7 @@ export default function Host() {
   }
 
   async function replaceSongWithKaraokeNerds(queueId: number, track: { title: string; artist: string; url: string; brand?: string }) {
-    if (! auth.sessionToken || !auth.isLoggedIn) return
+    if (! auth.sessionToken || !auth.canHost) return
 
     setBusy(true)
     try {
@@ -2860,7 +2860,7 @@ export default function Host() {
 
   // Add manual request to queue - Local track
   async function addManualRequestLocal(trackId: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
 
     setBusy(true)
     try {
@@ -2883,7 +2883,7 @@ export default function Host() {
 
   // Add manual request to queue - External (Karaoke Nerds) track
   async function addManualRequestExternal(track: { title: string; artist: string; url: string; brand?: string }) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
 
     setBusy(true)
     try {
@@ -2920,7 +2920,7 @@ export default function Host() {
 
   // Replace song with custom URL
   async function replaceSongWithUrl(queueId: number, url: string, title: string, artist: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
 
     setBusy(true)
     try {
@@ -2948,7 +2948,7 @@ export default function Host() {
 
   // Add manual request to queue - Manual URL
   async function addManualRequestUrl() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!manualRequestUrl.trim()) return
 
     setBusy(true)
@@ -2975,7 +2975,7 @@ export default function Host() {
 
   // Download video from external source
   async function downloadVideo(url: string, title: string, artist: string, brand?: string, discId?: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!allowDownloads) {
       alert('Downloads are disabled')
       return
@@ -2986,7 +2986,7 @@ export default function Host() {
     setBusy(true)
 
     try {
-      const response = await api('/api/admin/ytdlp/download', {
+      const response = await api('/api/host/download', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -3039,7 +3039,7 @@ function closeDetails(e: React.SyntheticEvent) {
     e.preventDefault()
     setDragOverPosition(null)
 
-    if (!draggedItem || !auth.sessionToken || !auth.isLoggedIn || draggedItem.position === targetPosition) {
+    if (!draggedItem || !auth.sessionToken || !auth.canHost || draggedItem.position === targetPosition) {
       setDraggedItem(null)
       return
     }
@@ -3062,7 +3062,7 @@ function closeDetails(e: React.SyntheticEvent) {
   }
 
   async function playTop() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     explicitStopRef.current = false
     setBusy(true)
     try {
@@ -3086,7 +3086,7 @@ function closeDetails(e: React.SyntheticEvent) {
   }
 
   async function playThis(id: number) {
-    if (! auth.sessionToken || !auth.isLoggedIn) return
+    if (! auth.sessionToken || !auth.canHost) return
     explicitStopRef.current = false
     setBusy(true)
     try { await api('/api/player/play', { method:'POST', headers, body: JSON.stringify({ id }) }) }
@@ -3094,7 +3094,7 @@ function closeDetails(e: React.SyntheticEvent) {
   }
 
   async function next() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     explicitStopRef. current = false
     setBusy(true)
     try {
@@ -3106,7 +3106,7 @@ function closeDetails(e: React.SyntheticEvent) {
   }
 
   async function stop() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
 
     try {
@@ -3134,28 +3134,28 @@ function closeDetails(e: React.SyntheticEvent) {
   }
 
   async function rename(id: number, requestedBy: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
     try { await api('/api/queue/rename', { method:'POST', headers, body: JSON.stringify({ id, requestedBy }) }) }
     finally { setBusy(false); await refreshQueue() }
   }
 
   async function updateKey(id: number, keyAdjustment: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
     try { await api('/api/queue/update-key', { method:'POST', headers, body: JSON.stringify({ id, keyAdjustment }) }) }
     finally { setBusy(false); await refreshQueue() }
   }
 
   async function remove(id: number) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     setBusy(true)
     try { await api('/api/queue/delete', { method:'POST', headers, body: JSON.stringify({ id }) }) }
     finally { setBusy(false); await refreshQueue() }
   }
 
   async function clearAll() {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!confirm('⚠️ Clear ALL queues?\n\nThis will remove all songs from the queue AND remove all singers from the rotation. This cannot be undone.')) return
     setBusy(true)
     try {
@@ -3178,7 +3178,7 @@ function closeDetails(e: React.SyntheticEvent) {
   }
 
   async function removeSingerFromRotation(singerId: string) {
-    if (!auth.sessionToken || !auth.isLoggedIn) return
+    if (!auth.sessionToken || !auth.canHost) return
     if (!confirm('Remove this singer from the active rotation? Their history and profile will remain available in Singer History.')) return
     setBusy(true)
     try {
@@ -4538,6 +4538,11 @@ function closeDetails(e: React.SyntheticEvent) {
             >
               Use the credentials configured in Admin settings
             </p>
+          </div>
+        ) : !auth.canHost ? (
+          <div className="card" role="status">
+            Host access requires a managed User or Admin account.
+            <button type="button" onClick={() => void auth.handleLogout()}>Sign out</button>
           </div>
         ) : (
           <>

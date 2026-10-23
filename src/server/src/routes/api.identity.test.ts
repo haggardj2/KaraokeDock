@@ -1,7 +1,12 @@
 import express from 'express';
 import type { Server } from 'node:http';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getSetting, setSetting, getUserById, listUsers, query, validateSessionInfo, withTransaction } from '../db.js';
+import { getSetting, setSetting, getUserById, listUsers, query, validateSessionInfo, withTransaction, getUserByOidcSubject, createUser, updateUser, createSession } from '../db.js';
+import * as oidc from 'openid-client';
+import { getOidcProfileClaims } from '../oidcProfile.js';
 import { ensureAuthenticatedSinger } from '../authenticatedSinger.js';
 import { ensureSingerInActiveRotation, findOrCreateSinger } from '../queueIdentity.js';
 
@@ -10,7 +15,19 @@ vi.mock('../db.js', async (importOriginal) => ({
   query: vi.fn(), getUserById: vi.fn(), listUsers: vi.fn(), validateSessionInfo: vi.fn(), withTransaction: vi.fn(),
   ensureHelpfulIndexes: vi.fn().mockResolvedValue(undefined),
   getSetting: vi.fn().mockResolvedValue(null), setSetting: vi.fn(), cleanupExpiredSessions: vi.fn(),
+  getUserByOidcSubject: vi.fn(), createUser: vi.fn(), updateUser: vi.fn(), createSession: vi.fn(),
+  getUserByUsername: vi.fn().mockResolvedValue(null),
   upsertArtist: vi.fn().mockResolvedValue(1), upsertExternalTrack: vi.fn().mockResolvedValue({ id: 101 }),
+}));
+vi.mock('openid-client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('openid-client')>(),
+  discovery: vi.fn(),
+  buildAuthorizationUrl: vi.fn(),
+  authorizationCodeGrant: vi.fn(),
+}));
+vi.mock('../oidcProfile.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../oidcProfile.js')>(),
+  getOidcProfileClaims: vi.fn(),
 }));
 vi.mock('../authenticatedSinger.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../authenticatedSinger.js')>(), ensureAuthenticatedSinger: vi.fn(),
@@ -88,6 +105,62 @@ async function request(path: string, body: unknown, method = 'POST', token: stri
     body: method === 'GET' ? undefined : JSON.stringify(body),
   });
 }
+
+describe('Public Player queue pictures', () => {
+  it('uses the queue singer identity, preserves crop, and leaves anonymous songs without a picture', async () => {
+    queryMock.mockImplementation(async (sql) => {
+      if (sql.includes('AS singer_profile')) {
+        expect(sql).toContain('LEFT JOIN singers s ON s.id = q.singer_id');
+        return { command: 'SELECT', rowCount: 2, oid: 0, fields: [], rows: [
+          { id: '42', singer_id: '9', requested_by: 'Same Name', singer_profile: {
+            id: '9', profile_image_source: 'upload', profile_image_mime: 'image/png',
+            profile_image_updated_at: '2026-09-25T00:00:00.000Z', profile_image_crop: crop,
+          } },
+          { id: '43', singer_id: null, requested_by: 'Same Name', singer_profile: { id: null } },
+        ] };
+      }
+      return { command: 'SELECT', rowCount: 0, oid: 0, fields: [], rows: [] };
+    });
+    const response = await request('/queue', undefined, 'GET', null);
+    expect(response.status).toBe(200);
+    const rows = await response.json();
+    expect(rows[0].profile.imageUrl).toMatch(/^\/api\/singers\/9\/profile-image/);
+    expect(rows[0].profile.crop).toEqual(crop);
+    expect(rows[0]).not.toHaveProperty('singer_profile');
+    expect(rows[1].profile).toBeNull();
+    expect(validateSessionInfo).not.toHaveBeenCalled();
+  });
+});
+
+describe('Public Player backgrounds on fresh clients', () => {
+  it('serves selected static and slideshow files without a Host login or browser cache', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'karaokedock-background-'));
+    const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+    const updatedAt = '2026-09-25T00:00:00.000Z';
+    const settings = new Map<string, unknown>([
+      ['images.upload_dir', directory], ['player.backgroundMode', 'image'],
+      ['player.backgroundImageMime', 'image/png'], ['player.backgroundImageFilename', 'background.png'],
+      ['player.backgroundImageUpdatedAt', updatedAt],
+      ['player.backgroundSlideshowImages', [{ id: 'slide1', filename: 'background.png', mime: 'image/png', updatedAt }]],
+    ]);
+    vi.mocked(getSetting).mockImplementation(async key => settings.get(key) ?? null);
+    try {
+      await writeFile(path.join(directory, 'background.png'), image);
+      const configuration = await (await request('/player/background/settings', undefined, 'GET', null)).json();
+      expect(configuration.mode).toBe('image');
+      for (const imageUrl of [configuration.imageUrl, configuration.slideshowImages[0].imageUrl]) {
+        const response = await fetch(new URL(imageUrl, baseUrl));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toContain('image/png');
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(image);
+      }
+      expect(validateSessionInfo).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getSetting).mockReset().mockResolvedValue(null);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('Admin User Manager canonical accounts', () => {
   it('exposes exact singer IDs, canonical presentation and linked credentials without passwords', async () => {
@@ -192,6 +265,201 @@ describe('social login API integration boundaries', () => {
   });
 });
 
+describe('OIDC group role synchronization', () => {
+  beforeEach(() => {
+    vi.mocked(getSetting).mockImplementation(async key => ({
+      'oidc.enabled': true, 'oidc.issuer': 'https://id.example',
+      'oidc.client_id': 'karaokedock', 'oidc.client_secret': 'test-secret',
+      'oidc.redirect_uri': 'https://web.example/api/auth/oidc/callback',
+      'oidc.frontend_url': 'https://web.example',
+      'oidc.default_role': 'admin',
+    } as Record<string, unknown>)[key] ?? null);
+    vi.mocked(oidc.discovery).mockResolvedValue(new oidc.Configuration({
+      issuer: 'https://id.example',
+      scopes_supported: ['openid', 'email', 'profile', 'groups'],
+    }, 'karaokedock'));
+    vi.mocked(oidc.buildAuthorizationUrl).mockImplementation((_config, parameters) =>
+      new URL(`https://id.example/authorize?${new URLSearchParams(parameters)}`));
+    vi.mocked(getUserByOidcSubject).mockResolvedValue(user as Awaited<ReturnType<typeof getUserByOidcSubject>>);
+    vi.mocked(updateUser).mockImplementation(async (_id, updates) =>
+      ({ ...user, ...updates }) as Awaited<ReturnType<typeof updateUser>>);
+    vi.mocked(createSession).mockResolvedValue('new-oidc-session');
+  });
+
+  afterEach(() => {
+    vi.mocked(getSetting).mockReset().mockResolvedValue(null);
+  });
+
+  async function signIn(groups: string[]) {
+    vi.mocked(getOidcProfileClaims).mockResolvedValue({
+      sub: 'subject', iss: 'https://id.example', aud: 'karaokedock', iat: 1, exp: 9999999999,
+      email: 'host@example.com', name: 'Host', groups,
+    });
+    const login = await fetch(`${baseUrl}/auth/oidc/login?returnTo=/host`, { redirect: 'manual' });
+    expect(login.status).toBe(302);
+    const state = new URL(login.headers.get('location')!).searchParams.get('state')!;
+    return fetch(`${baseUrl}/auth/oidc/callback?state=${encodeURIComponent(state)}&code=test`, { redirect: 'manual' });
+  }
+
+  it.each([
+    [['openid', 'email', 'profile', 'groups'], 'openid email profile groups'],
+    [['openid', 'email', 'profile'], 'openid email profile'],
+    [undefined, 'openid email profile'],
+  ])('requests group membership only when discovery advertises the scope %j', async (scopes, expected) => {
+    vi.mocked(oidc.discovery).mockResolvedValue(new oidc.Configuration({
+      issuer: 'https://id.example', scopes_supported: scopes,
+    }, 'karaokedock'));
+    const response = await fetch(`${baseUrl}/auth/oidc/login?returnTo=/host`, { redirect: 'manual' });
+    expect(response.status).toBe(302);
+    const authorizationUrl = new URL(response.headers.get('location')!);
+    expect(authorizationUrl.searchParams.get('scope')).toBe(expected);
+    expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(authorizationUrl.searchParams.get('state')).toBeTruthy();
+  });
+
+  it.each([
+    [['karaokedock_admin'], 'admin'],
+    [['karaokedock_user'], 'user'],
+    [['karaokedock_user', 'karaokedock_admin'], 'admin'],
+  ] as const)('synchronizes existing accounts for groups %j', async (groups, role) => {
+    const response = await signIn([...groups]);
+    expect(response.headers.get('location')).toContain('/host?oidc_code=');
+    expect(updateUser).toHaveBeenCalledWith(1, expect.objectContaining({ role }));
+    expect(createSession).toHaveBeenCalledWith(30, 1, role);
+  });
+
+  it('denies missing membership and revokes sessions without disabling the account', async () => {
+    const response = await signIn([]);
+    expect(response.headers.get('location')).toContain('oidc_error=Membership');
+    expect(queryMock).toHaveBeenCalledWith('DELETE FROM sessions WHERE user_id = $1', [1]);
+    expect(updateUser).toHaveBeenCalledWith(1, { role: 'user' });
+    expect(createSession).not.toHaveBeenCalled();
+    const retry = await signIn(['karaokedock_admin']);
+    expect(retry.headers.get('location')).toContain('/host?oidc_code=');
+    expect(createSession).toHaveBeenCalledWith(30, 1, 'admin');
+  });
+
+  it('provisions a new User from group membership instead of a default Admin role', async () => {
+    vi.mocked(getUserByOidcSubject).mockResolvedValue(null);
+    vi.mocked(createUser).mockResolvedValue({ ...user, role: 'user' } as Awaited<ReturnType<typeof createUser>>);
+    const response = await signIn(['karaokedock_user']);
+    expect(response.headers.get('location')).toContain('/host?oidc_code=');
+    expect(createUser).toHaveBeenCalledWith(expect.objectContaining({ role: 'user' }));
+  });
+
+  it('does not reactivate a disabled account with valid groups', async () => {
+    vi.mocked(getUserByOidcSubject).mockResolvedValue({ ...user, is_active: false } as Awaited<ReturnType<typeof getUserByOidcSubject>>);
+    vi.mocked(updateUser).mockResolvedValue({ ...user, is_active: false } as Awaited<ReturnType<typeof updateUser>>);
+    expect((await signIn(['karaokedock_admin'])).headers.get('location')).toContain('oidc_error=Account+disabled');
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects new accounts when automatic creation is disabled', async () => {
+    vi.mocked(getUserByOidcSubject).mockResolvedValue(null);
+    const settings = vi.mocked(getSetting).getMockImplementation()!;
+    vi.mocked(getSetting).mockImplementation(key => key === 'oidc.auto_create_users'
+      ? Promise.resolve(false) : settings(key));
+    expect((await signIn(['karaokedock_user'])).headers.get('location')).toContain('oidc_error=User+not+found');
+    expect(createUser).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('Host User permissions', () => {
+  beforeEach(() => {
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    vi.mocked(getUserById).mockResolvedValue({ ...user, role: 'user' } as Awaited<ReturnType<typeof getUserById>>);
+  });
+
+  it('exposes Host capability and only the settings needed by Host', async () => {
+    const validation = await request('/auth/validate', undefined, 'GET');
+    expect(await validation.json()).toMatchObject({ role: 'user', canHost: true });
+    const settings = await request('/host/settings', undefined, 'GET');
+    expect(settings.status).toBe(200);
+    expect(Object.keys(await settings.json()).sort()).toEqual([
+      'libraries.external_enabled', 'libraries.local_enabled', 'ytdlp.allow_downloads',
+    ]);
+    for (const endpoint of ['/admin/settings', '/admin/settings/oidc', '/admin/users', '/admin/stats']) {
+      expect((await request(endpoint, undefined, 'GET')).status).toBe(403);
+    }
+    expect((await request('/admin/ytdlp/download', {}, 'POST')).status).toBe(403);
+    expect((await request('/admin/clear-db', {}, 'POST')).status).toBe(403);
+  });
+
+  it('allows Users to reorder the queue and modify overlay settings', async () => {
+    queryMock.mockResolvedValue({ rows: [{ position: 2 }] } as any);
+    const reordered = await request('/queue/reorder', { id: 42, newPosition: 1 });
+    expect(reordered.status).toBe(200);
+    expect(queryMock).toHaveBeenCalledWith('UPDATE queue SET position = $1 WHERE id = $2', [1, 42]);
+    const overlay = await request('/overlay/settings', { showProfilePictures: false });
+    expect(overlay.status).toBe(200);
+    expect(setSetting).toHaveBeenCalledWith('overlay.showProfilePictures', 'false');
+  });
+
+  it.each([
+    ['/queue/delete', 'POST'], ['/queue/clear', 'POST'], ['/queue/reorder', 'POST'],
+    ['/queue/replace', 'POST'], ['/player/play', 'POST'], ['/player/pause', 'POST'],
+    ['/player/next', 'POST'], ['/player/stop', 'POST'], ['/overlay/settings', 'POST'],
+    ['/autoplay/settings', 'POST'], ['/singers/1/restore', 'POST'],
+    ['/singers/1', 'DELETE'], ['/singers/1/song-order', 'PATCH'],
+    ['/queue/1/status', 'PATCH'], ['/break-music/settings', 'POST'],
+    ['/break-music/control', 'POST'], ['/break-music/playlists', 'POST'],
+    ['/break-music/playlist/active', 'POST'], ['/host/download', 'POST'],
+    ['/host/settings', 'GET'],
+  ])('rejects guests and singer-only accounts at %s', async (endpoint, method) => {
+    expect((await request(endpoint, {}, method, null)).status).toBe(403);
+    vi.mocked(getUserById).mockResolvedValue({
+      ...user, role: 'user', oidc_subject: null, social_provider: 'google',
+    } as Awaited<ReturnType<typeof getUserById>>);
+    expect((await request(endpoint, {}, method)).status).toBe(403);
+  });
+});
+
+describe('OIDC client secret boundaries', () => {
+  it('masks the legacy secret in generic settings and prevents response caching', async () => {
+    queryMock.mockResolvedValue({
+      rows: [
+        { key: 'oidc.client_id', value: 'karaokedock' },
+        { key: 'oidc.client_secret', value: 'exposed-legacy-secret' },
+      ],
+    } as any);
+
+    const response = await request('/admin/settings', undefined, 'GET');
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('pragma')).toBe('no-cache');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(text).not.toContain('exposed-legacy-secret');
+    expect(JSON.parse(text)['oidc.client_secret']).toBe('***');
+  });
+
+  it('blocks generic writes to all OIDC settings', async () => {
+    const response = await request('/admin/settings/oidc.client_secret', {
+      value: 'replacement-secret',
+    }, 'PUT');
+
+    expect(response.status).toBe(400);
+    expect(setSetting).not.toHaveBeenCalled();
+  });
+
+  it('masks the dedicated OIDC response', async () => {
+    vi.mocked(getSetting).mockImplementation(async (key) => ({
+      'oidc.enabled': true,
+      'oidc.client_id': 'karaokedock',
+      'oidc.client_secret': 'legacy-secret',
+    } as Record<string, unknown>)[key] ?? null);
+
+    const response = await request('/admin/settings/oidc', undefined, 'GET');
+    const config = await response.json();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(config.clientSecret).toBe('***');
+    expect(JSON.stringify(config)).not.toContain('legacy-secret');
+  });
+});
+
 describe('scroller profile picture settings', () => {
   const broadcast = vi.fn();
   let settings: Map<string, unknown>;
@@ -266,14 +534,24 @@ describe.each([
   });
 
   it.each([{ singerId: '9' }, { requestAsHost: true, requestedBy: 'Other' }])(
-    'rejects a regular user trying to target another singer %j before queue writes', async (body) => {
+    'rejects a singer-only account trying to target another singer %j before queue writes', async (body) => {
       vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+      vi.mocked(getUserById).mockResolvedValue({
+        ...user, role: 'user', oidc_subject: null, social_provider: 'google',
+      } as Awaited<ReturnType<typeof getUserById>>);
       const response = await request(endpoint, { ...trackBody, ...body });
       expect(response.status).toBe(403);
       expect(queryMock.mock.calls.some(([sql]) => sql.includes('INSERT INTO queue'))).toBe(false);
     },
   );
 
+  it('allows a managed User to enqueue another singer', async () => {
+    vi.mocked(validateSessionInfo).mockResolvedValue({ valid: true, userId: 1, role: 'user' });
+    vi.mocked(getUserById).mockResolvedValue({ ...user, role: 'user' } as Awaited<ReturnType<typeof getUserById>>);
+    const response = await request(endpoint, { ...trackBody, singerId: '9', requestAsHost: true });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ singer_id: '9' });
+  });
   it('uses authenticated self identity despite requestedBy and UUID, including omitted requestedBy', async () => {
     // The resolver uses its real local function reference, so mock the transaction result at the DB boundary.
     for (const body of [{ requestedBy: 'Other', singerUuid: 'ignored' }, {}]) {

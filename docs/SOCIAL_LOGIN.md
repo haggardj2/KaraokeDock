@@ -2,6 +2,45 @@
 
 Social login is optional and **off by default**. Configure it in **Admin > Singer Social Login**, separately from the host/admin SSO settings.
 
+## Host/Admin OIDC group roles
+
+Configure your OIDC provider to include an exact, case-sensitive `groups` claim
+in the ID token or subject-validated UserInfo response:
+
+```json
+{ "groups": ["karaokedock_user"] }
+```
+
+KaraokeDock requests `openid email profile` and adds `groups` when the provider
+advertises that scope in OIDC discovery (including Pocket ID). Providers without
+a separate groups scope must include the claim in their configured token or
+UserInfo response.
+
+| Group | Role | Access |
+| --- | --- | --- |
+| `karaokedock_admin` | Admin | All Host controls and Admin |
+| `karaokedock_user` | User | All Host controls; no Admin access |
+
+Admin takes precedence when both groups are present. Roles are assigned during
+account creation and synchronized on every OIDC login. The previous default SSO
+role no longer determines access. Configure the provider claim before deploying
+this change and keep a local administrator available for recovery.
+
+An OIDC login without either group is rejected. For an existing account, its
+sessions are revoked and any Admin role is removed, but the account is not
+disabled. A subsequent login with valid membership synchronizes the role again.
+Administratively disabled accounts remain blocked. Accounts disabled by the
+earlier missing-group behavior must be re-enabled once by a local administrator
+after updating the server. Group changes are checked at
+the next OIDC login, not continuously against the provider. Admin demotion takes
+effect for existing sessions once the account role is updated.
+
+Managed local User accounts also have Host access. Standalone Google/Facebook
+singer accounts remain request-page-only, even though they use the internal
+`user` role. An explicitly linked social login inherits its managed account's
+permissions. User management, account linking/merging, library administration,
+and authentication settings remain Admin-only.
+
 When enabled, configured providers appear as small service icons below **Continue** in **Who is singing?**. Singers can still enter a guest name instead. Turning social login off removes this section entirely. Turning off **Show Google sign-in** or **Show Facebook sign-in** hides that icon and prevents new logins through that provider; it does not delete existing accounts or history.
 
 ## What is stored and restored
@@ -44,7 +83,7 @@ Upgrade the app and apply its normal database migrations first, including `023_s
 
 1. Choose a stable public HTTPS origin for the request page, such as `https://karaoke.example.com`. Set `WEB_APP_URL` to this origin and allow it in `ORIGIN`. Make sure your reverse proxy forwards `/api/` to KaraokeDock and has a valid certificate. Never expose PostgreSQL to make OAuth work.
 2. Open KaraokeDock using that exact origin. Browser storage binds each login attempt to its initiating origin and tab. Do not start at a LAN IP and return to a different public hostname.
-3. In **Admin > Singer Social Login**, set **Public request-page origin** to that origin, without `/requests`, a query, or a fragment.
+3. In **Admin > Singer Social Login**, set **Public request-page origin** to that origin, without `/request`, a query, or a fragment.
 4. Create provider credentials as described below. Enter them in Admin, not in browser code, Git, or a public configuration file.
 
 ### Public policies for provider setup
