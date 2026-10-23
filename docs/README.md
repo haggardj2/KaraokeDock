@@ -313,12 +313,6 @@ share the same version, also recorded in the image's
 `org.opencontainers.image.version` label. The Docker tag is independent of the
 application version.
 
-Commit the updated `src/{web,server}/package.json` and `package-lock.json` files
-with the release changes; the script does not create Git commits or tags.
-Failed builds keep the incremented version, and retries receive another patch
-number. Ordinary `npm run build` or direct Docker builds use the current version
-without incrementing it. This version is separate from the Android Player
-wrapper's version code.
 ---
 ## Configuration
 
@@ -400,7 +394,7 @@ After starting the containers for the first time:
 
 7. **Open a player window**
    - Open a browser tab to `http://your-server-ip:5173/player`
-   - If serving from an Android TV, you can use a [kiosk browser app](https://play.google.com/store/apps/details?id=de.ozerov.fully&hl=en_US)
+   - If serving from an Android TV, you can use a [kiosk browser app](https://play.google.com/store/apps/details?id=de.ozerov.fully&hl=en_US) A native Android TV & Android Tablet application is currently in the works. Working on getting on the Google Play Store If anyone would like to sideload the beta apk please reach out. 
 
 8. **Done!** Guests can now request songs via the Requests page
 
