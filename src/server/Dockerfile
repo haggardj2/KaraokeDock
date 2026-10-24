@@ -1,7 +1,7 @@
 # Pull the prebuilt ffmpeg layer (replace with your image/tag)
 FROM ghcr.io/haggardj2/ffmpeg-rubberband:latest AS ffmpeg
 
-FROM node:26-alpine
+FROM node:26.12.1-alpine
 RUN apk add --no-cache \
     bash \
     rubberband \

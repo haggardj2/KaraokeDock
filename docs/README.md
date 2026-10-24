@@ -378,7 +378,13 @@ Express, PostgreSQL, and FFmpeg with Rubber Band pitch shifting.
 
 ## Development
 
-Use Node.js 26.x for parity with the container images. Install dependencies with
+Use Node.js 26.12.1 or newer in the 26.x line for parity with the container images.
+The supported alternatives are 22.23.4+ in 22.x and 24.22.1+ in 24.x.
+The API and Gateway refuse runtimes with unpatched or unknown Brotli versions
+because of CVE-2026-111497. See the [upgrade notes](../CHANGELOG.md#brotli-runtime-security-cve-2026-111497),
+including the current Station/Electron restriction.
+
+Install dependencies with
 `npm ci` in each package you work on: `src/server`, `src/web`, `Gateway`, or
 `Station`. See [running without Docker](../dev/build-without-docker.md) for host
 dependencies, database configuration, and FFmpeg requirements.

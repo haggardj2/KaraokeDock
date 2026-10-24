@@ -6,6 +6,10 @@ Station polls the Gateway automatically once configured. The poll loop pulls new
 
 ## Run locally
 
+Use Node.js 22.23.4+, 24.22.1+, or 26.12.1+ within those supported release
+lines. Startup refuses an unpatched or unknown Brotli decoder because of
+CVE-2026-111497, before loading the database or accepting requests.
+
 ```bash
 npm install
 cp .env.example .env
@@ -15,6 +19,9 @@ STATION_API_TOKEN=your-station-token npm run dev
 The requests page is served at `http://localhost:5180`.
 
 ## Docker
+
+The image pins patched Node.js 22.23.4. Rebuild and replace existing containers;
+changing the Dockerfile does not update already-running images.
 
 ```bash
 docker build -t karaokedock-gateway ./Gateway

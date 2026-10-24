@@ -928,14 +928,15 @@ function registerIpcHandlers() {
 
 async function bootstrap() {
   runtimePaths = resolveRuntimePaths();
-  const config = readStationConfig(runtimePaths);
-
-  createApplicationMenu();
-  registerIpcHandlers();
 
   try {
+    require(path.join(runtimePaths.serverDir, 'scripts', 'check-runtime.cjs'));
+    const config = readStationConfig(runtimePaths);
+    createApplicationMenu();
+    registerIpcHandlers();
     await startKaraokeDockServer(runtimePaths, config);
   } catch (error) {
+    console.error(error);
     dialog.showErrorBox('Unable to start KaraokeDock Station', String(error));
     app.exit(1);
     return;

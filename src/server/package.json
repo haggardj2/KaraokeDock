@@ -1,8 +1,11 @@
 {
   "name": "karaoke-api",
-  "version": "4.0.4",
+  "version": "4.0.6",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1 || ^26.12.1"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",

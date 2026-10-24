@@ -11,7 +11,7 @@ This repo can run directly on a Linux host. The main pieces are:
 
 Match the Dockerfiles as closely as possible:
 
-- Node.js `26.x`
+- Node.js `26.12.1+` in the `26.x` release line (alternatively `22.23.4+` in `22.x` or `24.22.1+` in `24.x`)
 - npm
 - PostgreSQL server
 - PostgreSQL client tools (`psql` is required by `src/server/scripts/migrate.sh`)
@@ -20,6 +20,19 @@ Match the Dockerfiles as closely as possible:
 - `python3` and `pip3` for `yt-dlp`
 - `zip` and `unzip`
 - DejaVu fonts (`font-dejavu` / `fonts-dejavu-core`) for FFmpeg text rendering
+
+Distribution packages may lag the required Node.js security release. The API
+stops with an explicit error if the runtime lacks a patched Brotli decoder,
+rather than accepting input vulnerable to CVE-2026-111497.
+The Node.js fixes are backports: the Brotli version string can still report
+1.1.0 or 1.2.0. The runtime check also recognizes the fixed decoder's new
+`BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH` error constant.
+After installing Node.js, verify the runtime before starting services:
+
+```bash
+node -p "JSON.stringify({node: process.versions.node, brotli: process.versions.brotli})"
+node src/server/scripts/check-runtime.cjs
+```
 
 ### Debian / Ubuntu example
 
