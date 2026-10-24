@@ -154,6 +154,12 @@ The Compose services are **`app`** and **`db`**; their container names are
 `karaokedock` and `karaokedock-db`. The combined web/API app uses port 5173.
 The database is PostgreSQL 18. Startup runs database migrations automatically.
 
+**Runtime security:** Main app, web, and Gateway container builds pin Node.js
+26.12.1 to address CVE-2026-111497. Existing deployments must use rebuilt images;
+source changes do not patch running containers. Station desktop builds remain
+blocked until a patched Electron runtime is available. See the
+[security upgrade notes](../CHANGELOG.md#brotli-runtime-security-cve-2026-111497).
+
 For Unraid, see the [Unraid setup guide](unraid_readme.md).
 
 ## First-time setup
@@ -380,9 +386,16 @@ Express, PostgreSQL, and FFmpeg with Rubber Band pitch shifting.
 
 Use Node.js 26.12.1 or newer in the 26.x line for parity with the container images.
 The supported alternatives are 22.23.4+ in 22.x and 24.22.1+ in 24.x.
-The API and Gateway refuse runtimes with unpatched or unknown Brotli versions
-because of CVE-2026-111497. See the [upgrade notes](../CHANGELOG.md#brotli-runtime-security-cve-2026-111497),
+The API and Gateway refuse runtimes without a recognized Brotli fix for
+CVE-2026-111497. Official Node.js backports are accepted even though their
+Brotli version strings remain unchanged. See the [upgrade notes](../CHANGELOG.md#brotli-runtime-security-cve-2026-111497),
 including the current Station/Electron restriction.
+
+The Gateway compiles its native SQLite dependency for Node.js 26 in its Docker
+build stage, keeping compiler tools and development dependencies out of the
+runtime image. For local upgrades between Node.js major versions, run `npm ci`
+in `Gateway` to rebuild native dependencies; see the
+[Gateway setup instructions](../Gateway/README.md#run-locally).
 
 Install dependencies with
 `npm ci` in each package you work on: `src/server`, `src/web`, `Gateway`, or

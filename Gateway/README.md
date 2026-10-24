@@ -6,12 +6,18 @@ Station polls the Gateway automatically once configured. The poll loop pulls new
 
 ## Run locally
 
-Use Node.js 22.23.4+, 24.22.1+, or 26.12.1+ within those supported release
-lines. Startup refuses an unpatched or unknown Brotli decoder because of
-CVE-2026-111497, before loading the database or accepting requests.
+Use Node.js 26.12.1+ in the 26.x line for parity with the container image.
+Node.js 22.23.4+ in 22.x and 24.22.1+ in 24.x remain supported alternatives.
+Startup refuses runtimes without a recognized fix for CVE-2026-111497,
+before loading the database or accepting requests. Official Node.js backports
+are accepted even when the Brotli version string remains 1.1.0 or 1.2.0.
+
+Local installs need Python 3, make, and a C++ compiler to build `better-sqlite3`.
+After switching Node.js major versions, rerun `npm ci` to rebuild native
+dependencies for the new runtime.
 
 ```bash
-npm install
+npm ci
 cp .env.example .env
 STATION_API_TOKEN=your-station-token npm run dev
 ```
@@ -20,8 +26,10 @@ The requests page is served at `http://localhost:5180`.
 
 ## Docker
 
-The image pins patched Node.js 22.23.4. Rebuild and replace existing containers;
+The image pins patched Node.js 26.12.1. Rebuild and replace existing containers;
 changing the Dockerfile does not update already-running images.
+Native SQLite dependencies are compiled in the build stage; the runtime image
+contains only production dependencies, without the compiler toolchain.
 
 ```bash
 docker build -t karaokedock-gateway ./Gateway

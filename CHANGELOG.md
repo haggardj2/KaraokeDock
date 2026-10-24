@@ -4,9 +4,13 @@
 
 #### Brotli runtime security (CVE-2026-111497)
 
-- Node container stages are pinned to patched releases: 26.12.1 for the main
-  app/web images and 22.23.4 for the Gateway.
-- API and Gateway startup now reject unpatched or unknown Brotli versions
+- Node container stages are pinned to patched release 26.12.1 for the main
+  app/web images and the Gateway.
+- Gateway moves from Node.js 22 to 26.12.1 in both dependency/build and runtime
+  stages. Its native `better-sqlite3` dependency is compiled with Python, make,
+  and a C++ compiler in the build stage. Development dependencies are pruned
+  before copying to the runtime image, which contains no compiler toolchain.
+- API and Gateway startup now reject runtimes without a recognized Brotli fix
   before loading application modules. This protects both incoming compressed
   bodies and outgoing HTTP response decompression without disabling gzip,
   deflate, or Brotli support on patched runtimes.
@@ -24,6 +28,10 @@ Rebuild and redeploy containers from these sources; existing images and
 AppImages are not updated automatically. For docker-less installs, upgrade
 the Node.js binary used by the service and restart it. Do not rely on an npm
 dependency update or system Node.js update to patch an existing AppImage.
+When changing Node.js major versions for a local Gateway install, run `npm ci`
+in `Gateway` before restarting to rebuild its native SQLite dependency.
+See the [Gateway setup instructions](Gateway/README.md#run-locally) for build
+tool requirements.
 
 Sources: [Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases),
 [CVE record](https://www.cve.org/CVERecord?id=CVE-2026-111497),
