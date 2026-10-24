@@ -14,6 +14,26 @@ KaraokeDock Station is the desktop/AppImage wrapper for running the existing Kar
 
 This is still an early Station build. It now manages a local PostgreSQL data directory and can sync with the Remote Requests Gateway, but database backup/upload and first-run setup are still future pieces.
 
+### Brotli security requirement
+
+As checked on 2026-10-24, the latest stable Electron is 45.0.0, which embeds
+Node.js 24.22.0 and affected Brotli 1.2.0. No patched stable Electron release
+was available. **Station development, AppImage packaging, and application
+startup are blocked on this runtime** to prevent CVE-2026-111497 exposure.
+Use the Docker or standalone Node.js deployment with a patched runtime in the
+meantime. Existing AppImages must be retired; they do not gain these checks.
+
+When a patched stable Electron release is available, update the Electron
+dependency and lockfile, then run `npm run check:runtime` before rebuilding.
+This preflight executes the actual Electron binary, not system Node.js.
+The check accepts Brotli 1.0.10+, 1.1.1+, or 1.2.1+ within their respective
+minor lines (and later minor/major releases), or the backported fix exposing
+`BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH` with value `-17`. Updating system
+Node.js alone does not repair Electron's bundled decoder.
+
+Development tooling also requires Node.js 22.23.4+, 24.22.1+, or 26.12.1+
+within those release lines.
+
 ## Development
 
 From this folder:

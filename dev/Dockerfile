@@ -1,4 +1,4 @@
-FROM node:26-alpine AS web-build
+FROM node:26.12.1-alpine AS web-build
 WORKDIR /app
 COPY src/web/package*.json ./src/web/
 WORKDIR /app/src/web
@@ -8,7 +8,7 @@ RUN npm run build
 
 FROM ghcr.io/haggardj2/ffmpeg-rubberband:latest AS ffmpeg
 
-FROM node:26-alpine
+FROM node:26.12.1-alpine
 RUN apk add --no-cache \
     bash \
     rubberband \

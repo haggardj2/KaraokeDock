@@ -2,6 +2,9 @@
   "name": "karaokedock-station",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1 || ^26.12.1"
+  },
   "description": "Desktop Station wrapper for running KaraokeDock locally.",
   "desktopName": "KaraokeDock Station",
   "main": "dist/main.js",
@@ -12,8 +15,9 @@
     "stage:postgres": "bash scripts/stage-postgres.sh",
     "stage:ffmpeg": "bash scripts/stage-ffmpeg.sh",
     "stage:runtimes": "npm run stage:postgres && npm run stage:ffmpeg",
-    "dev": "npm run build:station && electron .",
-    "dist:appimage": "npm run stage:runtimes && npm run build:station && electron-builder --linux AppImage"
+    "check:runtime": "node scripts/check-runtime.cjs",
+    "dev": "npm run check:runtime && npm run build:station && electron .",
+    "dist:appimage": "npm run check:runtime && npm run stage:runtimes && npm run build:station && electron-builder --linux AppImage"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

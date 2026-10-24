@@ -2,6 +2,43 @@
 
 ### Breaking changes
 
+#### Brotli runtime security (CVE-2026-111497)
+
+- Node container stages are pinned to patched release 26.12.1 for the main
+  app/web images and the Gateway.
+- Gateway moves from Node.js 22 to 26.12.1 in both dependency/build and runtime
+  stages. Its native `better-sqlite3` dependency is compiled with Python, make,
+  and a C++ compiler in the build stage. Development dependencies are pruned
+  before copying to the runtime image, which contains no compiler toolchain.
+- API and Gateway startup now reject runtimes without a recognized Brotli fix
+  before loading application modules. This protects both incoming compressed
+  bodies and outgoing HTTP response decompression without disabling gzip,
+  deflate, or Brotli support on patched runtimes.
+- Supported host Node.js lines start at 22.23.4, 24.22.1, and 26.12.1.
+  These security releases backport the fix without updating the Brotli version
+  string. The runtime check recognizes the new permanent block-switch error
+  constant as well as patched upstream Brotli versions.
+- Station checks Electron's embedded runtime before starting services or
+  opening browser windows, and before development/packaging commands.
+  As of 2026-10-24, Electron 45.0.0 is the latest stable release and still
+  contains affected Brotli 1.2.0. **Station is blocked until a patched Electron
+  is available**, rather than shipping a vulnerable desktop runtime.
+
+Rebuild and redeploy containers from these sources; existing images and
+AppImages are not updated automatically. For docker-less installs, upgrade
+the Node.js binary used by the service and restart it. Do not rely on an npm
+dependency update or system Node.js update to patch an existing AppImage.
+When changing Node.js major versions for a local Gateway install, run `npm ci`
+in `Gateway` before restarting to rebuild its native SQLite dependency.
+See the [Gateway setup instructions](Gateway/README.md#run-locally) for build
+tool requirements.
+
+Sources: [Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases),
+[CVE record](https://www.cve.org/CVERecord?id=CVE-2026-111497),
+[Electron release versions](https://releases.electronjs.org/releases.json).
+
+Regression checks: `node --test dev/runtime-security.test.mjs`.
+
 #### OIDC sign-in now requires group membership
 
 OIDC accounts must belong to at least one of these exact, case-sensitive groups:
