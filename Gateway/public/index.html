@@ -63,6 +63,15 @@
           <button id="songTab" class="page-tab" type="button" data-page="songs"><svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg><span>Songs</span></button>
         </nav>
 
+        <!-- One search box for every tab: searches on Search, filters on Artists and Songs. -->
+        <div class="search-toolbar">
+          <div class="search-wrapper">
+            <span class="search-icon"><svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></span>
+            <input id="searchInput" class="search-input" type="search" inputmode="search" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Search songs" placeholder="Search local library & Online…" />
+            <button id="clearSearchButton" class="search-clear" type="button" aria-label="Clear search" title="Clear search">×</button>
+          </div>
+        </div>
+
         <input id="singerName" autocomplete="name" hidden />
 
         <section id="closedPage" class="card closed-page page-panel">
@@ -71,11 +80,6 @@
         </section>
 
         <section id="searchPage" class="card page-panel">
-          <div class="search-wrapper">
-            <span class="search-icon"><svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></span>
-            <input id="searchInput" class="search-input" type="search" inputmode="search" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Search songs" placeholder="Search local library & Online…" />
-            <button id="clearSearchButton" class="search-clear" type="button" aria-label="Clear search" title="Clear search">×</button>
-          </div>
           <div id="message" class="message" role="status"></div>
           <div id="results" class="results"></div>
         </section>

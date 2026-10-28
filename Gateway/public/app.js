@@ -524,7 +524,21 @@ function initialOptions() {
   return ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
 }
 
-function renderInitialSelector(target, activeValue, onSelect) {
+// Letters with songs, from the Gateway; until they load every letter is offered.
+async function loadBrowseLetters(mode) {
+  const response = await fetch(`/api/browse/letters?mode=${mode}`);
+  if (!response.ok) return null;
+  const body = await response.json().catch(() => null);
+  return Array.isArray(body?.letters) ? body.letters : null;
+}
+
+// Keep the current letter if it has songs; otherwise prefer '#', then the first letter that does.
+function pickInitial(letters, current) {
+  if (!letters?.length || letters.includes(current)) return current;
+  return letters.includes('#') ? '#' : letters[0];
+}
+
+function renderInitialSelector(target, activeValue, onSelect, available = null) {
   target.replaceChildren();
   if (target.tagName === 'SELECT') {
     target.className = 'initial-selector browse-letter-select';
@@ -532,6 +546,7 @@ function renderInitialSelector(target, activeValue, onSelect) {
       const option = document.createElement('option');
       option.value = value;
       option.textContent = value;
+      option.disabled = Boolean(available) && !available.includes(value);
       target.append(option);
     }
     target.value = activeValue;
@@ -544,6 +559,7 @@ function renderInitialSelector(target, activeValue, onSelect) {
     button.className = `initial-button ${value === activeValue ? 'active' : ''}`;
     button.textContent = value;
     button.setAttribute('aria-pressed', String(value === activeValue));
+    button.disabled = Boolean(available) && !available.includes(value);
     button.addEventListener('click', () => onSelect(value));
     target.append(button);
   }
@@ -574,9 +590,27 @@ function setPage(page, options = {}) {
     panel.hidden = panel.id !== `${nextPage === 'search' ? 'search' : nextPage === 'artists' ? 'artist' : 'song'}Page`;
   });
   setMessage('');
+  updateSearchPlaceholder(nextPage);
   if (reload && nextPage === 'artists') loadArtists(currentArtistPrefix).catch((err) => setMessage(err.message, true));
   if (reload && nextPage === 'songs') loadSongs(currentSongPrefix).catch((err) => setMessage(err.message, true));
+  if (reload && nextPage === 'search' && searchInput.value.trim()) search().catch((err) => setMessage(err.message, true));
 }
+
+// The shared search box searches on Search and filters the Artists / Songs lists.
+function updateSearchPlaceholder(page) {
+  const label = page === 'artists' ? 'Filter artists…' : page === 'songs' ? 'Filter song titles…' : 'Search local library & Online…';
+  searchInput.placeholder = label;
+  searchInput.setAttribute('aria-label', page === 'search' ? 'Search songs' : label.replace('…', ''));
+}
+
+function runActiveQuery() {
+  const page = getActivePage();
+  const task = page === 'artists' ? loadArtists() : page === 'songs' ? loadSongs() : search();
+  task.catch((err) => setMessage(err.message, true));
+}
+
+// Browse loads can overlap while the singer types; only the newest may render.
+let browseRequest = 0;
 
 function getActivePage() {
   return pageTabs.find((tab) => tab.classList.contains('active'))?.dataset.page || 'search';
@@ -836,14 +870,30 @@ async function loadArtists(prefix = currentArtistPrefix) {
     setPage('search');
     return;
   }
-  currentArtistPrefix = prefix;
-  renderInitialSelector(artistInitials, currentArtistPrefix, (next) => loadArtists(next).catch((err) => setMessage(err.message, true)));
+  const request = ++browseRequest;
+  const filter = searchInput.value.trim();
+  artistInitials.hidden = Boolean(filter);
   artistSongsHeader.hidden = true;
   artistSongs.hidden = true;
   artistSongs.replaceChildren();
   artistList.hidden = false;
+  if (filter) {
+    renderEmpty(artistList, 'Searching artists…');
+    const response = await fetch(`/api/browse/songs?field=artist&q=${encodeURIComponent(filter)}`);
+    if (request !== browseRequest) return;
+    if (await applyRequestClosedResponse(response)) return;
+    if (!response.ok) throw new Error(await response.text());
+    renderTrackGroups(artistList, await response.json(), `No artists match "${filter}".`);
+    return;
+  }
+  const letters = await loadBrowseLetters('artists').catch(() => null);
+  if (request !== browseRequest) return;
+  currentArtistPrefix = pickInitial(letters, prefix);
+  prefix = currentArtistPrefix;
+  renderInitialSelector(artistInitials, currentArtistPrefix, (next) => loadArtists(next).catch((err) => setMessage(err.message, true)), letters);
   renderEmpty(artistList, 'Loading artists…');
   const response = await fetch(`/api/browse/artists?prefix=${encodeURIComponent(prefix)}`);
+  if (request !== browseRequest) return;
   if (await applyRequestClosedResponse(response)) return;
   if (!response.ok) throw new Error(await response.text());
   const artists = await response.json();
@@ -907,10 +957,26 @@ async function loadSongs(prefix = currentSongPrefix) {
     setPage('search');
     return;
   }
-  currentSongPrefix = prefix;
-  renderInitialSelector(songInitials, currentSongPrefix, (next) => loadSongs(next).catch((err) => setMessage(err.message, true)));
+  const request = ++browseRequest;
+  const filter = searchInput.value.trim();
+  songInitials.hidden = Boolean(filter);
+  if (filter) {
+    renderEmpty(songResults, 'Searching songs…');
+    const response = await fetch(`/api/browse/songs?field=title&q=${encodeURIComponent(filter)}`);
+    if (request !== browseRequest) return;
+    if (await applyRequestClosedResponse(response)) return;
+    if (!response.ok) throw new Error(await response.text());
+    renderTrackGroups(songResults, await response.json(), `No song titles match "${filter}".`);
+    return;
+  }
+  const letters = await loadBrowseLetters('songs').catch(() => null);
+  if (request !== browseRequest) return;
+  currentSongPrefix = pickInitial(letters, prefix);
+  prefix = currentSongPrefix;
+  renderInitialSelector(songInitials, currentSongPrefix, (next) => loadSongs(next).catch((err) => setMessage(err.message, true)), letters);
   renderEmpty(songResults, 'Loading songs…');
   const response = await fetch(`/api/browse/songs?prefix=${encodeURIComponent(prefix)}`);
+  if (request !== browseRequest) return;
   if (await applyRequestClosedResponse(response)) return;
   if (!response.ok) throw new Error(await response.text());
   const tracks = await response.json();
@@ -1443,19 +1509,20 @@ searchInput.addEventListener('keydown', (event) => {
     event.preventDefault();
     clearTimeout(searchTimer);
     searchInput.blur();
-    search().catch((err) => setMessage(err.message, true));
+    runActiveQuery();
   }
 });
 searchInput.addEventListener('input', () => {
   updateClearSearchVisibility();
   clearTimeout(searchTimer);
-  if (!searchInput.value.trim()) {
+  if (!searchInput.value.trim() && getActivePage() === 'search') {
     searchRequest++;
     renderEmpty(resultsEl, 'Search for a song to get started.');
     setMessage('');
     return;
   }
-  searchTimer = setTimeout(() => search().catch((err) => setMessage(err.message, true)), 350);
+  // An empty filter on Artists / Songs goes straight back to the letter list.
+  searchTimer = setTimeout(runActiveQuery, searchInput.value.trim() ? 350 : 0);
 });
 clearSearchButton.addEventListener('click', () => {
   clearTimeout(searchTimer);
@@ -1464,6 +1531,7 @@ clearSearchButton.addEventListener('click', () => {
   updateClearSearchVisibility();
   renderEmpty(resultsEl, 'Search for a song to get started.');
   setMessage('');
+  if (getActivePage() !== 'search') runActiveQuery();
   searchInput.focus();
 });
 pageTabs.forEach((tab) => {
