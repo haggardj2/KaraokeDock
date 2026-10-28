@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
-    "electron": "^45.0.0",
+    "electron": "^45.1.0",
     "electron-builder": "^26.15.3",
     "typescript": "^7.0.2"
   },
@@ -80,5 +80,8 @@
       ],
       "category": "AudioVideo"
     }
+  },
+  "allowScripts": {
+    "electron@45.1.0": true
   }
 }
