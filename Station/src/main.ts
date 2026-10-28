@@ -31,6 +31,7 @@ type RuntimePaths = {
   postgresRunDir: string;
   downloadsDir: string;
   playlistsDir: string;
+  snapshotsDir: string;
   bootstrapCredentialsPath: string;
 };
 
@@ -96,6 +97,7 @@ function resolveRuntimePaths(): RuntimePaths {
       postgresRunDir: path.join(dataDir, 'postgres-run'),
       downloadsDir: path.join(dataDir, 'downloads'),
       playlistsDir: path.join(dataDir, 'playlists'),
+      snapshotsDir: path.join(dataDir, 'snapshots'),
       bootstrapCredentialsPath: path.join(dataDir, 'bootstrap-admin.json'),
     };
   }
@@ -119,6 +121,7 @@ function resolveRuntimePaths(): RuntimePaths {
     postgresRunDir: path.join(dataDir, 'postgres-run'),
     downloadsDir: path.join(dataDir, 'downloads'),
     playlistsDir: path.join(dataDir, 'playlists'),
+    snapshotsDir: path.join(dataDir, 'snapshots'),
     bootstrapCredentialsPath: path.join(dataDir, 'bootstrap-admin.json'),
   };
 }
@@ -251,6 +254,7 @@ function buildServerEnv(paths: RuntimePaths, config: StationConfig, port: number
     MEDIA_ROOT: mediaRoot,
     YTDLP_DOWNLOAD_LOCATION: paths.downloadsDir,
     BREAK_MUSIC_PLAYLISTS_FOLDER: paths.playlistsDir,
+    SNAPSHOTS_DIR: paths.snapshotsDir,
     ORIGIN: allowedOrigins.join(','),
     TRUST_PROXY: process.env.TRUST_PROXY || 'false',
     BOOTSTRAP_CREDENTIALS_FILE: paths.bootstrapCredentialsPath,

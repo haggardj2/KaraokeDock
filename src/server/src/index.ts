@@ -17,6 +17,7 @@ import { rotationRouter } from './routes/rotation';
 import { logger, setLogLevel, type LogLevel } from './logger';
 import { ensureAdminUser, getSetting, validateSessionInfo } from './db';
 import { syncBackgroundTaskState } from './backgroundTasks';
+import { syncSnapshotSchedule } from './snapshots';
 import { createWebAppRouter } from './webApp';
 
 // Helper to add timestamps to console logs
@@ -101,8 +102,10 @@ const corsOptions = {
     : allowedOrigins,  // Only allow specified origins
   credentials: true,  // Allow cookies and authentication headers
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-session-token'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  // x-backup-passphrase: Admin › Backup & Restore sends the restore passphrase in a header.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-session-token', 'x-backup-passphrase'],
+  // Content-Disposition carries the backup download's filename.
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'Content-Disposition'],
   maxAge: 600  // Cache preflight requests for 10 minutes
 };
 
@@ -269,6 +272,7 @@ setTimeout(async () => {
 
     await syncBackgroundTaskState({ runDurationImmediately: true });
     await syncRemoteGatewayTaskState({ runImmediately: true });
+    await syncSnapshotSchedule();
   } catch (err) {
     console.error('Failed to start background task:', err);
   }

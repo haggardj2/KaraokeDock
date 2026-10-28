@@ -55,6 +55,9 @@ services:
       - "${DOWNLOADS_PATH}:/media/downloads"
       - "${BREAKMUSIC_PATH}:/media/breakmusic:ro"
       - "${IMAGES_PATH}:/media/images"
+      # Automatic database snapshots and their key (Admin › Backup & Restore). Mount only this
+      # subfolder: /app itself holds the application.
+      - "${SNAPSHOTS_PATH:-./snapshots}:/app/snapshots"
     restart: always
     ports:
       - "${APP_PORT:-5173}:5173"

@@ -9,6 +9,7 @@ import LibrariesSection from "./admin/LibrariesSection";
 import BreakMusicSection from "./admin/BreakMusicSection";
 import SystemSection from "./admin/SystemSection";
 import GatewaySection from "./admin/GatewaySection";
+import BackupSection from "./admin/BackupSection";
 import UsersSection from "./admin/UsersSection";
 import OidcSection from "./admin/OidcSection";
 import AddLibraryDialog from "./admin/AddLibraryDialog";
@@ -188,6 +189,10 @@ export default function Admin() {
             <GatewaySection admin={admin} />
 
             <UsersSection admin={admin} />
+
+            {activeSection === "backup" && (
+              <BackupSection key={auth.sessionToken} sessionToken={auth.sessionToken} />
+            )}
 
             {!stationMode && activeSection === "social" && (
               <SocialLoginSettings key={auth.sessionToken} sessionToken={auth.sessionToken} />

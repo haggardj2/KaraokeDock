@@ -133,7 +133,7 @@ optional karaoke/break music files. See the official
    ```
 
 2. Edit `.env`. Set a strong `POSTGRES_PASSWORD`, existing host media paths, and
-   writable `DB_PATH`, `DOWNLOADS_PATH`, and `IMAGES_PATH` directories. Use an
+   writable `DB_PATH`, `DOWNLOADS_PATH`, `IMAGES_PATH`, and `SNAPSHOTS_PATH` directories. Use an
    address guests can reach for `WEB_APP_URL` and `ORIGIN`, not `localhost`:
 
    ```env
@@ -269,6 +269,7 @@ stored in PostgreSQL; they are not all configured through `.env`.
 | `DOWNLOADS_PATH` | Writable downloads mounted at `/media/downloads` |
 | `BREAKMUSIC_PATH` | Host music mounted read-only at `/media/breakmusic` |
 | `IMAGES_PATH` | Writable profile/background images mounted at `/media/images` |
+| `SNAPSHOTS_PATH` | Writable automatic database snapshots and their key, mounted at `/app/snapshots` (defaults to `./snapshots` beside the compose file) |
 | `MEDIA_ROOT` | Container media root, normally `/media` |
 | `WEB_APP_URL` | Reachable web origin used for default request/QR URLs |
 | `ORIGIN` | Comma-separated allowed browser origins |

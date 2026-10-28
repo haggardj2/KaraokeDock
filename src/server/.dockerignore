@@ -7,6 +7,8 @@
 **/*.tsbuildinfo
 
 # Local configuration and runtime data
+# Development snapshots hold a database copy and its key; never bake them into an image.
+snapshots
 **/.env
 **/.env.*
 **/*.log

@@ -37,6 +37,10 @@ coverage-final.json
 *.lcov
 
 # Logs and runtime state
+# Automatic database snapshots (and their key) from a development server
+/src/server/snapshots/
+# Default SNAPSHOTS_PATH when running docker-compose from the repo
+/snapshots/
 *.log
 logs/
 *.pid

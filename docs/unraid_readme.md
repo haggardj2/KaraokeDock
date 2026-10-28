@@ -22,6 +22,7 @@ Create a share such as `karaoke`, then create these folders:
 /mnt/user/appdata/postgresql
 /mnt/user/appdata/karaokedock/images
 /mnt/user/appdata/karaokedock/playlists
+/mnt/user/appdata/karaokedock/snapshots
 ```
 
 Recommended use:
@@ -33,6 +34,7 @@ Recommended use:
 | `/mnt/user/karaoke/Break Music` | `/media/breakmusic` | Read-only | Break music |
 | `/mnt/user/appdata/karaokedock/images` | `/media/images` | Read/write | Uploaded player backgrounds |
 | `/mnt/user/appdata/karaokedock/playlists` | `/media/playlists` | Read/write | Break-music M3U exports |
+| `/mnt/user/appdata/karaokedock/snapshots` | `/app/snapshots` | Read/write | Automatic database snapshots and their key |
 
 Singer profiles, login links, queue/history, settings, and saved playlist definitions are stored in PostgreSQL. Back up the database as well as writable media folders before upgrading. The application runs database migrations on startup.
 
@@ -130,6 +132,7 @@ http://UNRAID_IP:5173/admin
 | Break Music | `/media/breakmusic` | `/mnt/user/karaoke/Break Music` |
 | Uploaded Images | `/media/images` | `/mnt/user/appdata/karaokedock/images` |
 | Exported Playlists | `/media/playlists` | `/mnt/user/appdata/karaokedock/playlists` |
+| Database Snapshots | `/app/snapshots` | `/mnt/user/appdata/karaokedock/snapshots` |
 
 Break Music is optional. The other mappings are required by the template. Existing installations should add the image and playlist mappings explicitly when updating their saved Unraid template. If Admin overrides either internal directory, map that directory too.
 

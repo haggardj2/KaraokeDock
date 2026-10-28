@@ -93,7 +93,7 @@ export const LIBRARY_PARSE_MODE_OPTIONS: Array<{
   },
 ];
 
-export type AdminSection = "overview" | "libraries" | "break" | "system" | "gateway" | "users" | "social" | "oidc";
+export type AdminSection = "overview" | "libraries" | "break" | "system" | "gateway" | "users" | "social" | "oidc" | "backup";
 
 export const ADMIN_SECTION_STORAGE_KEY = "karaokedock.admin.section";
 
@@ -106,6 +106,7 @@ export const ADMIN_SECTIONS: Array<{ id: AdminSection; label: string; icon: stri
   { id: "users", label: "Users", icon: "group", description: "Host and admin accounts" },
   { id: "social", label: "Social Login", icon: "account_circle", description: "Google and Facebook sign-in for singers" },
   { id: "oidc", label: "SSO / OIDC", icon: "link", description: "Single sign-on for hosts and admins" },
+  { id: "backup", label: "Backup & Restore", icon: "settings_backup_restore", description: "Encrypted backups of the database and settings" },
 ];
 
 export function isAdminSection(value: unknown): value is AdminSection {
