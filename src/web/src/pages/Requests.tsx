@@ -6,7 +6,6 @@ import React, {
   useLayoutEffect,
   useMemo,
 } from "react";
-import { createPortal } from "react-dom";
 import { api } from "../api";
 import { useAuth } from "../auth-context";
 import SingerAvatar, { type SingerProfile, type ProfileCrop } from "../components/SingerAvatar";
@@ -18,19 +17,15 @@ import {
   BROWSE_LETTERS,
   MAX_KEY_ADJUSTMENT,
   MIN_KEY_ADJUSTMENT,
-  MOBILE_BREAKPOINT,
   SINGER_UUID_STORAGE_KEY,
   VENUE_THEME_CACHE_KEY,
   createSingerUuid,
   formatCount,
-  formatTrackKind,
   getOrCreateSingerUuid,
   groupKey,
-  normalizeArtistForGroup,
-  normalizeMyQueueItems,
-  reorderQueuedItems,
   searchRelevance,
   shouldHandleEnterKey,
+  toLocalSearchTrack,
 } from "./requests/helpers";
 import type {
   BrowseArtistRow,
@@ -39,34 +34,37 @@ import type {
   CombinedSearchTrack,
   KaraokeNerdsTrack,
   LyricsData,
-  MyQueueItem,
   SearchRow,
   SelfSingerProfileResponse,
   VersionPicker,
 } from "./requests/types";
 import CombinedVersionPickerDialog from "./requests/CombinedVersionPickerDialog";
-import VersionPickerDialog from "./requests/VersionPickerDialog";
-import KnVersionPickerDialog from "./requests/KnVersionPickerDialog";
 import LyricsDialog from "./requests/LyricsDialog";
+import SongResultCard, { type SongResultActions } from "./requests/SongResultCard";
 import { useMyQueue } from "./requests/useMyQueue";
 import MyQueueSheet from "./requests/MyQueueSheet";
 import {
-  REQUEST_THEME_STORAGE_KEY,
-  THEMES,
   applyTheme,
   clearTheme,
   loadRequestThemeChoice,
   loadThemeId,
+  REQUEST_THEME_STORAGE_KEY,
+  type RequestThemeChoice,
   resolveRequestTheme,
   saveThemeId,
-  type RequestThemeChoice,
+  THEMES,
 } from "../theme";
 import SocialProviderIcon from "../components/SocialProviderIcon";
 import PublicLegalLinks from "../components/PublicLegalLinks";
 import AppVersion from "../components/AppVersion";
 import {
-  exchangeSocialLogin, startSocialLogin, takeSocialLoginCallback, visibleSocialProviders,
-  SOCIAL_PROVIDER_NAMES, type SocialProvider, type SocialPublicConfig,
+  exchangeSocialLogin,
+  startSocialLogin,
+  takeSocialLoginCallback,
+  visibleSocialProviders,
+  SOCIAL_PROVIDER_NAMES,
+  type SocialProvider,
+  type SocialPublicConfig,
 } from "../social-login";
 import "./Requests.css";
 
@@ -141,21 +139,6 @@ export default function Requests() {
   >("all");
   const [showFilters, setShowFilters] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState<string | null>(null);
-  const [actionMenuAnchor, setActionMenuAnchor] = useState<{
-    top: number;
-    left: number;
-    right: number;
-    bottom: number;
-    width: number;
-  } | null>(null);
-  const [actionMenuPosition, setActionMenuPosition] = useState<{
-    top: number;
-    left: number;
-    width: number;
-  } | null>(null);
-  const [keyAdjustmentView, setKeyAdjustmentView] = useState<string | null>(
-    null,
-  );
   const [lyricsPopupOpen, setLyricsPopupOpen] = useState<string | null>(null);
   const [lyricsData, setLyricsData] = useState<LyricsData>({});
   // Fuzzy suggestions (shown when main search returns no results)
@@ -187,8 +170,6 @@ export default function Requests() {
     loadMyQueue,
   } = myQueueState;
   // Collapsible result sections (collapsed by default)
-  const [localExpanded, setLocalExpanded] = useState(false);
-  const [knExpanded, setKnExpanded] = useState(false);
   // Source filter: 'all' | 'local' | 'online'
   const [sourceFilter, setSourceFilter] = useState<"all" | "local" | "online">(
     "all",
@@ -214,8 +195,6 @@ export default function Requests() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState("");
   // Version picker for consolidated song results
-  const [versionPicker, setVersionPicker] = useState<VersionPicker<SearchRow> | null>(null);
-  const [knVersionPicker, setKnVersionPicker] = useState<VersionPicker<KaraokeNerdsTrack> | null>(null);
   const [combinedVersionPicker, setCombinedVersionPicker] = useState<VersionPicker<CombinedSearchTrack> | null>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -288,8 +267,6 @@ export default function Requests() {
         const el = actionMenuRef.current;
         if (el && !el.contains(e.target as Node)) {
           setActionMenuOpen(null);
-          setActionMenuPosition(null);
-          setKeyAdjustmentView(null);
         }
       }
       if (lyricsPopupOpen) {
@@ -369,47 +346,6 @@ export default function Requests() {
       setLocalViewMode("search");
     }
   }, [localBrowseEnabled, localViewMode]);
-
-  useLayoutEffect(() => {
-    if (!actionMenuOpen) return;
-    if (window.innerWidth <= MOBILE_BREAKPOINT) return;
-    if (!actionMenuAnchor) return;
-
-    // Wait a frame so the portal'd menu is in the DOM and measurable
-    requestAnimationFrame(() => {
-      const menuEl = actionMenuRef.current;
-      if (!menuEl) return;
-
-      const gap = 8;
-      const menuRect = menuEl.getBoundingClientRect();
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-
-      // 1) Prefer below the button...
-      let top = actionMenuAnchor.bottom + gap;
-
-      // ...but if it overflows bottom, open above.
-      if (top + menuRect.height + gap > vh) {
-        top = actionMenuAnchor.top - menuRect.height - gap;
-      }
-
-      // Clamp vertically into viewport
-      top = Math.max(gap, Math.min(top, vh - menuRect.height - gap));
-
-      // 2) Open to the LEFT of the button:
-      // align the menu's right edge with the button's right edge
-      let left = actionMenuAnchor.right - menuRect.width;
-
-      // Clamp horizontally into viewport
-      left = Math.max(gap, Math.min(left, vw - menuRect.width - gap));
-
-      setActionMenuPosition({
-        top,
-        left,
-        width: actionMenuAnchor.width,
-      });
-    });
-  }, [actionMenuOpen, actionMenuAnchor]);
 
   // Save name to localStorage
   useEffect(() => {
@@ -531,37 +467,11 @@ export default function Requests() {
     });
   }, []);
 
-  // Helper function to calculate and set action menu position
+  // Open or close a result's options sheet; CSS centres it (a bottom sheet on phones).
   const handleActionMenuToggle = useCallback(
-    (e: React.MouseEvent, trackKey: string, currentlyOpen: string | null) => {
+    (e: React.MouseEvent, trackKey: string) => {
       e.stopPropagation();
-      const wasOpen = currentlyOpen === trackKey;
-      if (!wasOpen) {
-        // Only calculate position for desktop
-        if (window.innerWidth > MOBILE_BREAKPOINT) {
-          const rect = e.currentTarget.getBoundingClientRect();
-
-          setActionMenuAnchor({
-            top: rect.top,
-            left: rect.left,
-            right: rect.right,
-            bottom: rect.bottom,
-            width: rect.width,
-          });
-
-          // Let useLayoutEffect measure the actual menu size and decide final placement
-          setActionMenuPosition({
-            top: rect.bottom + 8,
-            left: rect.left,
-            width: rect.width,
-          });
-        } else {
-          setActionMenuAnchor(null);
-          setActionMenuPosition(null);
-        }
-      }
       setActionMenuOpen((prev) => (prev === trackKey ? null : trackKey));
-      if (wasOpen) setActionMenuAnchor(null);
     },
     [],
   );
@@ -637,7 +547,6 @@ export default function Requests() {
       const r = await api(url);
       const rows = Array.isArray(r) ? r : [];
       setLocalRows(rows);
-      if (rows.length > 0) setLocalExpanded(true);
       if (rows.length === 0 && q.trim().length >= 2) {
         try {
           let suggestionUrl = `/api/search/suggestions?q=${encodeURIComponent(q.trim())}`;
@@ -678,7 +587,6 @@ export default function Requests() {
       );
       const knRows = Array.isArray(r) ? r : [];
       setKaraokeNerdsRows(knRows);
-      if (knRows.length > 0) setKnExpanded(true);
     } catch (err) {
       console.error("Karaoke Nerds search error:", err);
       setKaraokeNerdsRows([]);
@@ -1077,12 +985,6 @@ export default function Requests() {
   }, [fuzzySuggestions]);
 
   // Group Karaoke Nerds results by normalised title + artist
-  type GroupedKnResult = {
-    key: string;
-    title: string;
-    artist: string;
-    versions: KaraokeNerdsTrack[];
-  };
   const visibleKaraokeNerdsRows = useMemo(() => {
     if (!isLocalBrowseMode || !q.trim()) return karaokeNerdsRows;
     const query = q.trim().toLowerCase();
@@ -1092,23 +994,6 @@ export default function Requests() {
     });
   }, [browseCategory, isLocalBrowseMode, karaokeNerdsRows, q]);
 
-  const groupedKnRows = useMemo((): GroupedKnResult[] => {
-    const map = new Map<string, GroupedKnResult>();
-    for (const track of visibleKaraokeNerdsRows) {
-      const key = groupKey(track.title ?? "", track.artist ?? "");
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          title: track.title ?? "",
-          artist: track.artist ?? "",
-          versions: [],
-        });
-      }
-      map.get(key)!.versions.push(track);
-    }
-    return Array.from(map.values());
-  }, [visibleKaraokeNerdsRows]);
-
   const combinedSearchGroups = useMemo((): CombinedSearchGroup[] => {
     const tracks: CombinedSearchTrack[] = [];
     if (
@@ -1116,15 +1001,7 @@ export default function Requests() {
       (isLocalBrowseMode || sourceFilter !== "online")
     ) {
       for (const row of localRows) {
-        tracks.push({
-          type: "local",
-          key: `local-${row.id}`,
-          title: row.title ?? "",
-          artist: row.artist ?? "",
-          discId: row.disc_id,
-          kind: row.kind,
-          track: row,
-        });
+        tracks.push(toLocalSearchTrack(row));
       }
     }
     if (
@@ -1408,6 +1285,36 @@ export default function Requests() {
     }
   }
 
+
+  // Browse lists local songs only; give them the same shape as search results so both use SongResultCard.
+  const browseCombinedGroups = useMemo(
+    (): CombinedSearchGroup[] =>
+      groupedLocalRows.map((group) => ({
+        key: group.key,
+        title: group.title,
+        artist: group.artist,
+        versions: group.versions.map(toLocalSearchTrack),
+      })),
+    [groupedLocalRows],
+  );
+
+  const songResultActions: SongResultActions = {
+    recentlyAdded,
+    addingLocal,
+    addingKaraokeNerds,
+    keyAdjustments,
+    adjustKey,
+    actionMenuOpen,
+    setActionMenuOpen,
+    handleActionMenuToggle,
+    actionMenuRef,
+    setCombinedVersionPicker,
+    enqueueLocal,
+    enqueueKaraokeNerds,
+    setLyricsPopupOpen,
+    lyricsData,
+    fetchLyrics,
+  };
   return (
     <div className="requests-page request-page-gateway-theme">
 
@@ -1905,360 +1812,9 @@ export default function Requests() {
                         )}
                       </div>
                       <div className="results-container">
-                        {groupedLocalRows.map((group, idx) => {
-                          const row = group.versions[0];
-                          const trackKey = `local-${row.id}`;
-                          const isRecentlyAdded =
-                            recentlyAdded.has(trackKey) ||
-                            group.versions.some((v) =>
-                              recentlyAdded.has(`local-${v.id}`),
-                            );
-                          const isAdding = group.versions.some(
-                            (v) => addingLocal === v.id,
-                          );
-                          const currentKey = keyAdjustments.get(trackKey) ?? 0;
-                          const hasMultipleVersions = group.versions.length > 1;
-
-                          return (
-                            <div key={group.key} className="result-card">
-                              <div className="result-number">{idx + 1}</div>
-                              <div className="result-info">
-                                <div className="result-title">
-                                  {group.title || "Unknown Title"}
-                                </div>
-                                <div className="result-artist">
-                                  {group.artist || "Unknown Artist"}
-                                </div>
-                                <div className="result-meta">
-                                  {hasMultipleVersions ? (
-                                    <span className="meta-tag">
-                                      📀 {formatCount(group.versions.length, "version")}
-                                    </span>
-                                  ) : (
-                                    <>
-                                      {row.disc_id && (
-                                        <span className="meta-tag">
-                                          📀 {row.disc_id}
-                                        </span>
-                                      )}
-                                      {row.kind && (
-                                        <span className="meta-tag">
-                                          {formatTrackKind(row.kind)}
-                                        </span>
-                                      )}
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="button-container">
-                                {/* Single Action Menu Button */}
-                                <div
-                                  style={{
-                                    position: "relative",
-                                    width: "100%",
-                                  }}
-                                >
-                                  <button
-                                    className={`action-menu-button ${isRecentlyAdded ? "success" : ""}`}
-                                    aria-label={isRecentlyAdded ? "Added to your queue" : "Request this song"}
-                                    onClick={(e) => {
-                                      if (isRecentlyAdded || isAdding) return;
-                                      if (hasMultipleVersions) {
-                                        setVersionPicker({
-                                          title: group.title,
-                                          artist: group.artist,
-                                          versions: group.versions,
-                                        });
-                                      } else {
-                                        handleActionMenuToggle(
-                                          e,
-                                          trackKey,
-                                          actionMenuOpen,
-                                        );
-                                      }
-                                    }}
-                                    disabled={isAdding || isRecentlyAdded}
-                                  >
-                                    {isAdding ? (
-                                      <>
-                                        <div className="button-spinner"></div>
-                                        <span>Adding</span>
-                                      </>
-                                    ) : isRecentlyAdded ? (
-                                      <span className="material-symbols-rounded" aria-hidden="true">check</span>
-                                    ) : hasMultipleVersions ? (
-                                      <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                    ) : (
-                                      <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                    )}
-                                  </button>
-
-                                  {/* Action Menu */}
-                                  {actionMenuOpen === trackKey &&
-                                    createPortal(
-                                      <>
-                                        {/* Mobile overlay */}
-                                        <div
-                                          className="action-menu-overlay"
-                                          onClick={() =>
-                                            setActionMenuOpen(null)
-                                          }
-                                        />
-
-                                        <div
-                                          className="action-menu"
-                                          ref={actionMenuRef}
-                                          onClick={(e) => e.stopPropagation()}
-                                          style={
-                                            actionMenuPosition
-                                              ? {
-                                                  top: `${actionMenuPosition.top}px`,
-                                                  left: `${actionMenuPosition.left}px`,
-                                                  width: "max-content",
-                                                  minWidth: `${actionMenuPosition.width}px`,
-                                                }
-                                              : undefined
-                                          }
-                                        >
-                                          <div className="action-menu-header">
-                                            <h3 className="action-menu-title">
-                                              {group.title || "Unknown Title"}{" "}
-                                              Options
-                                            </h3>
-                                            <button
-                                              className="action-menu-close"
-                                              type="button"
-                                              onClick={() =>
-                                                setActionMenuOpen(null)
-                                              }
-                                            >
-                                              Close
-                                            </button>
-                                          </div>
-
-                                          {keyAdjustmentView === trackKey ? (
-                                            // Key Adjustment View
-                                            <div className="key-adjustment-view">
-                                              <div className="key-adjustment-header">
-                                                <button
-                                                  className="key-adjustment-back"
-                                                  onClick={() =>
-                                                    setKeyAdjustmentView(null)
-                                                  }
-                                                >
-                                                  <span>←</span>
-                                                  <span>Back</span>
-                                                </button>
-                                                <span className="key-adjustment-title">
-                                                  Adjust Key
-                                                </span>
-                                              </div>
-
-                                              <div className="key-adjustment-controls">
-                                                <button
-                                                  className="key-adjustment-button"
-                                                  onClick={() =>
-                                                    adjustKey(trackKey, -1)
-                                                  }
-                                                  disabled={
-                                                    (keyAdjustments.get(
-                                                      trackKey,
-                                                    ) ?? 0) <=
-                                                    MIN_KEY_ADJUSTMENT
-                                                  }
-                                                  aria-label="Lower key"
-                                                >
-                                                  −
-                                                </button>
-                                                <div className="key-adjustment-display">
-                                                  <div className="key-adjustment-value">
-                                                    🎹{" "}
-                                                    {currentKey > 0
-                                                      ? `+${currentKey}`
-                                                      : currentKey}
-                                                  </div>
-                                                  <div className="key-adjustment-label">
-                                                    Semitones
-                                                  </div>
-                                                </div>
-                                                <button
-                                                  className="key-adjustment-button"
-                                                  onClick={() =>
-                                                    adjustKey(trackKey, 1)
-                                                  }
-                                                  disabled={
-                                                    (keyAdjustments.get(
-                                                      trackKey,
-                                                    ) ?? 0) >=
-                                                    MAX_KEY_ADJUSTMENT
-                                                  }
-                                                  aria-label="Raise key"
-                                                >
-                                                  +
-                                                </button>
-                                              </div>
-                                            </div>
-                                          ) : (
-                                            // Main Menu Items
-                                            <div className="action-menu-body">
-                                              <p className="action-menu-meta">
-                                                {[
-                                                  group.artist ||
-                                                    "Unknown Artist",
-                                                  row.disc_id,
-                                                  formatTrackKind(row.kind),
-                                                ]
-                                                  .filter(Boolean)
-                                                  .join(" · ")}
-                                              </p>
-                                              {!hasMultipleVersions && (
-                                                <div className="key-controls">
-                                                  <span>
-                                                    Key:{" "}
-                                                    {currentKey > 0
-                                                      ? `+${currentKey}`
-                                                      : currentKey}
-                                                  </span>
-                                                  <button
-                                                    className="secondary compact"
-                                                    type="button"
-                                                    onClick={() =>
-                                                      adjustKey(trackKey, -1)
-                                                    }
-                                                    disabled={
-                                                      currentKey <=
-                                                      MIN_KEY_ADJUSTMENT
-                                                    }
-                                                  >
-                                                    −
-                                                  </button>
-                                                  <button
-                                                    className="secondary compact"
-                                                    type="button"
-                                                    onClick={() =>
-                                                      adjustKey(trackKey, 1)
-                                                    }
-                                                    disabled={
-                                                      currentKey >=
-                                                      MAX_KEY_ADJUSTMENT
-                                                    }
-                                                  >
-                                                    +
-                                                  </button>
-                                                </div>
-                                              )}
-                                            <div className="action-menu-items">
-                                              {/* Add to Queue - Primary action */}
-                                              <button
-                                                className="action-menu-item primary"
-                                                onClick={() => {
-                                                  setActionMenuOpen(null);
-                                                  if (hasMultipleVersions) {
-                                                    setVersionPicker({
-                                                      title: group.title,
-                                                      artist: group.artist,
-                                                      versions: group.versions,
-                                                    });
-                                                  } else {
-                                                    enqueueLocal(
-                                                      row.id,
-                                                      row.title || "Unknown",
-                                                    );
-                                                  }
-                                                }}
-                                              >
-                                                <span className="action-menu-item-icon">
-                                                  +
-                                                </span>
-                                                <div className="action-menu-item-content">
-                                                  <span className="action-menu-item-label">
-                                                    Add to Queue
-                                                  </span>
-                                                  <span className="action-menu-item-description">
-                                                    {hasMultipleVersions
-                                                      ? `Choose from ${formatCount(group.versions.length, "version")}`
-                                                      : "Request this song"}
-                                                  </span>
-                                                </div>
-                                              </button>
-
-                                              {/* Adjust Key (single-version only) */}
-                                              {!hasMultipleVersions && (
-                                                <button
-                                                  hidden
-                                                  className="action-menu-item"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setKeyAdjustmentView(
-                                                      trackKey,
-                                                    );
-                                                  }}
-                                                >
-                                                  <span className="action-menu-item-icon">
-                                                    🎹
-                                                  </span>
-                                                  <div className="action-menu-item-content">
-                                                    <span className="action-menu-item-label">
-                                                      Adjust Key
-                                                    </span>
-                                                    <span className="action-menu-item-description">
-                                                      Change pitch
-                                                    </span>
-                                                  </div>
-                                                  <span className="action-menu-item-value">
-                                                    {currentKey > 0
-                                                      ? `+${currentKey}`
-                                                      : currentKey}
-                                                  </span>
-                                                </button>
-                                              )}
-
-                                              {/* View Lyrics */}
-                                              <button
-                                                className="action-menu-item"
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  const artist =
-                                                    group.artist ||
-                                                    "Unknown Artist";
-                                                  const title =
-                                                    group.title ||
-                                                    "Unknown Title";
-                                                  setActionMenuOpen(null);
-                                                  setLyricsPopupOpen(trackKey);
-                                                  if (!lyricsData[trackKey]) {
-                                                    fetchLyrics(
-                                                      trackKey,
-                                                      artist,
-                                                      title,
-                                                    );
-                                                  }
-                                                }}
-                                              >
-                                                <span className="action-menu-item-icon">
-                                                  ♪
-                                                </span>
-                                                <div className="action-menu-item-content">
-                                                  <span className="action-menu-item-label">
-                                                    View Lyrics
-                                                  </span>
-                                                  <span className="action-menu-item-description">
-                                                    See song words
-                                                  </span>
-                                                </div>
-                                              </button>
-                                            </div>
-                                            </div>
-                                          )}
-                                        </div>
-                                      </>,
-                                      document.body,
-                                    )}
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
+                        {browseCombinedGroups.map((group, idx) => (
+                          <SongResultCard key={group.key} group={group} idx={idx} actions={songResultActions} />
+                        ))}
                       </div>
                     </>
                   ) : (
@@ -2312,261 +1868,9 @@ export default function Requests() {
                             )}
                           </div>
                           <div className="results-container">
-                            {combinedSearchGroups.map((group, idx) => {
-                              const firstTrack = group.versions[0];
-                              const hasMultipleVersions =
-                                group.versions.length > 1;
-                              const hasExternal = group.versions.some(
-                                (track) => track.type === "online",
-                              );
-                              const isRecentlyAdded = group.versions.some(
-                                (track) => recentlyAdded.has(track.key),
-                              );
-                              const isAdding = group.versions.some((track) =>
-                                track.type === "local"
-                                  ? addingLocal === track.track.id
-                                  : addingKaraokeNerds === track.track.url,
-                              );
-                              const trackKey = firstTrack.key;
-                              const currentKey =
-                                keyAdjustments.get(trackKey) ?? 0;
-                              const versionText =
-                                firstTrack.type === "online"
-                                  ? firstTrack.brand || "Karaoke Version"
-                                  : firstTrack.discId || "";
-                              const metaLine = [
-                                group.artist || "Unknown Artist",
-                                firstTrack.type === "online"
-                                  ? "🌐 Online"
-                                  : null,
-                                versionText,
-                              ]
-                                .filter(Boolean)
-                                .join(" · ");
-
-                              return (
-                                <div key={group.key} className="result-card">
-                                  <div className="result-number">{idx + 1}</div>
-                                  <div className="result-info">
-                                    <div className="result-title">
-                                      {group.title || "Unknown Title"}
-                                    </div>
-                                    <div className="result-artist">
-                                      {group.artist || "Unknown Artist"}
-                                    </div>
-                                    <div className="result-meta">
-                                      {hasMultipleVersions || hasExternal ? (
-                                        <span
-                                          className={`meta-tag ${hasExternal ? "brand" : ""}`}
-                                        >
-                                          {hasExternal ? "🌐 " : ""}
-                                          {formatCount(group.versions.length, "version")}
-                                        </span>
-                                      ) : (
-                                        <>
-                                          {firstTrack.type === "local" &&
-                                            firstTrack.discId && (
-                                              <span className="meta-tag">
-                                                {firstTrack.discId}
-                                              </span>
-                                            )}
-                                          {firstTrack.type === "online" &&
-                                            firstTrack.brand && (
-                                              <span className="meta-tag brand">
-                                                {firstTrack.brand}
-                                              </span>
-                                            )}
-                                        </>
-                                      )}
-                                    </div>
-                                  </div>
-                                  <div className="button-container">
-                                    <button
-                                      className={`action-menu-button ${firstTrack.type === "online" ? "karaoke-nerds" : ""} ${isRecentlyAdded ? "success" : ""}`}
-                                      type="button"
-                                      title={
-                                        hasMultipleVersions
-                                          ? "Choose version"
-                                          : "Request this song"
-                                      }
-                                      aria-label={
-                                        isRecentlyAdded
-                                          ? "Added to your queue"
-                                          : hasMultipleVersions
-                                            ? "Choose a version to request"
-                                            : "Request this song"
-                                      }
-                                      onClick={(e) => {
-                                        if (isRecentlyAdded || isAdding) return;
-                                        if (hasMultipleVersions) {
-                                          setCombinedVersionPicker({
-                                            title: group.title,
-                                            artist: group.artist,
-                                            versions: group.versions,
-                                          });
-                                        } else {
-                                          handleActionMenuToggle(
-                                            e,
-                                            trackKey,
-                                            actionMenuOpen,
-                                          );
-                                        }
-                                      }}
-                                      disabled={isAdding || isRecentlyAdded}
-                                    >
-                                      {isAdding ? (
-                                        <div className="button-spinner"></div>
-                                      ) : isRecentlyAdded ? (
-                                        <span className="material-symbols-rounded" aria-hidden="true">check</span>
-                                      ) : hasMultipleVersions ? (
-                                        <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                      ) : (
-                                        <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                      )}
-                                    </button>
-                                    {actionMenuOpen === trackKey &&
-                                      createPortal(
-                                        <>
-                                          <div
-                                            className="action-menu-overlay"
-                                            onClick={() =>
-                                              setActionMenuOpen(null)
-                                            }
-                                          />
-                                          <div
-                                            className="action-menu"
-                                            ref={actionMenuRef}
-                                            onClick={(e) => e.stopPropagation()}
-                                          >
-                                            <div className="action-menu-header">
-                                              <h3 className="action-menu-title">
-                                                {group.title || "Unknown Title"}{" "}
-                                                Options
-                                              </h3>
-                                              <button
-                                                className="action-menu-close"
-                                                type="button"
-                                                onClick={() =>
-                                                  setActionMenuOpen(null)
-                                                }
-                                              >
-                                                Close
-                                              </button>
-                                            </div>
-                                            <div className="action-menu-body">
-                                              <p className="action-menu-meta">
-                                                {metaLine}
-                                              </p>
-                                              {firstTrack.type === "local" && (
-                                                <div className="key-controls">
-                                                  <span>
-                                                    Key:{" "}
-                                                    {currentKey > 0
-                                                      ? `+${currentKey}`
-                                                      : currentKey}
-                                                  </span>
-                                                  <button
-                                                    className="secondary compact"
-                                                    type="button"
-                                                    onClick={() =>
-                                                      adjustKey(trackKey, -1)
-                                                    }
-                                                    disabled={
-                                                      currentKey <=
-                                                      MIN_KEY_ADJUSTMENT
-                                                    }
-                                                  >
-                                                    −
-                                                  </button>
-                                                  <button
-                                                    className="secondary compact"
-                                                    type="button"
-                                                    onClick={() =>
-                                                      adjustKey(trackKey, 1)
-                                                    }
-                                                    disabled={
-                                                      currentKey >=
-                                                      MAX_KEY_ADJUSTMENT
-                                                    }
-                                                  >
-                                                    +
-                                                  </button>
-                                                </div>
-                                              )}
-                                              <div className="action-menu-items">
-                                                <button
-                                                  className="action-menu-item primary"
-                                                  type="button"
-                                                  onClick={() => {
-                                                    setActionMenuOpen(null);
-                                                    if (
-                                                      firstTrack.type ===
-                                                      "local"
-                                                    ) {
-                                                      void enqueueLocal(
-                                                        firstTrack.track.id,
-                                                        firstTrack.title ||
-                                                          "Unknown",
-                                                      );
-                                                    } else {
-                                                      void enqueueKaraokeNerds(
-                                                        firstTrack.track,
-                                                      );
-                                                    }
-                                                  }}
-                                                >
-                                                  <span className="action-menu-item-icon">
-                                                    +
-                                                  </span>
-                                                  <div className="action-menu-item-content">
-                                                    <span className="action-menu-item-label">
-                                                      Add to Queue
-                                                    </span>
-                                                    <span className="action-menu-item-description">
-                                                      Request this song
-                                                    </span>
-                                                  </div>
-                                                </button>
-                                                <button
-                                                  className="action-menu-item secondary"
-                                                  type="button"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setActionMenuOpen(null);
-                                                    setLyricsPopupOpen(trackKey);
-                                                    if (!lyricsData[trackKey]) {
-                                                      fetchLyrics(
-                                                        trackKey,
-                                                        group.artist ||
-                                                          "Unknown Artist",
-                                                        group.title ||
-                                                          "Unknown Title",
-                                                      );
-                                                    }
-                                                  }}
-                                                >
-                                                  <span className="action-menu-item-icon">
-                                                    ♪
-                                                  </span>
-                                                  <div className="action-menu-item-content">
-                                                    <span className="action-menu-item-label">
-                                                      View Lyrics
-                                                    </span>
-                                                    <span className="action-menu-item-description">
-                                                      See song words
-                                                    </span>
-                                                  </div>
-                                                </button>
-                                              </div>
-                                            </div>
-                                          </div>
-                                        </>,
-                                        document.body,
-                                      )}
-                                  </div>
-                                </div>
-                              );
-                            })}
+                            {combinedSearchGroups.map((group, idx) => (
+                              <SongResultCard key={group.key} group={group} idx={idx} actions={songResultActions} />
+                            ))}
                           </div>
                         </>
                       ) : (
@@ -2650,10 +1954,10 @@ export default function Requests() {
                                       )}
                                       onClick={() => {
                                         if (group.versions.length > 1) {
-                                          setVersionPicker({
+                                          setCombinedVersionPicker({
                                             title: group.title,
                                             artist: group.artist,
-                                            versions: group.versions,
+                                            versions: group.versions.map(toLocalSearchTrack),
                                           });
                                         } else {
                                           const track = group.versions[0];
@@ -2678,725 +1982,6 @@ export default function Requests() {
                             )}
                         </div>
                       ))}
-                    {/* Local library results */}
-                    {false &&
-                      (sourceFilter === "all" || sourceFilter === "local") &&
-                      localLibraryEnabled &&
-                      (isLoading ? (
-                        <div className="loading-container">
-                          <div className="loading-spinner"></div>
-                          <div className="loading-text">
-                            Searching local library...
-                          </div>
-                        </div>
-                      ) : showLocalResults ? (
-                        <>
-                          <div
-                            className="results-header"
-                            onClick={() => setLocalExpanded((e) => !e)}
-                            style={{ cursor: "pointer", userSelect: "none" }}
-                          >
-                            <span className="results-count">
-                              <img
-                                src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/1f4da.svg"
-                                alt=""
-                                style={{
-                                  width: 14,
-                                  height: 14,
-                                  verticalAlign: "middle",
-                                  marginRight: 5,
-                                }}
-                              />
-                              Local — {groupedLocalRows.length}{" "}
-                              {groupedLocalRows.length === 1 ? "song" : "songs"}
-                              {groupedLocalRows.length < localRows.length && (
-                                <span
-                                  style={{
-                                    marginLeft: 6,
-                                    fontSize: 11,
-                                    color: "var(--color-text-muted)",
-                                    fontWeight: 400,
-                                  }}
-                                >
-                                  ({formatCount(localRows.length, "version")})
-                                </span>
-                              )}
-                            </span>
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: 6,
-                                alignItems: "center",
-                              }}
-                            >
-                              {kindFilter !== "all" && (
-                                <span className="active-filter-badge">
-                                  {kindFilter === "mp4"
-                                    ? "🎬 Video"
-                                    : "📀 CDG"}
-                                </span>
-                              )}
-                              <span
-                                style={{
-                                  fontSize: 13,
-                                  color: "var(--color-text-muted)",
-                                }}
-                              >
-                                {localExpanded ? "▲" : "▼"}
-                              </span>
-                            </div>
-                          </div>
-                          {localExpanded && (
-                            <div className="results-container">
-                              {groupedLocalRows.map((group, idx) => {
-                                const row = group.versions[0];
-                                const trackKey = `local-${row.id}`;
-                                const isRecentlyAdded =
-                                  recentlyAdded.has(trackKey) ||
-                                  group.versions.some((v) =>
-                                    recentlyAdded.has(`local-${v.id}`),
-                                  );
-                                const isAdding = group.versions.some(
-                                  (v) => addingLocal === v.id,
-                                );
-                                const currentKey =
-                                  keyAdjustments.get(trackKey) ?? 0;
-                                const hasMultipleVersions =
-                                  group.versions.length > 1;
-                                return (
-                                  <div key={group.key} className="result-card">
-                                    <div className="result-number">
-                                      {idx + 1}
-                                    </div>
-                                    <div className="result-info">
-                                      <div className="result-title">
-                                        {group.title || "Unknown Title"}
-                                      </div>
-                                      <div className="result-artist">
-                                        {group.artist || "Unknown Artist"}
-                                      </div>
-                                      <div className="result-meta">
-                                        {hasMultipleVersions ? (
-                                          <span className="meta-tag">
-                                            📀 {formatCount(group.versions.length, "version")}
-                                          </span>
-                                        ) : (
-                                          <>
-                                            {row.disc_id && (
-                                              <span className="meta-tag">
-                                                📀 {row.disc_id}
-                                              </span>
-                                            )}
-                                            {row.kind && (
-                                              <span className="meta-tag">
-                                                {formatTrackKind(row.kind)}
-                                              </span>
-                                            )}
-                                          </>
-                                        )}
-                                      </div>
-                                    </div>
-                                    <div className="button-container">
-                                      <div
-                                        style={{
-                                          position: "relative",
-                                          width: "100%",
-                                        }}
-                                      >
-                                        <button
-                                          className={`action-menu-button ${isRecentlyAdded ? "success" : ""}`}
-                                    aria-label={isRecentlyAdded ? "Added to your queue" : "Request this song"}
-                                          onClick={(e) => {
-                                            if (isRecentlyAdded || isAdding)
-                                              return;
-                                            if (hasMultipleVersions) {
-                                              setVersionPicker({
-                                                title: group.title ?? "",
-                                                artist: group.artist ?? "",
-                                                versions: group.versions,
-                                              });
-                                            } else {
-                                              handleActionMenuToggle(
-                                                e,
-                                                trackKey,
-                                                actionMenuOpen,
-                                              );
-                                            }
-                                          }}
-                                          disabled={isAdding || isRecentlyAdded}
-                                        >
-                                          {isAdding ? (
-                                            <>
-                                              <div className="button-spinner"></div>
-                                              <span>Adding</span>
-                                            </>
-                                          ) : isRecentlyAdded ? (
-                                            <span className="material-symbols-rounded" aria-hidden="true">check</span>
-                                          ) : hasMultipleVersions ? (
-                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                          ) : (
-                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                          )}
-                                        </button>
-                                        {actionMenuOpen === trackKey &&
-                                          createPortal(
-                                            <>
-                                              <div
-                                                className="action-menu-overlay"
-                                                onClick={() =>
-                                                  setActionMenuOpen(null)
-                                                }
-                                              />
-                                              <div
-                                                className="action-menu"
-                                                ref={actionMenuRef}
-                                                onClick={(e) =>
-                                                  e.stopPropagation()
-                                                }
-                                                style={
-                                                  actionMenuPosition
-                                                    ? {
-                                                        top: `${actionMenuPosition.top}px`,
-                                                        left: `${actionMenuPosition.left}px`,
-                                                        width: "max-content",
-                                                        minWidth: `${actionMenuPosition.width}px`,
-                                                      }
-                                                    : undefined
-                                                }
-                                              >
-                                                <div className="action-menu-header">
-                                                  <h3 className="action-menu-title">
-                                                    {group.title ||
-                                                      "Unknown Title"}{" "}
-                                                    Options
-                                                  </h3>
-                                                  <button
-                                                    className="action-menu-close"
-                                                    type="button"
-                                                    onClick={() =>
-                                                      setActionMenuOpen(null)
-                                                    }
-                                                  >
-                                                    Close
-                                                  </button>
-                                                </div>
-                                                <div className="action-menu-body">
-                                                  <p className="action-menu-meta">
-                                                    {[
-                                                      group.artist ||
-                                                        "Unknown Artist",
-                                                      row.disc_id,
-                                                      formatTrackKind(row.kind),
-                                                    ]
-                                                      .filter(Boolean)
-                                                      .join(" · ")}
-                                                  </p>
-                                                  {!hasMultipleVersions && (
-                                                    <div className="key-controls">
-                                                      <span>
-                                                        Key:{" "}
-                                                        {currentKey > 0
-                                                          ? `+${currentKey}`
-                                                          : currentKey}
-                                                      </span>
-                                                      <button
-                                                        className="secondary compact"
-                                                        type="button"
-                                                        onClick={() =>
-                                                          adjustKey(trackKey, -1)
-                                                        }
-                                                        disabled={
-                                                          currentKey <=
-                                                          MIN_KEY_ADJUSTMENT
-                                                        }
-                                                      >
-                                                        −
-                                                      </button>
-                                                      <button
-                                                        className="secondary compact"
-                                                        type="button"
-                                                        onClick={() =>
-                                                          adjustKey(trackKey, 1)
-                                                        }
-                                                        disabled={
-                                                          currentKey >=
-                                                          MAX_KEY_ADJUSTMENT
-                                                        }
-                                                      >
-                                                        +
-                                                      </button>
-                                                    </div>
-                                                  )}
-                                                <div className="action-menu-items">
-                                                  <button
-                                                    className="action-menu-item primary"
-                                                    onClick={() => {
-                                                      setActionMenuOpen(null);
-                                                      if (hasMultipleVersions) {
-                                                        setVersionPicker({
-                                                          title:
-                                                            group.title ?? "",
-                                                          artist:
-                                                            group.artist ?? "",
-                                                          versions:
-                                                            group.versions,
-                                                        });
-                                                      } else {
-                                                        void enqueueLocal(
-                                                          row.id,
-                                                          row.title || "",
-                                                        );
-                                                      }
-                                                    }}
-                                                  >
-                                                    <span className="action-menu-item-icon">
-                                                      +
-                                                    </span>
-                                                    <div className="action-menu-item-content">
-                                                      <span className="action-menu-item-label">
-                                                        Add to Queue
-                                                      </span>
-                                                      <span className="action-menu-item-description">
-                                                        {hasMultipleVersions
-                                                          ? `Choose from ${formatCount(group.versions.length, "version")}`
-                                                          : "Request this song"}
-                                                      </span>
-                                                    </div>
-                                                  </button>
-                                                  <button
-                                                    className="action-menu-item"
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      setActionMenuOpen(null);
-                                                      setLyricsPopupOpen(
-                                                        trackKey,
-                                                      );
-                                                      if (
-                                                        !lyricsData[trackKey]
-                                                      ) {
-                                                        fetchLyrics(
-                                                          trackKey,
-                                                          group.artist ||
-                                                            "Unknown Artist",
-                                                          group.title || "",
-                                                        );
-                                                      }
-                                                    }}
-                                                  >
-                                                    <span className="action-menu-item-icon">
-                                                      ♪
-                                                    </span>
-                                                    <div className="action-menu-item-content">
-                                                      <span className="action-menu-item-label">
-                                                        View Lyrics
-                                                      </span>
-                                                      <span className="action-menu-item-description">
-                                                        See song words
-                                                      </span>
-                                                    </div>
-                                                  </button>
-                                                </div>
-                                                </div>
-                                              </div>
-                                            </>,
-                                            document.body,
-                                          )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </>
-                      ) : localLibraryEnabled && q.trim() && !isLoading ? (
-                        <div className="empty-state">
-                          <div className="empty-icon">🎵</div>
-                          <div className="empty-title">
-                            No local results for "{q}"
-                          </div>
-                          {fuzzySuggestions.length > 0 && (
-                            <div style={{ marginTop: 12, textAlign: "left" }}>
-                              <div
-                                style={{
-                                  color: "var(--color-text-secondary)",
-                                  fontSize: 13,
-                                  marginBottom: 8,
-                                }}
-                              >
-                                {fuzzySuggestions[0]?.matched_term
-                                  ? `Do you mean “${fuzzySuggestions[0].matched_term}”?`
-                                  : "Do you mean…?"}
-                              </div>
-                              {Array.from(
-                                fuzzySuggestions
-                                  .reduce((map, track) => {
-                                    const key = groupKey(
-                                      track.title ?? "",
-                                      track.artist ?? "",
-                                    );
-                                    if (!map.has(key))
-                                      map.set(key, { track, versions: [] });
-                                    map.get(key)!.versions.push(track);
-                                    return map;
-                                  }, new Map<string, { track: SearchRow; versions: SearchRow[] }>())
-                                  .values(),
-                              ).map(({ track, versions }) => (
-                                <div
-                                  key={track.id}
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 10,
-                                    padding: "8px 12px",
-                                    background: "var(--color-bg-secondary)",
-                                    borderRadius: 8,
-                                    marginBottom: 6,
-                                  }}
-                                >
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div
-                                      style={{
-                                        fontWeight: 600,
-                                        fontSize: 14,
-                                        whiteSpace: "nowrap",
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                      }}
-                                    >
-                                      {track.title}
-                                    </div>
-                                    <div
-                                      style={{
-                                        fontSize: 12,
-                                        color: "var(--color-text-secondary)",
-                                      }}
-                                    >
-                                      {track.artist}
-                                    </div>
-                                    {versions.length > 1 && (
-                                      <div
-                                        style={{
-                                          fontSize: 11,
-                                          color: "var(--color-text-muted)",
-                                          marginTop: 2,
-                                        }}
-                                      >
-                                        📀 {formatCount(versions.length, "version")}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <button
-                                    className="add-btn"
-                                    disabled={versions.some(
-                                      (v) => addingLocal === v.id,
-                                    )}
-                                    onClick={() => {
-                                      if (versions.length > 1) {
-                                        setVersionPicker({
-                                          title: track.title ?? "",
-                                          artist: track.artist ?? "",
-                                          versions,
-                                        });
-                                      } else {
-                                        void enqueueLocal(
-                                          track.id,
-                                          track.title || "",
-                                        );
-                                      }
-                                    }}
-                                    style={{ flexShrink: 0 }}
-                                  >
-                                    {versions.some((v) => addingLocal === v.id)
-                                      ? "…"
-                                      : "+ Add"}
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ) : null)}
-
-                    {/* Karaoke Nerds results */}
-                    {false &&
-                      (sourceFilter === "all" || sourceFilter === "online") &&
-                      externalLibraryEnabled &&
-                      (isKnLoading ? (
-                        <div className="loading-container">
-                          <div className="loading-spinner"></div>
-                          <div className="loading-text">
-                            Searching Karaoke Nerds...
-                          </div>
-                        </div>
-                      ) : showKnResults ? (
-                        <>
-                          <div
-                            className="results-header"
-                            onClick={() => setKnExpanded((e) => !e)}
-                            style={{ cursor: "pointer", userSelect: "none" }}
-                          >
-                            <span className="results-count">
-                              <img
-                                src="https://karaokenerds.com/Content/Icons/favicon.ico"
-                                alt=""
-                                style={{
-                                  width: 14,
-                                  height: 14,
-                                  verticalAlign: "middle",
-                                  marginRight: 5,
-                                }}
-                              />
-                              Online — {groupedKnRows.length}{" "}
-                              {groupedKnRows.length === 1 ? "song" : "songs"}
-                              {groupedKnRows.length <
-                                karaokeNerdsRows.length && (
-                                <span
-                                  style={{
-                                    marginLeft: 6,
-                                    fontSize: 11,
-                                    color: "var(--color-text-muted)",
-                                    fontWeight: 400,
-                                  }}
-                                >
-                                  ({formatCount(karaokeNerdsRows.length, "version")})
-                                </span>
-                              )}
-                            </span>
-                            <span
-                              style={{
-                                fontSize: 13,
-                                color: "var(--color-text-muted)",
-                              }}
-                            >
-                              {knExpanded ? "▲" : "▼"}
-                            </span>
-                          </div>
-                          {knExpanded && (
-                            <div className="results-container">
-                              {groupedKnRows.map((group, idx) => {
-                                const firstTrack = group.versions[0];
-                                const trackKey = `kn-${firstTrack.url}`;
-                                const isRecentlyAdded = group.versions.some(
-                                  (v) => recentlyAdded.has(`kn-${v.url}`),
-                                );
-                                const isAdding = group.versions.some(
-                                  (v) => addingKaraokeNerds === v.url,
-                                );
-                                const hasMultipleVersions =
-                                  group.versions.length > 1;
-                                return (
-                                  <div key={group.key} className="result-card">
-                                    <div className="result-number">
-                                      {idx + 1}
-                                    </div>
-                                    <div className="result-info">
-                                      <div className="result-title">
-                                        {group.title}
-                                      </div>
-                                      <div className="result-artist">
-                                        {group.artist || "Unknown Artist"}
-                                      </div>
-                                      <div className="result-meta">
-                                        {hasMultipleVersions ? (
-                                          <span className="meta-tag">
-                                            🎵 {formatCount(group.versions.length, "version")}
-                                          </span>
-                                        ) : firstTrack.brand ? (
-                                          <span className="meta-tag brand">
-                                            🎵 {firstTrack.brand}
-                                          </span>
-                                        ) : null}
-                                        <span className="meta-tag">
-                                          🌐 Online
-                                        </span>
-                                      </div>
-                                    </div>
-                                    <div className="button-container">
-                                      <div
-                                        style={{
-                                          position: "relative",
-                                          width: "100%",
-                                        }}
-                                      >
-                                        <button
-                                          className={`action-menu-button karaoke-nerds ${isRecentlyAdded ? "success" : ""}`}
-                                    aria-label={isRecentlyAdded ? "Added to your queue" : "Request this song"}
-                                          onClick={(e) => {
-                                            if (isRecentlyAdded || isAdding)
-                                              return;
-                                            if (hasMultipleVersions) {
-                                              setKnVersionPicker({
-                                                title: group.title,
-                                                artist: group.artist,
-                                                versions: group.versions,
-                                              });
-                                            } else {
-                                              handleActionMenuToggle(
-                                                e,
-                                                trackKey,
-                                                actionMenuOpen,
-                                              );
-                                            }
-                                          }}
-                                          disabled={isAdding || isRecentlyAdded}
-                                        >
-                                          {isAdding ? (
-                                            <>
-                                              <div className="button-spinner"></div>
-                                              <span>Adding</span>
-                                            </>
-                                          ) : isRecentlyAdded ? (
-                                            <span className="material-symbols-rounded" aria-hidden="true">check</span>
-                                          ) : hasMultipleVersions ? (
-                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                          ) : (
-                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
-                                          )}
-                                        </button>
-                                        {actionMenuOpen === trackKey &&
-                                          createPortal(
-                                            <>
-                                              <div
-                                                className="action-menu-overlay"
-                                                onClick={() =>
-                                                  setActionMenuOpen(null)
-                                                }
-                                              />
-                                              <div
-                                                className="action-menu"
-                                                ref={actionMenuRef}
-                                                onClick={(e) =>
-                                                  e.stopPropagation()
-                                                }
-                                                style={
-                                                  actionMenuPosition
-                                                    ? {
-                                                        top: `${actionMenuPosition.top}px`,
-                                                        left: `${actionMenuPosition.left}px`,
-                                                        width: "max-content",
-                                                        minWidth: `${actionMenuPosition.width}px`,
-                                                      }
-                                                    : undefined
-                                                }
-                                              >
-                                                <div className="action-menu-header">
-                                                  <h3 className="action-menu-title">
-                                                    {group.title} Options
-                                                  </h3>
-                                                  <button
-                                                    className="action-menu-close"
-                                                    type="button"
-                                                    onClick={() =>
-                                                      setActionMenuOpen(null)
-                                                    }
-                                                  >
-                                                    Close
-                                                  </button>
-                                                </div>
-                                                <div className="action-menu-body">
-                                                  <p className="action-menu-meta">
-                                                    {[
-                                                      group.artist ||
-                                                        "Unknown Artist",
-                                                      "🌐 Online",
-                                                      firstTrack.brand ||
-                                                        "Karaoke Version",
-                                                    ]
-                                                      .filter(Boolean)
-                                                      .join(" · ")}
-                                                  </p>
-                                                <div className="action-menu-items">
-                                                  <button
-                                                    className="action-menu-item primary"
-                                                    onClick={() => {
-                                                      setActionMenuOpen(null);
-                                                      if (hasMultipleVersions) {
-                                                        setKnVersionPicker({
-                                                          title: group.title,
-                                                          artist: group.artist,
-                                                          versions:
-                                                            group.versions,
-                                                        });
-                                                      } else {
-                                                        void enqueueKaraokeNerds(
-                                                          firstTrack,
-                                                        );
-                                                      }
-                                                    }}
-                                                  >
-                                                    <span className="action-menu-item-icon">
-                                                      +
-                                                    </span>
-                                                    <div className="action-menu-item-content">
-                                                      <span className="action-menu-item-label">
-                                                        Add to Queue
-                                                      </span>
-                                                      <span className="action-menu-item-description">
-                                                        {hasMultipleVersions
-                                                          ? `Choose from ${formatCount(group.versions.length, "version")}`
-                                                          : "Request this song"}
-                                                      </span>
-                                                    </div>
-                                                  </button>
-                                                  <button
-                                                    className="action-menu-item"
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      setActionMenuOpen(null);
-                                                      setLyricsPopupOpen(
-                                                        trackKey,
-                                                      );
-                                                      if (
-                                                        !lyricsData[trackKey]
-                                                      ) {
-                                                        fetchLyrics(
-                                                          trackKey,
-                                                          group.artist ||
-                                                            "Unknown Artist",
-                                                          group.title,
-                                                        );
-                                                      }
-                                                    }}
-                                                  >
-                                                    <span className="action-menu-item-icon">
-                                                      ♪
-                                                    </span>
-                                                    <div className="action-menu-item-content">
-                                                      <span className="action-menu-item-label">
-                                                        View Lyrics
-                                                      </span>
-                                                      <span className="action-menu-item-description">
-                                                        See song words
-                                                      </span>
-                                                    </div>
-                                                  </button>
-                                                </div>
-                                                </div>
-                                              </div>
-                                            </>,
-                                            document.body,
-                                          )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </>
-                      ) : q.trim() && !isKnLoading ? (
-                        <div
-                          className="empty-state"
-                          style={{ marginTop: showLocalResults ? 8 : 0 }}
-                        >
-                          <div className="empty-icon">🌐</div>
-                          <div className="empty-title">
-                            No Karaoke Nerds results for "{q}"
-                          </div>
-                        </div>
-                      ) : null)}
-
                     {/* Initial empty state — nothing searched yet */}
                     {!q.trim() &&
                       !showLocalResults &&
@@ -3433,25 +2018,6 @@ export default function Requests() {
         enqueueKaraokeNerds={enqueueKaraokeNerds}
       />
 
-      <VersionPickerDialog
-        versionPicker={versionPicker}
-        setVersionPicker={setVersionPicker}
-        addingLocal={addingLocal}
-        setLyricsPopupOpen={setLyricsPopupOpen}
-        lyricsData={lyricsData}
-        fetchLyrics={fetchLyrics}
-        enqueueLocal={enqueueLocal}
-      />
-
-      <KnVersionPickerDialog
-        knVersionPicker={knVersionPicker}
-        setKnVersionPicker={setKnVersionPicker}
-        addingKaraokeNerds={addingKaraokeNerds}
-        setLyricsPopupOpen={setLyricsPopupOpen}
-        lyricsData={lyricsData}
-        fetchLyrics={fetchLyrics}
-        enqueueKaraokeNerds={enqueueKaraokeNerds}
-      />
 
       <LyricsDialog
         localRows={localRows}

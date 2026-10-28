@@ -1,5 +1,5 @@
 // Pure helpers for the Request page: grouping, ordering, formatting and the singer's device id.
-import type { MyQueueItem } from './types'
+import type { CombinedSearchTrack, MyQueueItem, SearchRow } from './types'
 
 export const VENUE_THEME_CACHE_KEY = "karaokedock.venueTheme";
 export const MIN_KEY_ADJUSTMENT = -6;
@@ -127,4 +127,17 @@ export function getOrCreateSingerUuid(): string {
   const next = createSingerUuid();
   localStorage.setItem(SINGER_UUID_STORAGE_KEY, next);
   return next;
+}
+
+// A local library row in the shape the combined search list, browse list and version sheet use.
+export function toLocalSearchTrack(row: SearchRow): CombinedSearchTrack {
+  return {
+    type: "local",
+    key: `local-${row.id}`,
+    title: row.title ?? "",
+    artist: row.artist ?? "",
+    discId: row.disc_id,
+    kind: row.kind,
+    track: row,
+  };
 }
