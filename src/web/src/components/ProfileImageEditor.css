@@ -11,9 +11,9 @@
   border-radius: 16px;
   background: var(--color-bg-card, #1d1d27);
   color: var(--color-text-primary, #fff);
-  box-shadow: 0 16px 48px #0008;
+  box-shadow: 0 16px 48px var(--color-shadow, #0008);
 }
-.profile-dialog::backdrop { background: #000b; }
+.profile-dialog::backdrop { background: var(--color-overlay, #000b); }
 .profile-dialog-header {
   display: flex;
   align-items: center;
@@ -70,7 +70,7 @@
 .request-name-form input:focus {
   outline: none;
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 4px #6366f11a;
+  box-shadow: 0 0 0 4px var(--color-accent-soft, #6366f11a);
 }
 .request-name-form .profile-error:empty { display: none; }
 .request-name-form .request-name-save {
@@ -79,8 +79,8 @@
   border-radius: 12px;
   padding: 14px 16px;
   font-weight: 700;
-  color: #fff;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: var(--color-on-accent, #fff);
+  background: linear-gradient(135deg, var(--color-accent, #6366f1), var(--color-accent-2, #8b5cf6));
 }
 .request-social-login { display: grid; gap: 12px; text-align: center; }
 .request-social-login > p:first-child { color: var(--color-text-secondary); font-size: 14px; }

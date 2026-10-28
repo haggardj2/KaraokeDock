@@ -4,7 +4,6 @@ import {
   BrowserRouter,
   Routes,
   Route,
-  Link,
   useLocation,
   Navigate,
   Outlet,
@@ -19,6 +18,11 @@ import Admin from "./pages/Admin";
 import AppInstall from "./components/AppInstall";
 import AppVersion, { APP_VERSION } from "./components/AppVersion";
 import { updateAppManifest } from "./appManifest";
+import ThemePicker from "./components/ThemePicker";
+import LogoMenu from "./components/LogoMenu";
+import { setAppBarSlot } from "./appBarSlot";
+import { THEMES, type ThemeId } from "./theme";
+import { useStaffTheme } from "./useStaffTheme";
 
 const ACCOUNT_AVATAR_BACKGROUND = "#111827";
 
@@ -27,11 +31,7 @@ function Nav() {
   const auth = useAuth();
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [avatarLoadFailed, setAvatarLoadFailed] = useState(false);
-  const navLinkStyle = {
-    textDecoration: "none",
-    fontWeight: 500,
-    transition: "color 0.3s ease",
-  };
+  const [staffTheme, setStaffTheme] = useStaffTheme();
 
   // Update page title based on route
   useEffect(() => {
@@ -94,71 +94,13 @@ function Nav() {
   }, [auth.profile.picture]);
 
   return (
-    <nav
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "12px 20px",
-        borderBottom: "1px solid rgba(255, 255, 255, 0.1)",
-        background: "linear-gradient(135deg, #0a0a0f 0%, #16161d 100%)",
-        position: "sticky",
-        top: 0,
-        zIndex: 100,
-        boxShadow: "0 2px 8px rgba(0, 0, 0, 0.3)",
-      }}
-    >
-      <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-        <Link
-          to="/player"
-          onClick={(e) => {
-            e.preventDefault();
-            window.open("/player", "karaoke-player");
-          }}
-          style={{
-            color: location.pathname === "/player" ? "#6366f1" : "#a1a1aa",
-            ...navLinkStyle,
-          }}
-        >
-          Player
-        </Link>
-        <a
-          href="/request"
-          target="_blank"
-          rel="noreferrer"
-          style={{
-            color:
-              location.pathname === "/request" || location.pathname === "/"
-                ? "#6366f1"
-                : "#a1a1aa",
-            ...navLinkStyle,
-          }}
-        >
-          Request
-        </a>
-        <Link
-          to="/host"
-          style={{
-            color: location.pathname === "/host" ? "#6366f1" : "#a1a1aa",
-            ...navLinkStyle,
-          }}
-        >
-          Host
-        </Link>
-        {(!auth.isLoggedIn || auth.isAdmin) && <Link
-          to="/admin"
-          style={{
-            color: location.pathname === "/admin" ? "#6366f1" : "#a1a1aa",
-            ...navLinkStyle,
-          }}
-        >
-          Admin
-        </Link>}
-      </div>
+    <nav className="app-bar" aria-label="KaraokeDock">
+      <LogoMenu currentPath={location.pathname} showAdmin={!auth.isLoggedIn || auth.isAdmin} />
+      <div className="app-bar-page" ref={setAppBarSlot} />
 
       {/* Auth/Account button for Host and Admin pages */}
       {showAuthButton && auth.isLoggedIn && (
-        <div style={{ position: "relative", flex: "0 0 auto" }}>
+        <div className="app-bar-account">
           <button
             onClick={() => setShowAccountMenu(!showAccountMenu)}
             style={{
@@ -174,7 +116,7 @@ function Nav() {
               background:
                 avatarUrl && !avatarLoadFailed
                   ? ACCOUNT_AVATAR_BACKGROUND
-                  : "linear-gradient(135deg, #6366f1, #8b5cf6)",
+                  : "linear-gradient(135deg, var(--color-accent, #6366f1), var(--color-accent-2, #8b5cf6))",
               border: "none",
               color: "white",
               fontSize: 18,
@@ -227,19 +169,19 @@ function Nav() {
                   top: "100%",
                   right: 0,
                   marginTop: 8,
-                  background: "#1d1d27",
-                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                  background: "var(--color-bg-card)",
+                  border: "1px solid var(--color-border)",
                   borderRadius: 12,
                   padding: 8,
-                  minWidth: 180,
-                  boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5)",
+                  minWidth: 248,
+                  boxShadow: "0 4px 20px var(--color-shadow)",
                   zIndex: 99,
                 }}
               >
                 <div
                   style={{
                     padding: "10px 12px",
-                    color: "#ffffff",
+                    color: "var(--color-text-primary)",
                     fontSize: 13,
                     lineHeight: 1.4,
                   }}
@@ -248,7 +190,7 @@ function Nav() {
                   {auth.profile.displayName &&
                     auth.profile.username &&
                     auth.profile.displayName !== auth.profile.username && (
-                      <div style={{ color: "#a1a1aa" }}>
+                      <div style={{ color: "var(--color-text-secondary, #a1a1aa)" }}>
                         {auth.profile.username}
                       </div>
                     )}
@@ -256,7 +198,19 @@ function Nav() {
                 <div
                   style={{
                     height: 1,
-                    background: "rgba(255, 255, 255, 0.1)",
+                    background: "var(--color-border)",
+                    margin: "6px 0",
+                  }}
+                />
+                <ThemePicker
+                  value={staffTheme}
+                  options={THEMES.map((theme) => ({ value: theme.id, label: theme.label, theme: theme.id }))}
+                  onChange={(value) => setStaffTheme(value as ThemeId)}
+                />
+                <div
+                  style={{
+                    height: 1,
+                    background: "var(--color-border)",
                     margin: "6px 0",
                   }}
                 />
@@ -274,7 +228,7 @@ function Nav() {
                         padding: "10px 12px",
                         background: "transparent",
                         border: "none",
-                        color: "#ffffff",
+                        color: "var(--color-text-primary)",
                         textAlign: "left",
                         cursor: "pointer",
                         borderRadius: 8,
@@ -287,7 +241,7 @@ function Nav() {
                       }}
                       onMouseEnter={(e) =>
                         (e.currentTarget.style.background =
-                          "rgba(99, 102, 241, 0.1)")
+                          "var(--color-bg-hover)")
                       }
                       onMouseLeave={(e) =>
                         (e.currentTarget.style.background = "transparent")
@@ -298,7 +252,7 @@ function Nav() {
                     <div
                       style={{
                         height: 1,
-                        background: "rgba(255, 255, 255, 0.1)",
+                        background: "var(--color-border)",
                         margin: "6px 0",
                       }}
                     />
@@ -314,7 +268,7 @@ function Nav() {
                     padding: "10px 12px",
                     background: "transparent",
                     border: "none",
-                    color: "#ef4444",
+                    color: "var(--color-danger)",
                     textAlign: "left",
                     cursor: "pointer",
                     borderRadius: 8,
@@ -327,7 +281,7 @@ function Nav() {
                   }}
                   onMouseEnter={(e) =>
                     (e.currentTarget.style.background =
-                      "rgba(239, 68, 68, 0.1)")
+                      "var(--color-danger-soft)")
                   }
                   onMouseLeave={(e) =>
                     (e.currentTarget.style.background = "transparent")
@@ -335,7 +289,7 @@ function Nav() {
                 >
                   <span>🚪</span> Logout
                 </button>
-                <div style={{ padding: "10px 12px", marginTop: 6, borderTop: "1px solid rgba(255, 255, 255, 0.1)" }}>
+                <div style={{ padding: "10px 12px", marginTop: 6, borderTop: "1px solid var(--color-border, rgba(255, 255, 255, 0.1))" }}>
                   <AppVersion />
                 </div>
               </div>

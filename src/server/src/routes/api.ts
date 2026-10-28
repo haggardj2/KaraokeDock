@@ -114,6 +114,15 @@ interface PublicSettings {
   'requests.acceptance': 'local' | 'external' | 'disabled';
   'requests.local_browse_enabled': boolean;
   'requests.url': string;
+  'requests.theme': RequestTheme;
+}
+
+// Mirrors THEMES in src/web/src/theme.ts.
+const REQUEST_THEMES = ['midnight', 'stage', 'daylight'] as const;
+type RequestTheme = typeof REQUEST_THEMES[number];
+
+function normalizeRequestTheme(value: unknown): RequestTheme {
+  return REQUEST_THEMES.includes(value as RequestTheme) ? value as RequestTheme : 'midnight';
 }
 
 const DEFAULT_BREAK_PLAYLISTS_FOLDER = process.env.BREAK_MUSIC_PLAYLISTS_FOLDER || '/media/playlists';
@@ -5919,7 +5928,8 @@ apiRouter.get(
       'libraries.local_enabled',
       'libraries.external_enabled',
       'requests.acceptance',
-      'requests.local_browse_enabled'
+      'requests.local_browse_enabled',
+      'requests.theme'
     ];
     
     const result = await query('SELECT key, value FROM settings WHERE key = ANY($1)', [publicKeys]);
@@ -5935,6 +5945,7 @@ apiRouter.get(
       'requests.acceptance': settings['requests.acceptance'] ?? 'local',
       'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true,
       'requests.url': await getPublicRequestsUrl(req),
+      'requests.theme': normalizeRequestTheme(settings['requests.theme']),
     };
     
     res.json(completeSettings);
@@ -5949,6 +5960,20 @@ apiRouter.get(
     const keys = ['libraries.local_enabled', 'libraries.external_enabled', 'ytdlp.allow_downloads'];
     const values = await Promise.all(keys.map(key => getSetting(key)));
     res.json(Object.fromEntries(keys.map((key, index) => [key, values[index] ?? true])));
+  }),
+);
+
+// Venue-wide theme for the singer Requests page; singers can still override it on their own device.
+apiRouter.put(
+  '/host/settings/request-theme',
+  hostGuard,
+  ah(async (req, res) => {
+    const { theme } = req.body ?? {};
+    if (!REQUEST_THEMES.includes(theme)) {
+      return res.status(400).json({ error: `theme must be one of: ${REQUEST_THEMES.join(', ')}` });
+    }
+    await setSetting('requests.theme', theme);
+    res.json({ ok: true, theme });
   }),
 );
 

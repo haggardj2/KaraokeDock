@@ -12,6 +12,19 @@ import { useAuth } from "../auth-context";
 import SingerAvatar, { type SingerProfile, type ProfileCrop } from "../components/SingerAvatar";
 import ProfileImageEditor from "../components/ProfileImageEditor";
 import ProfileDialog from "../components/ProfileDialog";
+import ThemePicker from "../components/ThemePicker";
+import { downloadJsonFile, readJsonFile, safeHistoryFilename } from "../utils/jsonFiles";
+import {
+  REQUEST_THEME_STORAGE_KEY,
+  THEMES,
+  applyTheme,
+  clearTheme,
+  loadRequestThemeChoice,
+  loadThemeId,
+  resolveRequestTheme,
+  saveThemeId,
+  type RequestThemeChoice,
+} from "../theme";
 import SocialProviderIcon from "../components/SocialProviderIcon";
 import PublicLegalLinks from "../components/PublicLegalLinks";
 import AppVersion from "../components/AppVersion";
@@ -20,6 +33,12 @@ import {
   SOCIAL_PROVIDER_NAMES, type SocialProvider, type SocialPublicConfig,
 } from "../social-login";
 import "./Requests.css";
+
+const VENUE_THEME_CACHE_KEY = "karaokedock.venueTheme";
+
+function formatCount(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
 
 const MIN_KEY_ADJUSTMENT = -6;
 const MAX_KEY_ADJUSTMENT = 6;
@@ -195,24 +214,6 @@ function formatTrackKind(kind: string | null | undefined): string {
   return kind?.toUpperCase() ?? "";
 }
 
-function downloadJsonFile(filename: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-}
-
-function safeHistoryFilename(name: string): string {
-  return `${name.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "singer-history"}.kd`;
-}
-
 function createSingerUuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -231,21 +232,6 @@ function getOrCreateSingerUuid(): string {
   const next = createSingerUuid();
   localStorage.setItem(SINGER_UUID_STORAGE_KEY, next);
   return next;
-}
-
-function readJsonFile(file: File): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        resolve(JSON.parse(String(reader.result ?? "")));
-      } catch (error) {
-        reject(error);
-      }
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Could not read file"));
-    reader.readAsText(file);
-  });
 }
 
 export default function Requests() {
@@ -389,6 +375,9 @@ export default function Requests() {
   const [singerProfile, setSingerProfile] = useState<SingerProfile | null>(null);
   const [canUploadProfileImage, setCanUploadProfileImage] = useState(true);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [themeChoice, setThemeChoice] = useState<RequestThemeChoice>(() => loadRequestThemeChoice());
+  // Last venue theme seen on this device, so the page doesn't flash Midnight while settings load.
+  const [venueTheme, setVenueTheme] = useState<string>(() => loadThemeId(globalThis.localStorage, VENUE_THEME_CACHE_KEY));
   const [profilePanel, setProfilePanel] = useState<"image" | "history" | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState("");
@@ -495,35 +484,6 @@ export default function Requests() {
   }, [actionMenuOpen, lyricsPopupOpen]);
 
   useEffect(() => {
-    // Modern dark theme
-    document.documentElement.style.cssText = `
-      --color-bg-primary: #0a0a0f;
-      --color-bg-secondary: #16161d;
-      --color-bg-card: #1d1d27;
-      --color-bg-hover: #252533;
-      --color-accent: #6366f1;
-      --color-accent-hover: #7c7ff3;
-      --color-success: #10b981;
-      --color-warning: #f59e0b;
-      --color-danger: #ef4444;
-      --color-text-primary: #ffffff;
-      --color-text-secondary: #a1a1aa;
-      --color-text-muted: #71717a;
-      --color-border: rgba(255, 255, 255, 0.08);
-      --color-border-focus: rgba(99, 102, 241, 0.5);
-    `;
-
-    document.body.style.cssText = `
-      background: linear-gradient(135deg, #0a0a0f 0%, #16161d 100%);
-      color: #ffffff;
-      margin: 0;
-      padding: 0;
-      min-height: 100vh;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    `;
-
     // Hide navigation
     const nav = document.querySelector("nav");
     const prevNavDisplay = nav ? (nav as HTMLElement).style.display : "";
@@ -555,6 +515,10 @@ export default function Requests() {
         setLocalLibraryEnabled(localEnabled);
         setExternalLibraryEnabled(externalEnabled);
         setLocalBrowseEnabled(browseEnabled);
+        if (settings["requests.theme"]) {
+          setVenueTheme(settings["requests.theme"]);
+          saveThemeId(settings["requests.theme"], globalThis.localStorage, VENUE_THEME_CACHE_KEY);
+        }
       } catch (err) {
         console.error("Failed to load settings:", err);
         // Default to allowing everything if we can't load settings
@@ -564,13 +528,21 @@ export default function Requests() {
     loadSettings();
 
     return () => {
-      document.documentElement.style.cssText = "";
-      document.body.style.cssText = "";
+      clearTheme();
       if (nav) (nav as HTMLElement).style.display = prevNavDisplay;
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    applyTheme(resolveRequestTheme(themeChoice, venueTheme));
+  }, [themeChoice, venueTheme]);
+
+  function changeThemeChoice(choice: RequestThemeChoice) {
+    setThemeChoice(choice);
+    saveThemeId(choice, globalThis.localStorage, REQUEST_THEME_STORAGE_KEY);
+  }
 
   useEffect(() => {
     if (!localBrowseEnabled && localViewMode === "browse") {
@@ -1857,9 +1829,17 @@ export default function Requests() {
   return (
     <div className="requests-page request-page-gateway-theme">
 
-
       <div className="container">
-        {/* Header */}
+        <header className="request-appbar">
+          <div className="request-appbar-title">
+            <span className="request-appbar-icon material-symbols-rounded" aria-hidden="true">mic_external_on</span>
+            <div className="request-appbar-text">
+              <h1>Song Requests</h1>
+              {nameConfirmed && requestedBy && (
+                <p>Singing as <strong>{requestedBy}</strong></p>
+              )}
+            </div>
+          </div>
         <div className="top-actions" ref={profileMenuRef}>
           <button
             ref={profileButtonRef}
@@ -1893,11 +1873,20 @@ export default function Requests() {
               <button type="button" onClick={() => {
                 setProfileMenuOpen(false); openNameDialog();
               }}>Edit Name</button>
+              <ThemePicker
+                value={themeChoice}
+                options={[
+                  { value: "venue", label: "Venue", theme: resolveRequestTheme("venue", venueTheme) },
+                  ...THEMES.map((theme) => ({ value: theme.id, label: theme.label, theme: theme.id })),
+                ]}
+                onChange={(value) => changeThemeChoice(value as RequestThemeChoice)}
+              />
               <button type="button" onClick={() => void logOffSingerProfile()}>Logout</button>
               <div className="request-profile-version"><AppVersion /></div>
             </nav>
           )}
         </div>
+        </header>
 
         {profilePanel === "history" && (
           <ProfileDialog title="Manage History" onClose={() => setProfilePanel(null)}>
@@ -1972,6 +1961,9 @@ export default function Requests() {
                     onClick={() => setMyQueueOpen(false)}
                   />
                   <div
+                    className="my-queue-sheet request-page-gateway-theme-portal"
+                    role="dialog"
+                    aria-label="My queue"
                     style={{
                       position: "fixed",
                       left: 0,
@@ -1982,7 +1974,7 @@ export default function Requests() {
                       border: "1px solid var(--color-border)",
                       borderBottom: "none",
                       borderRadius: "18px 18px 0 0",
-                      boxShadow: "0 -12px 42px rgba(0,0,0,0.7)",
+                      boxShadow: "0 -12px 42px var(--color-shadow)",
                       width: "min(720px, 100vw)",
                       height: "min(78vh, 620px)",
                       margin: "0 auto",
@@ -2002,8 +1994,9 @@ export default function Requests() {
                         flexShrink: 0,
                       }}
                     >
-                      <span style={{ fontWeight: 700, fontSize: 14 }}>
-                        📋 My Queue
+                      <span className="my-queue-heading">
+                        <span className="material-symbols-rounded" aria-hidden="true">queue_music</span>
+                        My Queue
                       </span>
                       <div style={{ display: "flex", gap: 8 }}>
                         <button
@@ -2015,8 +2008,11 @@ export default function Requests() {
                             fontSize: 13,
                           }}
                           onClick={() => void loadMyQueue()}
+                          aria-label="Refresh my queue"
+                          title="Refresh"
+                          className="my-queue-icon-button"
                         >
-                          ↻
+                          <span className="material-symbols-rounded" aria-hidden="true">refresh</span>
                         </button>
                         <button
                           style={{
@@ -2028,8 +2024,11 @@ export default function Requests() {
                             padding: "0 2px",
                           }}
                           onClick={() => setMyQueueOpen(false)}
+                          aria-label="Close my queue"
+                          title="Close"
+                          className="my-queue-icon-button"
                         >
-                          ✕
+                          <span className="material-symbols-rounded" aria-hidden="true">close</span>
                         </button>
                       </div>
                     </div>
@@ -2067,28 +2066,16 @@ export default function Requests() {
                           {myQueue.some((i) => i.status === "queued") &&
                             myQueue.filter((i) => i.status === "queued")
                               .length > 1 && (
-                              <div
-                                style={{
-                                  fontSize: 11,
-                                  color: "var(--color-text-muted)",
-                                  marginBottom: 2,
-                                }}
-                              >
-                                ☰ Drag to reorder
+                              <div className="my-queue-hint">
+                                Drag a song to reorder
                               </div>
                             )}
                           {myQueue.some(
                             (i) =>
                               i.status === "done" || i.status === "finished",
                           ) && (
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: "var(--color-text-muted)",
-                                marginBottom: 2,
-                              }}
-                            >
-                              Long-click played songs to remove
+                            <div className="my-queue-hint">
+                              Press and hold a sung song to remove it
                             </div>
                           )}
                           {myQueue.map((item) => {
@@ -2138,23 +2125,20 @@ export default function Requests() {
                               style={{
                                 display: "flex",
                                 alignItems: "center",
-                                gap: 8,
-                                padding: "8px 10px",
+                                gap: 10,
+                                padding: "12px",
+                                minHeight: 56,
                                 background:
                                   dragOverQueueId === item.id
-                                    ? "rgba(99,102,241,0.15)"
+                                    ? "var(--color-accent-soft)"
                                     : "var(--color-bg-secondary)",
                                 borderRadius: 8,
                                 opacity:
-                                  draggingQueueId === item.id
-                                    ? 0.75
-                                    : isCompleted || item.status === "skipped"
-                                      ? 0.6
-                                      : 1,
+                                  draggingQueueId === item.id ? 0.75 : 1,
                                 cursor: isQueued ? "grab" : "default",
                                 border:
                                   dragOverQueueId === item.id
-                                    ? "1px dashed rgba(99,102,241,0.5)"
+                                    ? "1px dashed color-mix(in srgb, var(--color-accent) 50%, transparent)"
                                     : "1px solid transparent",
                                 touchAction: isQueued
                                   ? "none"
@@ -2168,112 +2152,60 @@ export default function Requests() {
                               {item.status === "queued" && (
                                 <span
                                   style={{
-                                    fontSize: 14,
+                                    display: "inline-flex",
                                     color: "var(--color-text-muted)",
                                     flexShrink: 0,
                                     cursor: "grab",
-                                    padding: "4px 2px",
+                                    padding: "4px 0",
                                   }}
                                 >
-                                  ☰
+                                  <span className="material-symbols-rounded" aria-hidden="true">drag_indicator</span>
                                 </span>
                               )}
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div
-                                  style={{
-                                    fontWeight: 600,
-                                    fontSize: 13,
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    textDecoration: isCompleted
-                                      ? "line-through"
-                                      : "none",
-                                    color: isCompleted
-                                      ? "var(--color-text-muted)"
-                                      : "var(--color-text-primary)",
-                                  }}
-                                >
+                              <div className="my-queue-text">
+                                <div className={`my-queue-title${isCompleted ? " is-done" : ""}`}>
                                   {item.title || "Unknown"}
                                 </div>
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    color: "var(--color-text-secondary)",
-                                    textDecoration: isCompleted
-                                      ? "line-through"
-                                      : "none",
-                                  }}
-                                >
+                                <div className="my-queue-artist">
                                   {item.artist || "Unknown"}
                                 </div>
-                              </div>
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  flexShrink: 0,
-                                }}
-                              >
                                 <span
-                                  style={{
-                                    fontSize: 10,
-                                    fontWeight: 700,
-                                    padding: "2px 6px",
-                                    borderRadius: 6,
-                                    background:
-                                      item.status === "playing"
-                                        ? "rgba(16,185,129,0.2)"
-                                            : isQueued
-                                          ? "rgba(99,102,241,0.15)"
-                                          : "rgba(113,113,122,0.15)",
-                                    color:
-                                      item.status === "playing"
-                                        ? "#10b981"
-                                            : isQueued
-                                          ? "var(--color-accent)"
-                                          : "var(--color-text-muted)",
-                                  }}
+                                  className={`my-queue-status ${
+                                    item.status === "playing"
+                                      ? "is-singing"
+                                      : isQueued
+                                        ? "is-queued"
+                                        : "is-done"
+                                  }`}
                                 >
                                   {item.status === "playing"
-                                    ? "▶ NOW"
+                                    ? "Singing now"
                                     : isQueued
-                                      ? "⏳"
-                                      : "✅ Done"}
+                                      ? "Queued"
+                                      : item.status === "skipped"
+                                        ? "Skipped"
+                                        : "Sung"}
                                 </span>
+                              </div>
+                              <div className="my-queue-actions">
                                 {isQueued && (
                                   <button
-                                    style={{
-                                      background: "rgba(239,68,68,0.15)",
-                                      color: "#ef4444",
-                                      border: "1px solid rgba(239,68,68,0.3)",
-                                      borderRadius: 6,
-                                      cursor: "pointer",
-                                      padding: "3px 8px",
-                                      fontSize: 11,
-                                    }}
+                                    type="button"
+                                    className="my-queue-action danger"
                                     disabled={removingQueueId === item.id}
                                     onClick={() =>
                                       void removeFromMyQueue(item.id)
                                     }
+                                    aria-label={`Remove ${item.title || "song"} from my queue`}
                                   >
-                                    {removingQueueId === item.id ? "…" : "✕"}
+                                    <span className="material-symbols-rounded" aria-hidden="true">delete</span>
+                                    <span>{removingQueueId === item.id ? "Removing…" : "Remove"}</span>
                                   </button>
                                 )}
-                                {isCompleted && (
+                                {isCompleted && !isRemoveRevealed && (
                                   <button
-                                    style={{
-                                      background: "rgba(99,102,241,0.15)",
-                                      color: "var(--color-accent)",
-                                      border: "1px solid rgba(99,102,241,0.3)",
-                                      borderRadius: 6,
-                                      cursor: "pointer",
-                                      padding: "3px 8px",
-                                      fontSize: 11,
-                                      fontWeight: 700,
-                                      whiteSpace: "nowrap",
-                                    }}
+                                    type="button"
+                                    className="my-queue-action primary"
                                     disabled={requeueingQueueId === item.id}
                                     onClick={() =>
                                       void requeueFromMyQueue(
@@ -2281,52 +2213,34 @@ export default function Requests() {
                                         item.title,
                                       )
                                     }
+                                    aria-label={`Sing ${item.title || "this song"} again`}
                                   >
-                                    {requeueingQueueId === item.id
-                                      ? "…"
-                                      : "+ Add back"}
+                                    <span className="material-symbols-rounded" aria-hidden="true">replay</span>
+                                    <span>{requeueingQueueId === item.id ? "Adding…" : "Sing again"}</span>
                                   </button>
                                 )}
                                 {isCompleted && isRemoveRevealed && (
                                   <>
                                     <button
-                                      style={{
-                                        background: "rgba(113,113,122,0.16)",
-                                        color: "var(--color-text-secondary)",
-                                        border: "1px solid rgba(113,113,122,0.28)",
-                                        borderRadius: 6,
-                                        cursor: "pointer",
-                                        padding: "3px 8px",
-                                        fontSize: 11,
-                                        fontWeight: 700,
-                                        whiteSpace: "nowrap",
-                                      }}
+                                      type="button"
+                                      className="my-queue-action"
                                       onClick={() =>
                                         setRevealedRemoveQueueId(null)
                                       }
                                     >
-                                      Cancel
+                                      <span>Cancel</span>
                                     </button>
                                     <button
-                                      style={{
-                                        background: "rgba(239,68,68,0.18)",
-                                        color: "#ef4444",
-                                        border: "1px solid rgba(239,68,68,0.35)",
-                                        borderRadius: 6,
-                                        cursor: "pointer",
-                                        padding: "3px 8px",
-                                        fontSize: 11,
-                                        fontWeight: 700,
-                                        whiteSpace: "nowrap",
-                                      }}
+                                      type="button"
+                                      className="my-queue-action danger"
                                       disabled={removingQueueId === item.id}
                                       onClick={() =>
                                         void removeFromMyQueue(item.id)
                                       }
+                                      aria-label={`Remove ${item.title || "song"} from my history`}
                                     >
-                                      {removingQueueId === item.id
-                                        ? "…"
-                                        : "Remove"}
+                                      <span className="material-symbols-rounded" aria-hidden="true">delete</span>
+                                      <span>{removingQueueId === item.id ? "Removing…" : "Remove"}</span>
                                     </button>
                                   </>
                                 )}
@@ -2349,111 +2263,37 @@ export default function Requests() {
                   (i) => i.status === "queued" || i.status === "playing",
                 ).length;
                 return (
-                  <div
+                  <button
+                    type="button"
                     className="queue-footer request-page-gateway-theme-portal"
+                    aria-expanded={myQueueOpen}
+                    aria-label={`My queue, ${activeCount} active ${activeCount === 1 ? "song" : "songs"}`}
                     onClick={() => {
                       setMyQueueOpen((o) => !o);
                       if (!myQueueOpen) void loadMyQueue();
                     }}
-                    style={{
-                      position: "fixed",
-                      bottom: 0,
-                      left: 0,
-                      right: 0,
-                      zIndex: 100,
-                      background: "var(--color-bg-card)",
-                      borderTop: "1px solid var(--color-border)",
-                      boxShadow: "0 -4px 20px rgba(0,0,0,0.4)",
-                      padding: `10px 16px calc(10px + env(safe-area-inset-bottom, 0px))`,
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                      userSelect: "none",
-                    }}
                   >
-                    <div
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: 8,
-                        flexShrink: 0,
-                        background: "rgba(99,102,241,0.15)",
-                        border: "1px solid rgba(99,102,241,0.3)",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 18,
-                        position: "relative",
-                      }}
-                    >
-                      📋
-                      {activeCount > 0 && (
-                        <span
-                          style={{
-                            position: "absolute",
-                            top: -6,
-                            right: -6,
-                            background: "var(--color-accent)",
-                            color: "#fff",
-                            borderRadius: "50%",
-                            width: 16,
-                            height: 16,
-                            fontSize: 9,
-                            fontWeight: 700,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          {activeCount}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
+                    <span className="queue-footer-icon" aria-hidden="true">
+                      <span className="material-symbols-rounded">queue_music</span>
+                      {activeCount > 0 && <span className="queue-footer-badge">{activeCount}</span>}
+                    </span>
+                    <span className="queue-footer-text">
                       {nextSong ? (
                         <>
-                          <div
-                            style={{
-                              fontSize: 11,
-                              color: "var(--color-text-secondary)",
-                              marginBottom: 1,
-                            }}
-                          >
-                            {nextSong.status === "playing"
-                              ? "▶ Now Playing"
-                              : "⏳ Up Next"}
-                          </div>
-                          <div
-                            style={{
-                              fontWeight: 600,
-                              fontSize: 14,
-                              whiteSpace: "nowrap",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              color: "#fff",
-                            }}
-                          >
-                            {nextSong.title || "Unknown"}
-                          </div>
+                          <span className="queue-footer-label">
+                            {nextSong.status === "playing" ? "Now singing" : "Up next"}
+                          </span>
+                          <span className="queue-footer-title">{nextSong.title || "Unknown"}</span>
                         </>
                       ) : (
-                        <div
-                          style={{
-                            fontSize: 13,
-                            color: "var(--color-text-muted)",
-                          }}
-                        >
-                          No songs in queue yet — tap to view
-                        </div>
+                        <span className="queue-footer-empty">Your queue is empty</span>
                       )}
-                    </div>
-                    <span
-                      style={{ fontSize: 12, color: "var(--color-text-muted)" }}
-                    >
-                      My Queue ›
                     </span>
-                  </div>
+                    <span className="queue-footer-action">
+                      My Queue
+                      <span className="material-symbols-rounded" aria-hidden="true">expand_less</span>
+                    </span>
+                  </button>
                 );
               })()}
             </>,
@@ -2478,13 +2318,15 @@ export default function Requests() {
               </div>
             ) : (
               <>
+                <div className="request-search-bar">
                 <nav className="page-tabs" aria-label="Request page views">
                   <button
                     className={`page-tab ${localViewMode === "search" ? "active" : ""}`}
                     onClick={() => setLocalViewMode("search")}
                     type="button"
                   >
-                    Search
+                    <span className="material-symbols-rounded" aria-hidden="true">search</span>
+                    <span>Search</span>
                   </button>
                   {localLibraryEnabled && localBrowseEnabled && (
                     <>
@@ -2496,7 +2338,8 @@ export default function Requests() {
                         }}
                         type="button"
                       >
-                        Browse Artists
+                        <span className="material-symbols-rounded" aria-hidden="true">mic_external_on</span>
+                        <span>Artists</span>
                       </button>
                       <button
                         className={`page-tab ${localViewMode === "browse" && browseCategory === "title" ? "active" : ""}`}
@@ -2506,7 +2349,8 @@ export default function Requests() {
                         }}
                         type="button"
                       >
-                        Browse Songs
+                        <span className="material-symbols-rounded" aria-hidden="true">music_note</span>
+                        <span>Songs</span>
                       </button>
                     </>
                   )}
@@ -2514,6 +2358,7 @@ export default function Requests() {
 
                 <div className="search-toolbar">
                   <div className="search-wrapper">
+                    <span className="search-icon material-symbols-rounded" aria-hidden="true">search</span>
                     <input
                       className="search-input"
                       type="text"
@@ -2547,6 +2392,9 @@ export default function Requests() {
                       autoComplete="off"
                       autoCorrect="off"
                       spellCheck="false"
+                      inputMode="search"
+                      enterKeyHint="search"
+                      aria-label="Search songs"
                     />
                     {q.trim() && (
                       <button
@@ -2577,9 +2425,11 @@ export default function Requests() {
                       aria-expanded={showFilters}
                       title="Filters"
                     >
-                      <span className="filter-icon" aria-hidden="true">⚙️</span>
+                      <span className="filter-icon material-symbols-rounded" aria-hidden="true">tune</span>
                     </button>
                   )}
+                </div>
+
                 </div>
 
                 {/* Search Filters */}
@@ -2805,7 +2655,7 @@ export default function Requests() {
                                 fontWeight: 400,
                               }}
                             >
-                              ({visibleLocalRows.length} versions)
+                              ({formatCount(visibleLocalRows.length, "version")})
                             </span>
                           )}
                         </span>
@@ -2848,7 +2698,7 @@ export default function Requests() {
                                 <div className="result-meta">
                                   {hasMultipleVersions ? (
                                     <span className="meta-tag">
-                                      📀 {group.versions.length} versions
+                                      📀 {formatCount(group.versions.length, "version")}
                                     </span>
                                   ) : (
                                     <>
@@ -2876,6 +2726,7 @@ export default function Requests() {
                                 >
                                   <button
                                     className={`action-menu-button ${isRecentlyAdded ? "success" : ""}`}
+                                    aria-label={isRecentlyAdded ? "Added to your queue" : "Request this song"}
                                     onClick={(e) => {
                                       if (isRecentlyAdded || isAdding) return;
                                       if (hasMultipleVersions) {
@@ -2900,11 +2751,11 @@ export default function Requests() {
                                         <span>Adding</span>
                                       </>
                                     ) : isRecentlyAdded ? (
-                                      <span>✓</span>
+                                      <span className="material-symbols-rounded" aria-hidden="true">check</span>
                                     ) : hasMultipleVersions ? (
-                                      <span>☰</span>
+                                      <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                     ) : (
-                                      <span>⋯</span>
+                                      <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                     )}
                                   </button>
 
@@ -3091,7 +2942,7 @@ export default function Requests() {
                                                   </span>
                                                   <span className="action-menu-item-description">
                                                     {hasMultipleVersions
-                                                      ? `Choose from ${group.versions.length} versions`
+                                                      ? `Choose from ${formatCount(group.versions.length, "version")}`
                                                       : "Request this song"}
                                                   </span>
                                                 </div>
@@ -3275,7 +3126,7 @@ export default function Requests() {
                                           className={`meta-tag ${hasExternal ? "brand" : ""}`}
                                         >
                                           {hasExternal ? "🌐 " : ""}
-                                          {group.versions.length} versions
+                                          {formatCount(group.versions.length, "version")}
                                         </span>
                                       ) : (
                                         <>
@@ -3302,12 +3153,14 @@ export default function Requests() {
                                       title={
                                         hasMultipleVersions
                                           ? "Choose version"
-                                          : "Options"
+                                          : "Request this song"
                                       }
                                       aria-label={
-                                        hasMultipleVersions
-                                          ? "Choose version"
-                                          : "Options"
+                                        isRecentlyAdded
+                                          ? "Added to your queue"
+                                          : hasMultipleVersions
+                                            ? "Choose a version to request"
+                                            : "Request this song"
                                       }
                                       onClick={(e) => {
                                         if (isRecentlyAdded || isAdding) return;
@@ -3330,11 +3183,11 @@ export default function Requests() {
                                       {isAdding ? (
                                         <div className="button-spinner"></div>
                                       ) : isRecentlyAdded ? (
-                                        <span>✓</span>
+                                        <span className="material-symbols-rounded" aria-hidden="true">check</span>
                                       ) : hasMultipleVersions ? (
-                                        <span>☰</span>
+                                        <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                       ) : (
-                                        <span>⋯</span>
+                                        <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                       )}
                                     </button>
                                     {actionMenuOpen === trackKey &&
@@ -3550,7 +3403,7 @@ export default function Requests() {
                                             marginTop: 2,
                                           }}
                                         >
-                                          📀 {group.versions.length} versions
+                                          📀 {formatCount(group.versions.length, "version")}
                                         </div>
                                       )}
                                     </div>
@@ -3631,7 +3484,7 @@ export default function Requests() {
                                     fontWeight: 400,
                                   }}
                                 >
-                                  ({localRows.length} versions)
+                                  ({formatCount(localRows.length, "version")})
                                 </span>
                               )}
                             </span>
@@ -3691,7 +3544,7 @@ export default function Requests() {
                                       <div className="result-meta">
                                         {hasMultipleVersions ? (
                                           <span className="meta-tag">
-                                            📀 {group.versions.length} versions
+                                            📀 {formatCount(group.versions.length, "version")}
                                           </span>
                                         ) : (
                                           <>
@@ -3718,6 +3571,7 @@ export default function Requests() {
                                       >
                                         <button
                                           className={`action-menu-button ${isRecentlyAdded ? "success" : ""}`}
+                                    aria-label={isRecentlyAdded ? "Added to your queue" : "Request this song"}
                                           onClick={(e) => {
                                             if (isRecentlyAdded || isAdding)
                                               return;
@@ -3743,11 +3597,11 @@ export default function Requests() {
                                               <span>Adding</span>
                                             </>
                                           ) : isRecentlyAdded ? (
-                                            <span>✓</span>
+                                            <span className="material-symbols-rounded" aria-hidden="true">check</span>
                                           ) : hasMultipleVersions ? (
-                                            <span>☰</span>
+                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                           ) : (
-                                            <span>⋯</span>
+                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                           )}
                                         </button>
                                         {actionMenuOpen === trackKey &&
@@ -3870,7 +3724,7 @@ export default function Requests() {
                                                       </span>
                                                       <span className="action-menu-item-description">
                                                         {hasMultipleVersions
-                                                          ? `Choose from ${group.versions.length} versions`
+                                                          ? `Choose from ${formatCount(group.versions.length, "version")}`
                                                           : "Request this song"}
                                                       </span>
                                                     </div>
@@ -3994,7 +3848,7 @@ export default function Requests() {
                                           marginTop: 2,
                                         }}
                                       >
-                                        📀 {versions.length} versions
+                                        📀 {formatCount(versions.length, "version")}
                                       </div>
                                     )}
                                   </div>
@@ -4071,7 +3925,7 @@ export default function Requests() {
                                     fontWeight: 400,
                                   }}
                                 >
-                                  ({karaokeNerdsRows.length} versions)
+                                  ({formatCount(karaokeNerdsRows.length, "version")})
                                 </span>
                               )}
                             </span>
@@ -4112,7 +3966,7 @@ export default function Requests() {
                                       <div className="result-meta">
                                         {hasMultipleVersions ? (
                                           <span className="meta-tag">
-                                            🎵 {group.versions.length} versions
+                                            🎵 {formatCount(group.versions.length, "version")}
                                           </span>
                                         ) : firstTrack.brand ? (
                                           <span className="meta-tag brand">
@@ -4133,6 +3987,7 @@ export default function Requests() {
                                       >
                                         <button
                                           className={`action-menu-button karaoke-nerds ${isRecentlyAdded ? "success" : ""}`}
+                                    aria-label={isRecentlyAdded ? "Added to your queue" : "Request this song"}
                                           onClick={(e) => {
                                             if (isRecentlyAdded || isAdding)
                                               return;
@@ -4158,11 +4013,11 @@ export default function Requests() {
                                               <span>Adding</span>
                                             </>
                                           ) : isRecentlyAdded ? (
-                                            <span>✓</span>
+                                            <span className="material-symbols-rounded" aria-hidden="true">check</span>
                                           ) : hasMultipleVersions ? (
-                                            <span>☰</span>
+                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                           ) : (
-                                            <span>⋯</span>
+                                            <span className="material-symbols-rounded" aria-hidden="true">add</span>
                                           )}
                                         </button>
                                         {actionMenuOpen === trackKey &&
@@ -4245,7 +4100,7 @@ export default function Requests() {
                                                       </span>
                                                       <span className="action-menu-item-description">
                                                         {hasMultipleVersions
-                                                          ? `Choose from ${group.versions.length} versions`
+                                                          ? `Choose from ${formatCount(group.versions.length, "version")}`
                                                           : "Request this song"}
                                                       </span>
                                                     </div>
@@ -4429,7 +4284,7 @@ export default function Requests() {
             style={{
               position: "fixed",
               inset: 0,
-              background: "rgba(0,0,0,0.7)",
+              background: "var(--color-overlay)",
               zIndex: 200,
             }}
             onClick={() => setVersionPicker(null)}
@@ -4444,7 +4299,7 @@ export default function Requests() {
               background: "var(--color-bg-card)",
               borderRadius: 16,
               border: "1px solid var(--color-border)",
-              boxShadow: "0 16px 64px rgba(0,0,0,0.6)",
+              boxShadow: "0 16px 64px var(--color-shadow)",
               width: "min(420px, 92vw)",
               maxHeight: "80vh",
               display: "flex",
@@ -4585,7 +4440,7 @@ export default function Requests() {
             style={{
               position: "fixed",
               inset: 0,
-              background: "rgba(0,0,0,0.7)",
+              background: "var(--color-overlay)",
               zIndex: 200,
             }}
             onClick={() => setKnVersionPicker(null)}
@@ -4600,7 +4455,7 @@ export default function Requests() {
               background: "var(--color-bg-card)",
               borderRadius: 16,
               border: "1px solid var(--color-border)",
-              boxShadow: "0 16px 64px rgba(0,0,0,0.6)",
+              boxShadow: "0 16px 64px var(--color-shadow)",
               width: "min(420px, 92vw)",
               maxHeight: "80vh",
               display: "flex",

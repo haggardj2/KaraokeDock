@@ -15,6 +15,12 @@ import { createBreakMusicPlayback, shouldRunBreakMusic } from "../breakMusicPlay
 import { observePlayerViewport } from "../playerViewport";
 import "./Player.css";
 import PlayerBackgroundImage from "../components/PlayerBackgroundImage";
+import {
+  DEFAULT_PLAYER_BACKGROUND_SETTINGS,
+  getApiAssetUrl,
+  normalizePlayerBackgroundSettings,
+  type PlayerBackgroundSettings,
+} from "../playerBackground";
 import { keepPlayerScreenAwake } from "../playerWakeLock";
 
 type QItem = {
@@ -58,27 +64,6 @@ type RotationScrollerSinger = {
   position: number;
   hasQueuedSong: boolean;
   profile: SingerProfile;
-};
-
-type PlayerBackgroundMode = "default" | "image" | "slideshow";
-type PlayerBackgroundTransitionStyle = "fade" | "slide" | "zoom";
-
-type PlayerBackgroundSlideshowImage = {
-  id: string;
-  filename?: string | null;
-  imageUrl: string;
-  updatedAt: string;
-};
-
-type PlayerBackgroundSettings = {
-  mode: PlayerBackgroundMode;
-  imageUrl: string | null;
-  imageFilename?: string | null;
-  updatedAt: string | null;
-  slideshowImages: PlayerBackgroundSlideshowImage[];
-  slideshowTransitionStyle: PlayerBackgroundTransitionStyle;
-  slideshowIntervalSeconds: number;
-  slideshowTransitionDurationSeconds: number;
 };
 
 function getDefaultRequestsUrl(): string {
@@ -207,17 +192,6 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   showProfilePictures: true,
 };
 
-const DEFAULT_PLAYER_BACKGROUND_SETTINGS: PlayerBackgroundSettings = {
-  mode: "default",
-  imageUrl: null,
-  imageFilename: null,
-  updatedAt: null,
-  slideshowImages: [],
-  slideshowTransitionStyle: "fade",
-  slideshowIntervalSeconds: 10,
-  slideshowTransitionDurationSeconds: 3,
-};
-
 function parseBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
@@ -275,67 +249,6 @@ function normalizeOverlaySettings(value: unknown): OverlaySettings {
       DEFAULT_OVERLAY_SETTINGS.showProfilePictures,
     ),
   };
-}
-
-function normalizePlayerBackgroundSettings(
-  value: unknown,
-): PlayerBackgroundSettings {
-  if (!value || typeof value !== "object") {
-    return DEFAULT_PLAYER_BACKGROUND_SETTINGS;
-  }
-  const settings = value as Partial<PlayerBackgroundSettings>;
-  const imageUrl =
-    typeof settings.imageUrl === "string" && settings.imageUrl.trim()
-      ? settings.imageUrl
-      : null;
-  const slideshowImages = Array.isArray(settings.slideshowImages)
-    ? settings.slideshowImages.filter(
-        (image): image is PlayerBackgroundSlideshowImage =>
-          !!image &&
-          typeof image.id === "string" &&
-          (image.filename == null || typeof image.filename === "string") &&
-          typeof image.imageUrl === "string" &&
-          typeof image.updatedAt === "string",
-      )
-    : [];
-  const mode =
-    settings.mode === "image" && imageUrl
-      ? "image"
-      : settings.mode === "slideshow" && slideshowImages.length > 0
-        ? "slideshow"
-        : "default";
-  const interval = Number(settings.slideshowIntervalSeconds);
-  const transitionDuration = Number(settings.slideshowTransitionDurationSeconds);
-  return {
-    mode,
-    imageUrl,
-    imageFilename:
-      typeof settings.imageFilename === "string" && settings.imageFilename.trim()
-        ? settings.imageFilename
-        : null,
-    updatedAt:
-      typeof settings.updatedAt === "string" && settings.updatedAt.trim()
-        ? settings.updatedAt
-        : null,
-    slideshowImages,
-    slideshowTransitionStyle:
-      settings.slideshowTransitionStyle === "slide" ||
-      settings.slideshowTransitionStyle === "zoom"
-        ? settings.slideshowTransitionStyle
-        : "fade",
-    slideshowIntervalSeconds: Number.isFinite(interval)
-      ? Math.max(3, Math.min(300, Math.round(interval)))
-      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowIntervalSeconds,
-    slideshowTransitionDurationSeconds: Number.isFinite(transitionDuration)
-      ? Math.max(0.5, Math.min(10, Math.round(transitionDuration * 10) / 10))
-      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowTransitionDurationSeconds,
-  };
-}
-
-function getApiAssetUrl(pathOrUrl: string | null): string | null {
-  if (!pathOrUrl) return null;
-  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
-  return `${API_BASE}${pathOrUrl}`;
 }
 
 function getSingerTickerToken(name: string | null | undefined, short = false): string {

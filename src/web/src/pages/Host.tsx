@@ -7,10 +7,33 @@ import SingerAvatar, { type SingerProfile, type ProfileCrop } from '../component
 import ProfileDialog from '../components/ProfileDialog'
 import ProfileImageEditor from '../components/ProfileImageEditor'
 import QueueDragHandle from '../components/QueueDragHandle'
-import QueueSongText from '../components/QueueSongText'
+import ScrollingText from '../components/ScrollingText'
 import { attachTouchQueueReorder } from '../touch-queue-reorder'
 import { matchesBreakTrack, optionalPlaylistId, samePlaylistOrder, type BreakTrack } from '../break-playlist'
 import type { OverlaySettings } from '../components/QueueOverlay'
+import { THEMES, applyTheme, clearTheme, isThemeId, type ThemeId } from '../theme'
+import { useStaffTheme } from '../useStaffTheme'
+import MaterialIcon, { renderStatusMessage } from '../components/MaterialIcon'
+import { downloadJsonFile, readJsonFile, safeHistoryFilename } from '../utils/jsonFiles'
+import {
+  DEFAULT_PLAYER_BACKGROUND_SETTINGS,
+  PLAYER_BACKGROUND_IMAGE_MAX_BYTES,
+  PLAYER_BACKGROUND_IMAGE_TYPES,
+  PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS,
+  PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS,
+  PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS,
+  PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS,
+  getApiAssetUrl,
+  isPlayerBackgroundLibraryImage,
+  normalizePlayerBackgroundSettings,
+  type PlayerBackgroundLibraryImage,
+  type PlayerBackgroundMode,
+  type PlayerBackgroundSettings,
+  type PlayerBackgroundSlideshowImage,
+  type PlayerBackgroundTransitionStyle,
+} from '../playerBackground'
+import { AppBarContent } from '../appBarSlot'
+import './Host.css'
 import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, singerPlaybackAction, getSingerDisplaySong, type PlayerPlaybackState } from '../playerPlayback'
 
 type Row = {
@@ -153,88 +176,6 @@ type OidcPublicConfig = {
   passwordLoginEnabled: boolean
 }
 
-type PlayerBackgroundMode = 'default' | 'image' | 'slideshow'
-type PlayerBackgroundTransitionStyle = 'fade' | 'slide' | 'zoom'
-
-type PlayerBackgroundSlideshowImage = {
-  id: string
-  filename?: string | null
-  imageUrl: string
-  updatedAt: string
-}
-
-type PlayerBackgroundLibraryImage = {
-  filename: string
-  imageUrl: string
-  updatedAt: string
-  size: number
-}
-
-type PlayerBackgroundSettings = {
-  mode: PlayerBackgroundMode
-  imageUrl: string | null
-  imageFilename: string | null
-  updatedAt: string | null
-  slideshowImages: PlayerBackgroundSlideshowImage[]
-  slideshowTransitionStyle: PlayerBackgroundTransitionStyle
-  slideshowIntervalSeconds: number
-  slideshowTransitionDurationSeconds: number
-}
-
-const PLAYER_BACKGROUND_IMAGE_MAX_BYTES = 8 * 1024 * 1024
-const PLAYER_BACKGROUND_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
-const PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS = 3
-const PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS = 300
-const PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS = 0.5
-const PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS = 10
-
-const DEFAULT_PLAYER_BACKGROUND_SETTINGS: PlayerBackgroundSettings = {
-  mode: 'default',
-  imageUrl: null,
-  imageFilename: null,
-  updatedAt: null,
-  slideshowImages: [],
-  slideshowTransitionStyle: 'fade',
-  slideshowIntervalSeconds: 10,
-  slideshowTransitionDurationSeconds: 3,
-}
-
-function MaterialIcon({
-  name,
-  className = '',
-  style,
-}: {
-  name: string
-  className?: string
-  style?: React.CSSProperties
-}) {
-  return (
-    <span className={`material-symbols-rounded${className ? ` ${className}` : ''}`} aria-hidden="true" style={style}>
-      {name}
-    </span>
-  )
-}
-
-function renderStatusMessage(message: string) {
-  if (message.startsWith('⚠️')) {
-    return (
-      <>
-        <MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-        {message.replace(/^⚠️\s*/, '')}
-      </>
-    )
-  }
-  if (message.startsWith('✔')) {
-    return (
-      <>
-        <MaterialIcon name="check_circle" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-        {message.replace(/^✔\s*/, '')}
-      </>
-    )
-  }
-  return message
-}
-
 type BreakPlaylist = {
   id: number
   name: string
@@ -267,41 +208,9 @@ const DEFAULT_BREAK_COLUMNS: BreakColumnVisibility = {
 
 const BREAK_COLUMNS_STORAGE_KEY = 'host.breakMusicColumns'
 const HOST_TOP_COLLAPSED_STORAGE_KEY = 'host.topCardCollapsed'
-const HOST_CONTROL_BUTTON_COUNT = 6
-
-function downloadJsonFile(filename: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
-}
-
-function safeHistoryFilename(name: string): string {
-  return `${name.trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'singer-history'}.kd`
-}
 
 function getKdSingerDisplayName(singer: SingerHistoryKdSinger, index: number): string {
   return singer.singer?.displayName?.trim() || `Singer ${index + 1}`
-}
-
-function readJsonFile(file: File): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      try {
-        resolve(JSON.parse(String(reader.result ?? '')))
-      } catch (error) {
-        reject(error)
-      }
-    }
-    reader.onerror = () => reject(reader.error ?? new Error('Could not read file'))
-    reader.readAsText(file)
-  })
 }
 
 function getKdSingerAvatarUrl(singer: SingerHistoryKdSinger): string | null {
@@ -333,80 +242,6 @@ function getInitialBreakColumns(): BreakColumnVisibility {
 function getInitialHostTopCollapsed(): boolean {
   if (typeof window === 'undefined') return false
   return window.localStorage.getItem(HOST_TOP_COLLAPSED_STORAGE_KEY) === 'true'
-}
-
-function normalizePlayerBackgroundSettings(value: unknown): PlayerBackgroundSettings {
-  if (!value || typeof value !== 'object') {
-    return DEFAULT_PLAYER_BACKGROUND_SETTINGS
-  }
-  const settings = value as Partial<PlayerBackgroundSettings>
-  const imageUrl = typeof settings.imageUrl === 'string' && settings.imageUrl.trim()
-    ? settings.imageUrl
-    : null
-  const slideshowImages = Array.isArray(settings.slideshowImages)
-    ? settings.slideshowImages.filter((image): image is PlayerBackgroundSlideshowImage => (
-      !!image &&
-      typeof image.id === 'string' &&
-      (image.filename == null || typeof image.filename === 'string') &&
-      typeof image.imageUrl === 'string' &&
-      typeof image.updatedAt === 'string'
-    ))
-    : []
-  const mode =
-    settings.mode === 'image' && imageUrl
-      ? 'image'
-      : settings.mode === 'slideshow' && slideshowImages.length > 0
-        ? 'slideshow'
-        : 'default'
-  const interval = Number(settings.slideshowIntervalSeconds)
-  const transitionDuration = Number(settings.slideshowTransitionDurationSeconds)
-  return {
-    mode,
-    imageUrl,
-    imageFilename: typeof settings.imageFilename === 'string' && settings.imageFilename.trim()
-      ? settings.imageFilename
-      : null,
-    updatedAt: typeof settings.updatedAt === 'string' && settings.updatedAt.trim()
-      ? settings.updatedAt
-      : null,
-    slideshowImages,
-    slideshowTransitionStyle:
-      settings.slideshowTransitionStyle === 'slide' || settings.slideshowTransitionStyle === 'zoom'
-        ? settings.slideshowTransitionStyle
-        : 'fade',
-    slideshowIntervalSeconds: Number.isFinite(interval)
-      ? Math.max(
-        PLAYER_BACKGROUND_SLIDESHOW_MIN_INTERVAL_SECONDS,
-        Math.min(PLAYER_BACKGROUND_SLIDESHOW_MAX_INTERVAL_SECONDS, Math.round(interval)),
-      )
-      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowIntervalSeconds,
-    slideshowTransitionDurationSeconds: Number.isFinite(transitionDuration)
-      ? Math.max(
-        PLAYER_BACKGROUND_SLIDESHOW_MIN_TRANSITION_DURATION_SECONDS,
-        Math.min(
-          PLAYER_BACKGROUND_SLIDESHOW_MAX_TRANSITION_DURATION_SECONDS,
-          Math.round(transitionDuration * 10) / 10,
-        ),
-      )
-      : DEFAULT_PLAYER_BACKGROUND_SETTINGS.slideshowTransitionDurationSeconds,
-  }
-}
-
-function getApiAssetUrl(pathOrUrl: string | null): string | null {
-  if (!pathOrUrl) return null
-  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl
-  return `${API_BASE}${pathOrUrl}`
-}
-
-function isPlayerBackgroundLibraryImage(value: unknown): value is PlayerBackgroundLibraryImage {
-  if (!value || typeof value !== 'object') return false
-  const image = value as Partial<PlayerBackgroundLibraryImage>
-  return (
-    typeof image.filename === 'string' &&
-    typeof image.imageUrl === 'string' &&
-    typeof image.updatedAt === 'string' &&
-    typeof image.size === 'number'
-  )
 }
 
 export default function Host() {
@@ -462,6 +297,10 @@ export default function Host() {
   const [showPlayerWindowControl, setShowPlayerWindowControl] = useState(false)
   const [showAccountManagement, setShowAccountManagement] = useState(false)
   const [hostTopCollapsed, setHostTopCollapsed] = useState(() => getInitialHostTopCollapsed())
+  const [themeId] = useStaffTheme()
+  const [showHostMenu, setShowHostMenu] = useState(false)
+  const [requestTheme, setRequestTheme] = useState<ThemeId | null>(null)
+  const [savingRequestTheme, setSavingRequestTheme] = useState(false)
   const [changingPassword, setChangingPassword] = useState(false)
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -659,34 +498,6 @@ export default function Host() {
       window.history.replaceState({}, '', window.location.pathname)
     }
 
-    document. documentElement.style.cssText = `
-      --color-bg-primary: #0a0a0f;
-      --color-bg-secondary: #16161d;
-      --color-bg-card: #1d1d27;
-      --color-bg-hover: #252533;
-      --color-accent: #6366f1;
-      --color-accent-hover: #7c7ff3;
-      --color-success: #10b981;
-      --color-warning: #f59e0b;
-      --color-danger: #ef4444;
-      --color-text-primary: #ffffff;
-      --color-text-secondary: #a1a1aa;
-      --color-text-muted: #71717a;
-      --color-border: rgba(255, 255, 255, 0.08);
-      --color-border-focus: rgba(99, 102, 241, 0.5);
-    `;
-
-    document.body.style.cssText = `
-      background: linear-gradient(135deg, #0a0a0f 0%, #16161d 100%);
-      color: #ffffff;
-      margin: 0;
-      padding: 0;
-      min-height: 100vh;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    `;
-
     refreshQueue()
     refreshQueueState()
     api('/api/auth/oidc/config')
@@ -694,8 +505,6 @@ export default function Host() {
       .catch(() => {})
 
     return () => {
-      document.documentElement.style.cssText = ''
-      document.body.style.cssText = ''
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
       if (manualRequestSearchTimeoutRef.current) clearTimeout(manualRequestSearchTimeoutRef.current)
       if (breakVolumeSaveTimeoutRef.current) clearTimeout(breakVolumeSaveTimeoutRef.current)
@@ -1284,6 +1093,49 @@ export default function Host() {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(BREAK_COLUMNS_STORAGE_KEY, JSON.stringify(breakColumns))
   }, [breakColumns])
+
+  useEffect(() => {
+    applyTheme(themeId)
+  }, [themeId])
+
+  useEffect(() => clearTheme, [])
+
+  useEffect(() => {
+    if (!showPlayerWindowControl) return
+    api('/api/settings/public')
+      .then((settings) => setRequestTheme(isThemeId(settings?.['requests.theme']) ? settings['requests.theme'] : 'midnight'))
+      .catch((err) => console.error('Failed to load request page theme:', err))
+  }, [showPlayerWindowControl])
+
+  async function updateRequestTheme(theme: ThemeId) {
+    const previous = requestTheme
+    setRequestTheme(theme)
+    setSavingRequestTheme(true)
+    try {
+      await api('/api/host/settings/request-theme', { method: 'PUT', headers, body: JSON.stringify({ theme }) })
+    } catch (err) {
+      console.error('Failed to save request page theme:', err)
+      setRequestTheme(previous)
+      setBanner('⚠️ Could not save the request page theme')
+    } finally {
+      setSavingRequestTheme(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!showHostMenu) return
+    const close = (event: Event) => {
+      if (event instanceof KeyboardEvent && event.key !== 'Escape') return
+      if (event.target instanceof Element && event.target.closest('.host-transport-extra')) return
+      setShowHostMenu(false)
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', close)
+    }
+  }, [showHostMenu])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -2041,6 +1893,20 @@ export default function Host() {
     )
   }
 
+  function renderSearchResultText(track: { title?: string | null; artist?: string | null }, tag?: { text: string; brand?: boolean }) {
+    const title = track.title || 'Unknown'
+    const artist = track.artist || 'Unknown'
+    return (
+      <div className="search-result-text">
+        <ScrollingText className="search-result-title" label={title}>{title}</ScrollingText>
+        <div className="search-result-meta">
+          <ScrollingText label={artist}>{artist}</ScrollingText>
+          {tag && <span className={`search-result-tag${tag.brand ? ' brand' : ''}`}>{tag.text}</span>}
+        </div>
+      </div>
+    )
+  }
+
   function closeReplaceModal() {
     setReplacingId(null)
     setSearchQuery('')
@@ -2099,7 +1965,6 @@ export default function Host() {
       }
     }
   }
-
 
   useEffect(() => {
     api('/api/autoplay/settings')
@@ -3210,1219 +3075,29 @@ function closeDetails(e: React.SyntheticEvent) {
     : (currentPlaying?.duration_ms
       ? currentPlaying.duration_ms / 1000
       : 210)
+  const progressPercent = currentPlaying && estimatedDuration > 0 ? Math.min(100, (currentTime / estimatedDuration) * 100) : 0
+  const queuedSongCount = queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length
 
   return (
     <div className="host-page">
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
 
-        @keyframes fadeInUp {
-          from { opacity: 0; transform: translateY(20px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes slideIn {
-          from { transform: translateX(-10px); opacity: 0; }
-          to { transform: translateX(0); opacity: 1; }
-        }
-
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-
-        @keyframes progressPulse {
-          0% { opacity: 1; }
-          50% { opacity: 0.7; }
-          100% { opacity: 1; }
-        }
-
-        .host-page {
-          min-height: 100vh;
-          padding: 16px;
-          padding-bottom: env(safe-area-inset-bottom, 16px);
-          animation: fadeInUp 0.5s ease;
-        }
-
-        .material-symbols-rounded {
-          font-family: 'Material Symbols Rounded';
-          font-weight: normal;
-          font-style: normal;
-          line-height: 1;
-          letter-spacing: normal;
-          text-transform: none;
-          display: inline-block;
-          white-space: nowrap;
-          word-wrap: normal;
-          direction: ltr;
-          -webkit-font-feature-settings: 'liga';
-          -webkit-font-smoothing: antialiased;
-        }
-
-        .container {
-          max-width: 1200px;
-          margin: 0 auto;
-        }
-
-        .header {
-          text-align: center;
-          margin-bottom: 32px;
-          animation: fadeInUp 0.6s ease;
-        }
-
-        .header-title {
-          font-size: clamp(28px, 5vw, 40px);
-          font-weight: 700;
-          margin: 0 0 8px 0;
-          background: linear-gradient(135deg, #6366f1 0%, #10b981 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-        }
-
-        .card {
-          background: var(--color-bg-card);
-          border: 1px solid var(--color-border);
-          border-radius: 20px;
-          padding: 24px;
-          margin-bottom: 20px;
-          box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
-          backdrop-filter: blur(10px);
-          animation: fadeInUp 0.6s ease backwards;
-          overflow: hidden;
-        }
-
-        .status-bar {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(99, 102, 241, 0.1));
-          border: 1px solid rgba(16, 185, 129, 0.3);
-        }
-
-        .banner {
-          background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(245, 158, 11, 0.15));
-          border: 1px solid rgba(239, 68, 68, 0.3);
-          border-radius: 16px;
-          padding: 14px 20px;
-          margin-bottom: 20px;
-          font-weight: 500;
-          animation: slideIn 0.3s ease;
-        }
-
-        .now-playing {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(99, 102, 241, 0.1));
-          border: 1px solid rgba(16, 185, 129, 0.3);
-          position: relative;
-          overflow: hidden;
-          }
-
-        .progress-bar {
-          height: 8px;
-          background: rgba(255, 255, 255, 0.1);
-          border-radius: 100px;
-          overflow: hidden;
-          margin-top: 12px;
-          position: relative;
-        }
-
-        .progress-fill {
-          height: 100%;
-          background: linear-gradient(90deg, #10b981, #6366f1);
-          border-radius: 100px;
-          transition: width 1s linear;
-          position: relative;
-          box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
-        }
-
-        .progress-fill::after {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
-          animation: shimmer 2s ease infinite;
-        }
-
-        @keyframes shimmer {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(100%); }
-        }
-
-        .controls-grid {
-          display: grid;
-          gap: 12px;
-        }
-
-        .host-top-card {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .host-top-card-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-        }
-
-        .host-top-card-content {
-          display: flex;
-          flex-direction: row;
-          gap: 16px;
-          align-items: stretch;
-        }
-
-        .host-top-section {
-          flex: 1 1 0;
-          min-width: 0;
-        }
-
-        .host-section-divider {
-          width: 1px;
-          align-self: stretch;
-          background: var(--color-border);
-          margin: 0 2px;
-          flex: 0 0 auto;
-        }
-
-        .host-controls-card .control-btn {
-          padding: 8px 10px;
-          min-width: 40px;
-          font-size: 16px;
-          min-height: 36px;
-        }
-
-        .host-controls-card {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .host-control-buttons {
-          display: flex;
-          gap: 8px;
-          flex-wrap: nowrap;
-          align-items: center;
-        }
-
-        .host-control-buttons .control-btn {
-          flex: 0 0 40px;
-        }
-
-        .now-playing-box {
-          padding: 12px;
-          border-radius: 14px;
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          overflow: visible;
-          min-height: 98px;
-          box-sizing: border-box;
-        }
-
-        .now-playing-box.now-playing {
-          padding: 12px;
-          border-radius: 14px;
-          overflow: visible;
-        }
-
-        .control-btn {
-          padding: 14px;
-          background: var(--color-bg-secondary);
-          border: 2px solid var(--color-border);
-          border-radius: 14px;
-          color: var(--color-text-primary);
-          font-weight: 600;
-          font-size: 14px;
-          cursor: pointer;
-          transition: all 0. 3s ease;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 8px;
-        }
-
-        .control-btn:hover:not(:disabled) {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          transform: translateY(-2px);
-          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
-        }
-
-        .control-btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .control-btn. primary {
-          background: linear-gradient(135deg, #6366f1, #8b5cf6);
-          border: none;
-          color: white;
-        }
-
-        .control-btn. danger {
-          background: linear-gradient(135deg, #ef4444, #dc2626);
-          border: none;
-          color: white;
-        }
-
-        .control-btn.success {
-          background: linear-gradient(135deg, #10b981, #059669);
-          border: none;
-          color: white;
-        }
-
-        .toggle-group {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .toggle {
-          position: relative;
-          width: 48px;
-          height: 24px;
-        }
-
-        .toggle input {
-          opacity: 0;
-          width: 0;
-          height: 0;
-        }
-
-        .toggle-slider {
-          position: absolute;
-          cursor: pointer;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: var(--color-bg-hover);
-          transition: 0.4s;
-          border-radius: 100px;
-        }
-
-        . toggle-slider::before {
-          position: absolute;
-          content: "";
-          height: 16px;
-          width: 16px;
-          left: 4px;
-          bottom: 4px;
-          background: white;
-          transition: 0.4s;
-          border-radius: 50%;
-        }
-
-        . toggle input:checked + .toggle-slider {
-          background: var(--color-success);
-        }
-
-        .toggle input:checked + .toggle-slider::before {
-          transform: translateX(24px);
-        }
-
-        .queue-item {
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 16px;
-          padding: 16px;
-          margin-bottom: 12px;
-          transition: all 0.3s ease;
-          cursor: move;
-        }
-
-        .queue-item:hover {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          transform: translateX(4px);
-        }
-
-        . queue-item.playing {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(99, 102, 241, 0.1));
-          border-color: rgba(16, 185, 129, 0.3);
-        }
-
-        .queue-item. drag-over {
-          background: rgba(99, 102, 241, 0.2);
-          border-color: var(--color-accent);
-        }
-
-        .queue-item-singer,
-        .queue-item-title,
-        .queue-item-artist {
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-
-        .modal-backdrop {
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(0, 0, 0, 0.8);
-          backdrop-filter: blur(4px);
-          z-index: 999;
-        }
-
-        /* Queue item actions: desktop buttons vs mobile context menu */
-        .queue-item-row {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 12px;
-        }
-
-        .queue-item-actions {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          flex: 0 0 auto;
-        }
-
-        .queue-item-singer {
-          font-size: 0.9rem;
-          font-weight: 600;
-          opacity: 0.95;
-          margin-bottom: 2px;
-        }
-
-        .queue-item-title {
-          font-size: 1.05rem;
-          font-weight: 500;
-          opacity: 0.9;
-          line-height: 1.2;
-        }
-
-        .queue-item-artist {
-          font-size: 0.85rem;
-          font-weight: 400;
-          opacity: 0.7;
-          margin-top: 2px;
-        }
-
-        .queue-item.playing .queue-item-title {
-          color: #a5b4fc;
-          font-weight: 600;
-        }
-
-
-        .queue-item-actions.mobile {
-          display: none;
-        }
-
-        .singer-queue-header,
-        .singer-queue-tools {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          flex-wrap: wrap;
-        }
-
-        .singer-queue-header {
-          justify-content: space-between;
-          margin-bottom: 20px;
-        }
-
-        .singer-queue-tools .stat-pill {
-          white-space: nowrap;
-        }
-
-        .singer-queue-row {
-          display: grid;
-          grid-template-columns: 32px 44px minmax(0, 1fr) auto;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .singer-queue-entry {
-          padding: 14px 16px;
-        }
-
-        .singer-queue-avatar {
-          --singer-avatar-size: 44px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .singer-queue-info {
-          min-width: 0;
-        }
-
-        .singer-queue-name {
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px;
-          font-size: 16px;
-          font-weight: 700;
-          overflow-wrap: anywhere;
-        }
-
-        .singer-queue-name > span:not(.singer-queue-name-text) {
-          white-space: nowrap;
-        }
-
-        .singer-queue-song {
-          margin-top: 2px;
-          font-size: 13px;
-          line-height: 1.5;
-          color: var(--color-text-secondary);
-          overflow-wrap: anywhere;
-        }
-
-        .singer-queue-stats {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 6px 16px;
-          margin-top: 4px;
-          font-size: 12px;
-          color: var(--color-text-muted);
-        }
-
-        .singer-queue-stats > span {
-          white-space: nowrap;
-        }
-
-        .singer-queue-actions {
-          display: flex;
-          gap: 6px;
-        }
-
-        .queue-drag-handle {
-          -webkit-touch-callout: none;
-        }
-
-        @media (pointer: coarse) {
-          [data-singer-drag-id],
-          [data-song-drag-id] {
-            -webkit-touch-callout: none;
-            -webkit-user-select: none;
-            user-select: none;
-          }
-        }
-
-        .queue-drag-handle:focus-visible {
-          outline: 2px solid var(--color-accent);
-          outline-offset: 3px;
-        }
-
-        @media (pointer: coarse) {
-          .queue-drag-handle {
-            min-width: 44px;
-            min-height: 44px;
-          }
-
-          .singer-queue-row {
-            grid-template-columns: 44px 44px minmax(0, 1fr) auto;
-          }
-        }
-
-        .mobile-actions-menu {
-          position: relative;
-        }
-
-        .mobile-actions-menu > summary {
-          list-style: none;
-        }
-        .mobile-actions-menu > summary::-webkit-details-marker {
-          display: none;
-        }
-
-        .mobile-actions-dropdown {
-          position: absolute;
-          right: 0;
-          bottom: calc(100% + 12px);
-          display: flex;
-          gap: 8px;
-          padding: 10px;
-          border-radius: 14px;
-          border: 1px solid var(--color-border);
-          background: var(--color-bg-secondary);
-          box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-          z-index: 50;
-        }
-
-        @media (max-width: 640px) {
-          .singer-queue-card {
-            padding: 12px;
-          }
-
-          .singer-queue-header {
-            margin-bottom: 10px;
-          }
-
-          .singer-queue-entry {
-            padding: 8px;
-          }
-
-          .singer-queue-tools {
-            gap: 8px;
-          }
-
-          .singer-queue-row {
-            grid-template-columns: 44px minmax(0, 1fr) 44px;
-            grid-template-rows: minmax(44px, auto) minmax(40px, auto);
-            gap: 4px 8px;
-          }
-
-          .singer-queue-row > .queue-drag-handle {
-            grid-column: 1;
-            grid-row: 1;
-            width: 44px !important;
-            height: 44px !important;
-            font-size: 12px !important;
-            background-clip: content-box !important;
-            padding: 6px !important;
-            box-sizing: border-box;
-          }
-
-          .singer-queue-avatar {
-            --singer-avatar-size: 30px;
-            grid-column: 1;
-            grid-row: 2;
-          }
-
-          .singer-queue-info {
-            grid-column: 2;
-            grid-row: 1 / 3;
-          }
-
-          .singer-queue-name {
-            font-size: 14px;
-            line-height: 1.25;
-            gap: 4px;
-          }
-
-          .singer-queue-name-text {
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-            white-space: normal !important;
-          }
-
-          .singer-queue-song,
-          .singer-queue-stats {
-            margin-top: 4px;
-            font-size: 11px;
-          }
-
-          .singer-queue-stats {
-            gap: 4px 10px;
-          }
-
-          .singer-queue-last-sang,
-          .singer-queue-song-prefix {
-            display: none;
-          }
-
-          .singer-queue-actions {
-            grid-column: 3;
-            grid-row: 1 / 3;
-            flex-direction: column;
-            gap: 0;
-          }
-
-          .singer-queue-actions .control-btn {
-            width: 44px;
-            min-width: 44px;
-            min-height: 44px;
-            padding: 0 !important;
-            border: 0;
-            background: transparent;
-          }
-
-          .queue-item-actions.desktop {
-            display: none;
-          }
-          .queue-item-actions.mobile {
-            display: flex;
-            justify-content: flex-end;
-          }
-        }
-
-        .modal {
-          position: fixed;
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          background: var(--color-bg-card);
-          border: 1px solid var(--color-border);
-          border-radius: 20px;
-          padding: 24px;
-          z-index: 1000;
-          max-width: 600px;
-          width: 90%;
-          max-height: 85vh;
-          overflow: hidden;
-          box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
-          display: flex;
-          flex-direction: column;
-        }
-
-        @media (min-width: 769px) {
-          .player-settings-scroll {
-            margin-right: -8px;
-            padding-right: 12px;
-            scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
-            scrollbar-width: thin;
-          }
-
-          .player-settings-scroll::-webkit-scrollbar {
-            width: 9px;
-          }
-
-          .player-settings-scroll::-webkit-scrollbar-track {
-            background: transparent;
-          }
-
-          .player-settings-scroll::-webkit-scrollbar-thumb {
-            background: rgba(148, 163, 184, 0.45);
-            background-clip: content-box;
-            border: 2px solid transparent;
-            border-radius: 999px;
-          }
-
-          .player-settings-scroll::-webkit-scrollbar-thumb:hover {
-            background: rgba(148, 163, 184, 0.72);
-            background-clip: content-box;
-          }
-        }
-
-        .break-manager-modal {
-          width: min(96vw, 1180px);
-          max-width: 1180px;
-          max-height: 90vh;
-          height: min(90vh, 860px);
-        }
-
-        .break-manager-body {
-          min-height: 0;
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .break-manager-toolbar {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-          margin-bottom: 16px;
-        }
-
-        .break-manager-actions {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .break-manager-layout {
-          display: flex;
-          min-height: 0;
-          flex: 1;
-          overflow: hidden;
-        }
-
-        .break-manager-panel {
-          min-width: 0;
-          display: flex;
-          flex-direction: column;
-          min-height: 0;
-        }
-
-        .break-manager-splitter {
-          width: 10px;
-          min-width: 10px;
-          cursor: col-resize;
-          border-radius: 8px;
-          background: transparent;
-          position: relative;
-        }
-
-        .break-manager-splitter::before {
-          content: '';
-          position: absolute;
-          left: 4px;
-          top: 0;
-          bottom: 0;
-          width: 2px;
-          background: var(--color-border);
-        }
-
-        .break-manager-card {
-          border: 1px solid var(--color-border);
-          border-radius: 12px;
-          background: var(--color-bg-secondary);
-          min-height: 0;
-        }
-
-        .break-playlist-row {
-          display: grid;
-          grid-template-columns: 28px minmax(0, 1fr) auto;
-          gap: 8px;
-          padding: 8px 10px;
-          align-items: center;
-          border-bottom: 1px solid rgba(255,255,255,0.06);
-          font-size: 13px;
-        }
-
-        .break-playlist-row.dragging {
-          opacity: 0.55;
-        }
-
-        .break-playlist-row.current {
-          background: rgba(99, 102, 241, 0.16);
-        }
-
-        .break-table-header-cell {
-          position: relative;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          min-width: 0;
-        }
-
-        .break-table-header-sort {
-          border: none;
-          background: transparent;
-          color: inherit;
-          font: inherit;
-          font-weight: 600;
-          text-align: left;
-          cursor: pointer;
-          padding: 0;
-          margin: 0;
-          min-width: 0;
-        }
-
-        .break-table-header-resizer {
-          position: absolute;
-          top: -6px;
-          right: -6px;
-          width: 12px;
-          height: calc(100% + 12px);
-          cursor: col-resize;
-        }
-
-        .break-columns-popover {
-          position: absolute;
-          top: calc(100% + 8px);
-          right: 0;
-          z-index: 10;
-          border: 1px solid var(--color-border);
-          border-radius: 12px;
-          background: var(--color-bg-secondary);
-          box-shadow: 0 10px 28px rgba(0,0,0,0.4);
-          padding: 12px;
-          min-width: 190px;
-          display: grid;
-          gap: 8px;
-        }
-
-        .modal-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 20px;
-          flex-shrink: 0;
-          min-width: 0;
-        }
-
-        .modal-header h3 {
-          margin: 0;
-          min-width: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          flex: 1;
-        }
-
-        .search-mode-toggle {
-          display: flex;
-          flex-direction: row;
-          gap: 8px;
-          background: transparent;
-          padding: 0;
-          margin-bottom: 20px;
-        }
-
-        .mode-button {
-          flex: 1;
-          padding: 12px 16px;
-          border: none;
-          border-radius: 12px;
-          background: var(--color-bg-secondary);
-          color: var(--color-text-secondary);
-          font-size: 14px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.3s ease;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          border: 1px solid var(--color-border);
-        }
-
-        .mode-button.active {
-          background: linear-gradient(135deg, #6366f1, #818cf8);
-          color: white;
-          border-color: transparent;
-          box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
-        }
-
-        .mode-button.active. karaoke-nerds {
-          background: linear-gradient(135deg, #7c3aed, #a855f7);
-          box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
-        }
-
-        . mode-button:not(.active):hover {
-          background: var(--color-bg-hover);
-          color: var(--color-text-primary);
-          border-color: var(--color-accent);
-        }
-
-        .search-input {
-          width: 100%;
-          padding: 12px 16px;
-          background: var(--color-bg-secondary);
-          border: 2px solid var(--color-border);
-          border-radius: 12px;
-          color: var(--color-text-primary);
-          font-size: 15px;
-          outline: none;
-          margin-bottom: 16px;
-          box-sizing: border-box;
-        }
-
-        .search-input:focus {
-          border-color: var(--color-accent);
-          box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
-        }
-
-        .search-results {
-          flex: 1;
-          overflow-y: auto;
-          border: 1px solid var(--color-border);
-          border-radius: 12px;
-          background: var(--color-bg-secondary);
-          margin-bottom: 16px;
-        }
-
-        .search-result {
-          padding: 12px 16px;
-          border-bottom: 1px solid var(--color-border);
-          cursor: pointer;
-          transition: all 0.3s ease;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .search-result:hover {
-          background: var(--color-bg-hover);
-        }
-
-        .search-result:last-child {
-          border-bottom: none;
-        }
-
-        .form-input {
-          width: 100%;
-          padding: 12px 16px;
-          background: var(--color-bg-secondary);
-          border: 2px solid var(--color-border);
-          border-radius: 12px;
-          color: var(--color-text-primary);
-          font-size: 15px;
-          outline: none;
-          box-sizing: border-box;
-        }
-
-        .form-input:focus {
-          border-color: var(--color-accent);
-        }
-
-        .form-group {
-          margin-bottom: 20px;
-        }
-
-        .manual-singer-suggestions {
-          position: absolute;
-          top: calc(100% + 6px);
-          left: 0;
-          right: 0;
-          z-index: 20;
-          display: flex;
-          flex-direction: column;
-          border: 1px solid var(--color-border);
-          border-radius: 12px;
-          background: var(--color-bg-secondary);
-          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-          overflow: hidden;
-        }
-
-        .manual-singer-suggestion {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          width: 100%;
-          padding: 10px 14px;
-          border: none;
-          border-bottom: 1px solid var(--color-border);
-          background: transparent;
-          color: var(--color-text-primary);
-          text-align: left;
-          cursor: pointer;
-        }
-
-        .manual-singer-suggestion:last-child {
-          border-bottom: none;
-        }
-
-        .manual-singer-suggestion:hover,
-        .manual-singer-suggestion.active {
-          background: var(--color-bg-hover);
-        }
-
-        .manual-singer-suggestion-hint {
-          font-size: 12px;
-          color: var(--color-text-secondary);
-          white-space: nowrap;
-        }
-
-        .form-label {
-          display: block;
-          font-size: 14px;
-          font-weight: 500;
-          color: var(--color-text-secondary);
-          margin-bottom: 8px;
-        }
-
-        . settings-section {
-          margin-bottom: 24px;
-          padding-bottom: 24px;
-          border-bottom: 1px solid var(--color-border);
-        }
-
-        .settings-section:last-child {
-          border-bottom: none;
-          margin-bottom: 0;
-          padding-bottom: 0;
-        }
-
-        .settings-title {
-          font-size: 16px;
-          font-weight: 600;
-          margin-bottom: 16px;
-          color: var(--color-text-primary);
-        }
-
-        .slideshow-thumb-remove {
-          opacity: 0;
-          pointer-events: none;
-        }
-
-        .slideshow-thumb:hover .slideshow-thumb-remove,
-        .slideshow-thumb:focus-within .slideshow-thumb-remove {
-          opacity: 1;
-          pointer-events: auto;
-        }
-
-        .slider-control {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        . slider {
-          flex: 1;
-          height: 6px;
-          background: var(--color-bg-secondary);
-          border-radius: 3px;
-          outline: none;
-          -webkit-appearance: none;
-        }
-
-        .slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 20px;
-          height: 20px;
-          background: var(--color-accent);
-          cursor: pointer;
-          border-radius: 50%;
-        }
-
-        .slider::-moz-range-thumb {
-          width: 20px;
-          height: 20px;
-          background: var(--color-accent);
-          cursor: pointer;
-          border-radius: 50%;
-          border: none;
-        }
-
-        .error-msg {
-          background: rgba(239, 68, 68, 0.1);
-          border: 1px solid rgba(239, 68, 68, 0.3);
-          border-radius: 10px;
-          padding: 12px 16px;
-          color: #fca5a5;
-          margin-bottom: 16px;
-        }
-
-        .loading-spinner {
-          width: 20px;
-          height: 20px;
-          border: 2px solid var(--color-border);
-          border-top-color: var(--color-accent);
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-          display: inline-block;
-        }
-
-        . stat-pill {
-          padding: 6px 14px;
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 100px;
-          font-size: 13px;
-          font-weight: 500;
-        }
-
-        @media (max-width: 768px) {
-          .host-top-card-content {
-            flex-direction: column;
-          }
-
-          .host-top-section {
-            flex: 0 1 auto;
-          }
-
-          .host-section-divider {
-            width: 100%;
-            height: 1px;
-            margin: 2px 0;
-          }
-
-          .host-control-buttons {
-            gap: 6px;
-          }
-
-          .host-control-buttons .control-btn {
-            flex: 1 1 0;
-            min-width: 0;
-            height: 38px;
-            min-height: 38px;
-            padding: 0;
-            border-radius: 10px;
-          }
-
-          .controls-grid {
-            display: flex !important;
-            flex-direction: row !important;
-            gap: 6px !important;
-            grid-template-columns: none !important;
-            justify-content: space-between !important;
-            align-items: center !important;
-          }
-
-          .controls-grid .control-btn {
-            width: 44px !important;
-            height: 44px !important;
-            min-width: 0 !important;
-            padding: 0 !important;
-            flex: 1 1 0 !important;
-            border-radius: 10px;
-
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-
-            line-height: 1 !important;
-          }
-
-          .controls-grid .control-btn > * {
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-          }
-
-          .break-manager-modal {
-            width: 95%;
-            top: 0;
-            transform: translate(-50%, 0);
-            max-height: 100svh;
-            height: 100svh;
-            border-radius: 0 0 20px 20px;
-          }
-
-          .break-manager-modal .modal-header {
-            position: sticky;
-            top: 0;
-            z-index: 10;
-            background: var(--color-bg-card);
-            padding-bottom: 4px;
-          }
-
-          .break-manager-layout {
-            flex-direction: column;
-          }
-
-          .break-manager-layout .break-manager-panel {
-            flex: 1 1 0 !important;
-          }
-
-          .break-manager-splitter {
-            display: none;
-          }
-        }
-
-
-        /* Even smaller screens */
-        @media (max-width:  480px) {
-          .controls-grid {
-            gap:  4px !important;
-          }
-
-          .controls-grid .control-btn {
-            min-width: 40px ! important;
-            width: 40px !important;
-            height:  40px !important;
-          }
-
-          .controls-grid .control-btn span {
-            font-size: 18px !important;
-          }
-
-          .modal { width: 95%; padding: 20px; }
-        }
-
-        /* Very small screens */
-        @media (max-width: 380px) {
-          .controls-grid .control-btn {
-            min-width: 38px !important;
-            width: 38px !important;
-            height: 38px !important;
-          }
-
-          .controls-grid .control-btn span {
-            font-size:  16px !important;
-          }
-        }
-        }
-      `}</style>
+      <AppBarContent>
+        <div className="app-bar-title">
+          <h1>Host</h1>
+          {auth.isLoggedIn && auth.canHost && (
+            <div className="app-bar-subtitle">
+              <span title="Singers" aria-label={`${queueState?.queueOrder.length ?? 0} singers`}>
+                <MaterialIcon name="group" />
+                {queueState?.queueOrder.length ?? 0}
+              </span>
+              <span title="Queued songs" aria-label={`${queuedSongCount} queued songs`}>
+                <MaterialIcon name="queue_music" />
+                {queuedSongCount}
+              </span>
+            </div>
+          )}
+        </div>
+      </AppBarContent>
 
       <div className="container">
         {banner && (
@@ -4506,22 +3181,17 @@ function closeDetails(e: React.SyntheticEvent) {
               <>
                 {oidcConfig?.passwordLoginEnabled !== false && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0' }}>
-                    <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.1)' }} />
+                    <div style={{ flex: 1, height: 1, background: 'var(--color-border-strong)' }} />
                     <span style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>or</span>
-                    <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.1)' }} />
+                    <div style={{ flex: 1, height: 1, background: 'var(--color-border-strong)' }} />
                   </div>
                 )}
                 <a
                   href={`${API_BASE}/api/auth/oidc/login?returnTo=%2Fhost`}
-                  className="control-btn"
+                  className="control-btn primary"
                   style={{
                     width: '100%',
-                    boxSizing: 'border-box',
-                    display: 'flex',
-                    justifyContent: 'center',
                     textDecoration: 'none',
-                    background: oidcConfig.buttonColor,
-                    border: 'none'
                   }}
                 >
                   {oidcConfig.buttonText}
@@ -4546,382 +3216,353 @@ function closeDetails(e: React.SyntheticEvent) {
           </div>
         ) : (
           <>
-            <div className="card host-top-card">
-              <div className="host-top-card-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
-                  <MaterialIcon name="dashboard_customize" style={{ fontSize: 22 }} />
-                  <span>Host Controls</span>
-                </div>
+            <AppBarContent>
+              <div className="app-bar-actions host-bar-actions">
                 <button
                   className="control-btn"
-                  type="button"
-                  onClick={() => setHostTopCollapsed((collapsed) => !collapsed)}
-                  aria-expanded={!hostTopCollapsed}
-                  aria-controls="host-top-card-content"
-                  title={hostTopCollapsed ? 'Show host controls' : 'Hide host controls'}
-                  style={{ width: 40, height: 36, minHeight: 36, padding: 0 }}
+                  onClick={openHistoryManager}
+                  disabled={busy}
+                  title="Manage singer history import/export"
+                  aria-label="Manage singer history import/export"
                 >
-                  <MaterialIcon name={hostTopCollapsed ? 'expand_more' : 'expand_less'} />
+                  <MaterialIcon name="manage_history" />
+                </button>
+                <button className="control-btn" onClick={() => setShowPlayerWindowControl(true)} title="Settings" aria-label="Settings">
+                  <MaterialIcon name="tune" />
+                </button>
+                <button
+                  className="control-btn primary host-add-btn"
+                  onClick={() => setShowManualRequest(true)}
+                  disabled={busy}
+                  title="Manually add a song to the queue"
+                  aria-label="Add song"
+                >
+                  <MaterialIcon name="add" />
+                  <span className="host-add-label">Add song</span>
                 </button>
               </div>
+            </AppBarContent>
 
-              {!hostTopCollapsed && (
-              <div id="host-top-card-content" className="host-top-card-content">
-              <section className="host-top-section">
-                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8}}>
-                  <h2 style={{margin: 0}} title="Break Music" aria-label="Break Music">
-                    <MaterialIcon name="music_note" style={{ fontSize: 24, verticalAlign: 'text-bottom' }} />
-                  </h2>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }}>
+            <div className="host-layout">
+              <aside className="host-aside">
+                <section className="host-panel host-break-panel">
+                  <div className="host-panel-header">
+                    <button
+                      type="button"
+                      className="host-panel-toggle"
+                      onClick={() => setHostTopCollapsed((collapsed) => !collapsed)}
+                      aria-expanded={!hostTopCollapsed}
+                      aria-controls="host-break-panel-content"
+                      title={hostTopCollapsed ? 'Show break music' : 'Hide break music'}
+                    >
+                      <MaterialIcon name="music_note" />
+                      {breakMusicTrack && hostTopCollapsed ? (
+                        <>
+                          <ScrollingText
+                            className="host-break-inline-title"
+                            label={`${breakMusicTrack.title} — ${breakMusicTrack.artist || 'Unknown Artist'}`}
+                          >
+                            {breakMusicTrack.title} — {breakMusicTrack.artist || 'Unknown Artist'}
+                          </ScrollingText>
+                          {breakMusicRemainingSec != null && (
+                            <span className="host-break-inline-time" aria-label={`${formatTime(breakMusicRemainingSec)} remaining`}>
+                              {formatTime(breakMusicRemainingSec)}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span>Break music</span>
+                      )}
+                      <MaterialIcon name={hostTopCollapsed ? 'expand_more' : 'expand_less'} className="host-panel-chevron" />
+                    </button>
                     <button
                       className="control-btn"
                       title="Manage break music library and playlist"
-                      style={{ padding: '8px 10px', minWidth: 40 }}
+                      aria-label="Manage break music library and playlist"
                       onClick={openBreakMusicManager}
                       disabled={busy}
                     >
                       <MaterialIcon name="build" />
                     </button>
-                    <button
-                      className="control-btn"
-                      title="Play previous break playlist track"
-                      style={{ padding: '8px 10px', minWidth: 40 }}
-                      onClick={() => controlBreakMusic('previous')}
-                      disabled={busy || breakPlaylistTrackIds.length === 0}
-                    >
-                      <MaterialIcon name="skip_previous" />
-                    </button>
-                    <button
-                      className="control-btn"
-                      title={breakMusicPaused ? 'Resume break music' : 'Pause break music'}
-                      style={{ padding: '8px 10px', minWidth: 40 }}
-                      onClick={() => controlBreakMusic(breakMusicPaused ? 'resume' : 'pause')}
-                      disabled={busy || !breakMusicTrack}
-                    >
-                      <MaterialIcon name={breakMusicPaused ? 'play_arrow' : 'pause'} />
-                    </button>
-                    <button
-                      className="control-btn"
-                      title="Skip to next break playlist track"
-                      style={{ padding: '8px 10px', minWidth: 40 }}
-                      onClick={() => controlBreakMusic('skip')}
-                      disabled={busy || breakPlaylistTrackIds.length === 0}
-                    >
-                      <MaterialIcon name="skip_next" />
-                    </button>
                   </div>
+
+                  {!hostTopCollapsed && (
+                    <div id="host-break-panel-content" className="host-break-content">
+                      {breakMusicTrack ? (
+                        <>
+                          <ScrollingText
+                            className="host-break-track"
+                            label={`${breakMusicTrack.title} by ${breakMusicTrack.artist || 'Unknown Artist'}`}
+                          >
+                            <strong>{breakMusicTrack.title}</strong> by <strong>{breakMusicTrack.artist || 'Unknown Artist'}</strong>
+                          </ScrollingText>
+                          <div className="host-muted">
+                            Time remaining: {breakMusicRemainingSec == null ? '—' : formatTime(breakMusicRemainingSec)}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="host-muted">No break track selected</div>
+                      )}
+
+                      {activeBreakPlaylistName && (
+                        <div role="status" aria-live="polite" className="host-muted host-small">
+                          Loaded playlist: <strong>{activeBreakPlaylistName}</strong>
+                        </div>
+                      )}
+
+                      {breakPlaylistTrackIds.length > 0 && (
+                        <div role="status" aria-live="polite" className="host-muted host-small">
+                          Playlist tracks: {breakPlaylistTrackIds.length}
+                        </div>
+                      )}
+
+                      <div className="host-break-controls">
+                        <button
+                          className="control-btn"
+                          title="Play previous break playlist track"
+                          aria-label="Play previous break playlist track"
+                          onClick={() => controlBreakMusic('previous')}
+                          disabled={busy || breakPlaylistTrackIds.length === 0}
+                        >
+                          <MaterialIcon name="skip_previous" />
+                        </button>
+                        <button
+                          className="control-btn"
+                          title={breakMusicPaused ? 'Resume break music' : 'Pause break music'}
+                          aria-label={breakMusicPaused ? 'Resume break music' : 'Pause break music'}
+                          onClick={() => controlBreakMusic(breakMusicPaused ? 'resume' : 'pause')}
+                          disabled={busy || !breakMusicTrack}
+                        >
+                          <MaterialIcon name={breakMusicPaused ? 'play_arrow' : 'pause'} />
+                        </button>
+                        <button
+                          className="control-btn"
+                          title="Skip to next break playlist track"
+                          aria-label="Skip to next break playlist track"
+                          onClick={() => controlBreakMusic('skip')}
+                          disabled={busy || breakPlaylistTrackIds.length === 0}
+                        >
+                          <MaterialIcon name="skip_next" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </section>
+              </aside>
+
+              <main className="host-main">
+                <section className="host-panel singer-queue-card" aria-labelledby="host-rotation-title">
+                  <div className="singer-queue-header">
+                    <h2 id="host-rotation-title">Rotation</h2>
+                    {Boolean(queueState?.queueOrder.length) && (
+                      <span className="host-muted host-small">Drag an avatar or hold a singer to reorder.</span>
+                    )}
+                  </div>
+
+                  {(!queueState || queueState.queueOrder.length === 0) ? (
+                    <div className="host-empty-state">
+                      <MaterialIcon name="music_note" />
+                      <div>No singers in queue</div>
+                      <div className="host-small">Songs added from the Requests page will appear here automatically</div>
+                    </div>
+                  ) : (
+                    <div ref={singerQueueTouchRef} className="singer-queue-list">
+                      {(() => {
+                        // Single-pass: tag each singer with isSinging, then sort current singer first
+                        type TaggedSinger = typeof queueState.queueOrder[number] & { isSinging: boolean; displaySong: QueueSong | null }
+                        const tagged: TaggedSinger[] = queueState.queueOrder.map(s => {
+                          const displaySong = getSingerDisplaySong(s)
+                          return { ...s, displaySong, isSinging: displaySong?.status === 'playing' }
+                        })
+                        const sorted = [...tagged].sort((a, b) => {
+                          if (a.isSinging && !b.isSinging) return -1
+                          if (!a.isSinging && b.isSinging) return 1
+                          return 0
+                        })
+                        return sorted.map((singer, idx) => {
+                          const { isSinging, displaySong } = singer
+                          const entryClass = [
+                            'singer-queue-entry',
+                            isSinging && 'is-singing',
+                            singerDragOverId === singer.singerId && 'is-drag-over',
+                            singerDraggedId === singer.singerId && 'is-dragging',
+                          ].filter(Boolean).join(' ')
+                          return (
+                        <div
+                          key={singer.singerId}
+                          className={entryClass}
+                          data-singer-drag-id={singer.singerId}
+                          draggable={!savingQueueOrder}
+                          onDragStart={() => handleSingerDragStart(singer.singerId)}
+                          onDragEnd={handleSingerDragEnd}
+                          onDragOver={e => handleSingerDragOver(e, singer.singerId)}
+                          onDragLeave={() => setSingerDragOverId(null)}
+                          onDrop={e => handleSingerDrop(e, singer.singerId)}
+                        >
+                          <div className="singer-queue-row">
+                            {/* Avatar doubles as the drag handle */}
+                            <QueueDragHandle id={singer.singerId} attribute="data-singer-drag-id"
+                              label={`Reorder ${singer.displayName}, position ${idx + 1}`}
+                              disabled={busy || savingQueueOrder || !queueState.activeRotation}
+                              onStart={() => handleSingerDragStart(singer.singerId)}
+                              onTarget={setSingerDragOverId} onEnd={handleSingerDragEnd}
+                              onDrop={(sourceId, targetId) => void reorderSingers(sourceId, targetId)}>
+                              <SingerAvatar name={singer.displayName} profile={singer.profile} size="var(--singer-avatar-size)" />
+                              {isSinging && (
+                                <span className="singer-queue-mic" aria-hidden="true">
+                                  <MaterialIcon name="mic_external_on" />
+                                </span>
+                              )}
+                            </QueueDragHandle>
+
+                            {/* Singer info */}
+                            <div className="singer-queue-info">
+                              <div className="singer-queue-name">
+                                <ScrollingText className="singer-queue-name-text" label={singer.displayName}>{singer.displayName}</ScrollingText>
+                                {isSinging && <span className="singer-queue-badge">Now Singing</span>}
+                              </div>
+                              <div className="singer-queue-song">
+                                {displaySong
+                                  ? <ScrollingText label={`${isSinging ? 'Singing' : 'Next'}: ${displaySong.title || 'Unknown'} — ${displaySong.artist || 'Unknown'}${displaySong.discId ? ` (${displaySong.discId})` : ''}`}>
+                                      <strong className="singer-queue-song-prefix">{isSinging ? 'Singing:' : 'Next:'} </strong>
+                                      {displaySong.title || 'Unknown'} — {displaySong.artist || 'Unknown'}{renderDiscIdTag(displaySong.discId)}
+                                    </ScrollingText>
+                                  : <span style={{ opacity: 0.6 }}>No queued song</span>
+                                }
+                              </div>
+                              <div className="singer-queue-stats">
+                                <span title="Queued songs" aria-label={`${singer.queuedSongsCount} queued songs`}><MaterialIcon name="music_note" />{singer.queuedSongsCount}</span>
+                                <span title="Songs sung" aria-label={`${singer.totalSongsSung} songs sung`}><MaterialIcon name="check_circle" />{singer.totalSongsSung}</span>
+                                {singer.lastSangAt && <span className="singer-queue-last-sang" title="Last sang"><MaterialIcon name="schedule" />{formatTimeAgo(singer.lastSangAt)}</span>}
+                              </div>
+                            </div>
+
+                            {/* Actions */}
+                            <div className="singer-queue-actions">
+                              <button
+                                className="control-btn ghost"
+                                title="View singer queue and history"
+                                aria-label={`View ${singer.displayName}'s queue and history`}
+                                onClick={() => openSingerModal(singer.singerId)}
+                              >
+                                <MaterialIcon name="visibility" />
+                              </button>
+                              <button
+                                className="control-btn ghost danger-text"
+                                title="Remove singer from rotation"
+                                aria-label={`Remove ${singer.displayName} from rotation`}
+                                disabled={busy}
+                                onClick={() => removeSingerFromRotation(singer.singerId)}
+                              >
+                                <MaterialIcon name="close" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                          )
+                        })
+                      })()}
+                    </div>
+                  )}
+
+                  {/* Flat queue fallback — shown when queueState is not available */}
+                  {!queueState && queue.length > 0 && (
+                    <div style={{ marginTop: 16 }}>
+                      <div className="host-muted host-small" style={{ marginBottom: 8 }}>
+                        (Flat queue — singer grouping unavailable)
+                      </div>
+                      {queue.map(item => (
+                        <div
+                          key={item.id}
+                          className={`queue-item ${item.status === 'playing' ? 'playing' : ''}`}
+                        >
+                          <span style={{ fontWeight: 600 }}>{item.requested_by}</span>
+                          {' — '}
+                          {item.title}{renderDiscIdTag(item.disc_id)} by {item.artist}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </main>
+            </div>
+
+            <div className="host-transport" role="region" aria-label="Playback controls">
+              <div className="host-transport-progress" aria-hidden="true">
+                <div style={{ width: `${progressPercent}%` }} />
+              </div>
+              <div className="host-transport-inner">
+                <div className="host-transport-info">
+                  {currentPlaying ? (
+                    <>
+                      <div className="host-transport-text">
+                        <ScrollingText
+                          className="host-transport-title"
+                          label={`${currentPlaying.title || 'Unknown Title'}${currentPlaying.disc_id ? ` (${currentPlaying.disc_id})` : ''}`}
+                        >
+                          {currentPlaying.title || 'Unknown Title'}{renderDiscIdTag(currentPlaying.disc_id)}
+                        </ScrollingText>
+                        <div className="host-transport-meta">
+                          <ScrollingText
+                            className="host-transport-meta-text"
+                            label={[singerPaused && 'Paused', currentPlaying.requested_by, currentPlaying.artist || 'Unknown Artist'].filter(Boolean).join(' · ')}
+                          >
+                            {singerPaused && <span className="host-paused">Paused · </span>}
+                            {currentPlaying.requested_by && <strong>{currentPlaying.requested_by}</strong>}
+                            {currentPlaying.requested_by ? ' · ' : ''}{currentPlaying.artist || 'Unknown Artist'}
+                          </ScrollingText>
+                          <span className="host-transport-time">{formatTime(currentTime)} / {formatTime(estimatedDuration)}</span>
+                        </div>
+                      </div>
+                      <span className="host-transport-replace">{renderReplaceButton(currentPlaying, 'Replace current song')}</span>
+                    </>
+                  ) : (
+                    <div className="host-transport-text">
+                      <div className="host-transport-title is-empty">Nothing playing</div>
+                      <div className="host-transport-meta">Select Play to start the next queued song.</div>
+                    </div>
+                  )}
+                  {autoPlay && (
+                    <span className="host-autoplay-chip" title={`Auto-play enabled · ${autoPlayDelay}s delay`} aria-label={`Auto-play enabled, ${autoPlayDelay} second delay`}>
+                      <MaterialIcon name="sync" />
+                      <span className="host-autoplay-chip-label">Auto {autoPlayDelay}s</span>
+                    </span>
+                  )}
                 </div>
-
-                {breakMusicTrack ? (
-                  <>
-                    <div style={{ marginBottom: 8, fontSize: 15 }}>
-                      <strong>{breakMusicTrack.title}</strong> by <strong>{breakMusicTrack.artist || 'Unknown Artist'}</strong>
-                    </div>
-                    <div style={{ marginBottom: 10, color: 'var(--color-text-secondary)', fontSize: 14 }}>
-                      Time remaining: {breakMusicRemainingSec == null ? '—' : formatTime(breakMusicRemainingSec)}
-                    </div>
-                  </>
-                ) : (
-                  <div style={{ marginBottom: 10, color: 'var(--color-text-secondary)', fontSize: 14 }}>
-                    No break track selected
-                  </div>
-                )}
-
-                {activeBreakPlaylistName && (
-                  <div
-                    role="status"
-                    aria-live="polite"
-                    style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }}
-                  >
-                    Loaded playlist: <strong style={{ color: 'var(--color-text-primary)' }}>{activeBreakPlaylistName}</strong>
-                  </div>
-                )}
-
-                {breakPlaylistTrackIds.length > 0 && (
-                  <div
-                    role="status"
-                    aria-live="polite"
-                    style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}
-                  >
-                    Playlist tracks: {breakPlaylistTrackIds.length}
-                  </div>
-                )}
-              </section>
-
-              <div className="host-section-divider" />
-
-              <section className="host-top-section host-controls-card">
-                <div className="host-control-buttons">
-                  <button className="control-btn success" onClick={playTop} disabled={busy} title={playbackLabel} aria-label={playbackLabel}>
-                    <MaterialIcon name={playbackAction === 'pause' ? 'pause' : 'play_arrow'} style={singerPaused ? { color: '#facc15' } : undefined} />
+                <div className="host-transport-controls">
+                  <button className="control-btn danger" onClick={stop} disabled={busy} title="Stop" aria-label="Stop">
+                    <MaterialIcon name="stop" />
+                  </button>
+                  <button className="control-btn success host-play-btn" onClick={playTop} disabled={busy} title={playbackLabel} aria-label={playbackLabel}>
+                    <MaterialIcon name={playbackAction === 'pause' ? 'pause' : 'play_arrow'} style={singerPaused ? { color: 'var(--color-warning)' } : undefined} />
                   </button>
                   <button className="control-btn primary" onClick={next} disabled={busy} title="Next" aria-label="Next">
                     <MaterialIcon name="skip_next" />
                   </button>
-                  <button className="control-btn danger" onClick={stop} disabled={busy} title="Stop" aria-label="Stop">
-                    <MaterialIcon name="stop" />
-                  </button>
-                  <button className="control-btn" onClick={refreshQueue} disabled={busy} title="Refresh" aria-label="Refresh">
-                    <MaterialIcon name="refresh" />
-                  </button>
-                  <button className="control-btn danger" onClick={clearAll} disabled={busy} title="Clear all" aria-label="Clear all">
-                    <MaterialIcon name="delete" />
-                  </button>
-                  <button className="control-btn" onClick={() => setShowPlayerWindowControl(true)} title="Settings" aria-label="Settings">
-                    <MaterialIcon name="tune" />
-                  </button>
                 </div>
-
-                <div className={`now-playing-box${currentPlaying ? ' now-playing' : ''}`}>
-                  {currentPlaying ? (
-                    <>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
-                      <div style={{ fontWeight: 700, fontSize: 16, color: '#10b981', minWidth: 0, flex: '1 1 180px', overflowWrap: 'anywhere' }}>
-                        <MaterialIcon name="mic_external_on" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-                        {currentPlaying.title || 'Unknown Title'}{renderDiscIdTag(currentPlaying.disc_id)}
-                      </div>
-                      {renderReplaceButton(currentPlaying, 'Replace current song')}
-                    </div>
-                    <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 4 }}>
-                      {singerPaused && <span role="status" style={{ color: '#facc15', marginRight: 8 }}>Paused</span>}
-                      {currentPlaying.artist || 'Unknown Artist'}
-                      {currentPlaying.requested_by && <span style={{ marginLeft: 8 }}>· <strong style={{ color: 'var(--color-text-primary)' }}>{currentPlaying.requested_by}</strong></span>}
-                    </div>
-                    <div className="progress-bar" style={{ marginTop: 6 }}>
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${estimatedDuration > 0 ? Math.min(100, (currentTime / estimatedDuration) * 100) : 0}%` }}
-                      />
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                      <span>{formatTime(currentTime)}</span>
-                      <span>{formatTime(estimatedDuration)}</span>
-                    </div>
-                    {autoPlay && (
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, textAlign: 'center',
-                                    padding: '4px 8px', background: 'rgba(16,185,129,0.1)',
-                                    borderRadius: 6, border: '1px solid rgba(16,185,129,0.2)' }}>
-                        <MaterialIcon name="sync" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 4 }} />
-                        Auto-play enabled · {autoPlayDelay}s delay
-                      </div>
-                    )}
-                    </>
-                  ) : (
-                    <>
-                      <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--color-text-secondary)', marginBottom: 4 }}>
-                        <MaterialIcon name="music_off" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-                        Nothing playing
-                      </div>
-                      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-                        Select Play to start the next queued song.
-                      </div>
-                    </>
-                  )}
-                </div>
-              </section>
-              </div>
-              )}
-            </div>
-
-            <div className="card singer-queue-card">
-              <div className="singer-queue-header">
-                <h2 style={{margin: 0}} title="Queue Order" aria-label="Queue Order">
-                  <MaterialIcon name="mic_external_on" style={{ fontSize: 24, verticalAlign: 'text-bottom' }} />
-                </h2>
-                <div className="singer-queue-tools">
-                  <span className="stat-pill" title="Singers" aria-label={`${queueState?.queueOrder.length ?? 0} singers`}>
-                    <MaterialIcon name="group" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 4 }} />
-                    {queueState?.queueOrder.length ?? 0}
-                  </span>
-                  <span className="stat-pill" title="Queued songs" aria-label={`${queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length} queued songs`}>
-                    <MaterialIcon name="queue_music" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 4 }} />
-                    {queueState?.queueOrder.reduce((sum, s) => sum + s.queuedSongsCount, 0) ?? queue.filter(r => r.status === 'queued').length}
-                  </span>
+                <div className="host-transport-extra">
                   <button
-                    className="control-btn primary"
-                    onClick={() => setShowManualRequest(true)}
-                    disabled={busy}
-                    title="Manually add a song to the queue"
-                    style={{ padding: '8px 12px', fontSize: '16px', lineHeight: 1 }}
+                    className="control-btn ghost host-more-btn"
+                    onClick={() => setShowHostMenu((open) => !open)}
+                    aria-expanded={showHostMenu}
+                    aria-controls="host-more-menu"
+                    title="More controls"
+                    aria-label="More controls"
                   >
-                    <MaterialIcon name="add" />
+                    <MaterialIcon name="more_horiz" />
                   </button>
-                  <button
-                    className="control-btn"
-                    onClick={openHistoryManager}
-                    disabled={busy}
-                    title="Manage singer history import/export"
-                    aria-label="Manage singer history import/export"
-                    style={{ padding: '8px 12px', lineHeight: 1 }}
-                  >
-                    <span
-                      className="material-symbols-rounded"
-                      style={{ fontSize: 22, display: 'block' }}
-                    >
-                      manage_history
-                    </span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Singer-based queue order */}
-              {Boolean(queueState?.queueOrder.length) && (
-                <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                  Drag a number or hold a singer to reorder.
-                </p>
-              )}
-              {(!queueState || queueState.queueOrder.length === 0) ? (
-                <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-text-secondary)' }}>
-                  <MaterialIcon name="music_note" style={{ fontSize: 48, marginBottom: 16, opacity: 0.5 }} />
-                  <div>No singers in queue</div>
-                  <div style={{ fontSize: 14, marginTop: 8 }}>
-                    Songs added from the Requests page will appear here automatically
+                  <div id="host-more-menu" className={`host-more-menu${showHostMenu ? ' is-open' : ''}`}>
+                    <button className="control-btn ghost" onClick={() => { setShowHostMenu(false); void refreshQueue() }} disabled={busy} title="Refresh" aria-label="Refresh">
+                      <MaterialIcon name="refresh" />
+                      <span className="host-more-label">Refresh</span>
+                    </button>
+                    <button className="control-btn ghost danger-text" onClick={() => { setShowHostMenu(false); void clearAll() }} disabled={busy} title="Clear all" aria-label="Clear all">
+                      <MaterialIcon name="delete" />
+                      <span className="host-more-label">Clear all</span>
+                    </button>
                   </div>
                 </div>
-              ) : (
-                <div ref={singerQueueTouchRef} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {(() => {
-                    // Single-pass: tag each singer with isSinging, then sort current singer first
-                    type TaggedSinger = typeof queueState.queueOrder[number] & { isSinging: boolean; displaySong: QueueSong | null }
-                    const tagged: TaggedSinger[] = queueState.queueOrder.map(s => {
-                      const displaySong = getSingerDisplaySong(s)
-                      return { ...s, displaySong, isSinging: displaySong?.status === 'playing' }
-                    })
-                    const sorted = [...tagged].sort((a, b) => {
-                      if (a.isSinging && !b.isSinging) return -1
-                      if (!a.isSinging && b.isSinging) return 1
-                      return 0
-                    })
-                    return sorted.map((singer, idx) => {
-                      const { isSinging, displaySong } = singer
-                      return (
-                    <div
-                      key={singer.singerId}
-                      className="singer-queue-entry"
-                      data-singer-drag-id={singer.singerId}
-                      draggable={!savingQueueOrder}
-                      onDragStart={() => handleSingerDragStart(singer.singerId)}
-                      onDragEnd={handleSingerDragEnd}
-                      onDragOver={e => handleSingerDragOver(e, singer.singerId)}
-                      onDragLeave={() => setSingerDragOverId(null)}
-                      onDrop={e => handleSingerDrop(e, singer.singerId)}
-                      style={{
-                        background: isSinging
-                          ? 'rgba(16,185,129,0.12)'
-                          : singerDragOverId === singer.singerId ? 'rgba(99,102,241,0.15)' : 'var(--color-bg-secondary)',
-                        border: isSinging
-                          ? '1.5px solid rgba(16,185,129,0.6)'
-                          : singerDragOverId === singer.singerId
-                          ? '1.5px solid var(--color-accent)'
-                          : '1px solid var(--color-border)',
-                        borderRadius: 12,
-                        opacity: singerDraggedId === singer.singerId ? 0.5 : 1,
-                        cursor: 'grab',
-                        transition: 'border-color 0.15s, background 0.15s',
-                      }}
-                    >
-                      <div className="singer-queue-row">
-                        {/* Position badge */}
-                        <QueueDragHandle id={singer.singerId} attribute="data-singer-drag-id"
-                          label={`Reorder ${singer.displayName}`}
-                          disabled={busy || savingQueueOrder || !queueState.activeRotation}
-                          onStart={() => handleSingerDragStart(singer.singerId)}
-                          onTarget={setSingerDragOverId} onEnd={handleSingerDragEnd}
-                          onDrop={(sourceId, targetId) => void reorderSingers(sourceId, targetId)}
-                          style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          width: 32,
-                          height: 32,
-                          borderRadius: 8,
-                          background: isSinging ? 'rgba(16,185,129,0.9)' : 'rgba(99, 102, 241, 0.9)',
-                          color: 'white',
-                          fontWeight: 700,
-                          flex: '0 0 auto',
-                          fontSize: 14,
-                        }}>
-                          {isSinging ? <MaterialIcon name="mic_external_on" style={{ fontSize: 18 }} /> : idx + 1}
-                        </QueueDragHandle>
-
-                        <div className="singer-queue-avatar">
-                          <SingerAvatar name={singer.displayName} profile={singer.profile} size="var(--singer-avatar-size)" />
-                        </div>
-
-                        {/* Singer info */}
-                        <div className="singer-queue-info">
-                          <div className="singer-queue-name" style={{ color: isSinging ? 'rgba(16,185,129,1)' : 'var(--color-text-primary)' }}>
-                            <span className="singer-queue-name-text" title={singer.displayName}>{singer.displayName}</span>
-                            {isSinging && (
-                              <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, background: 'rgba(16,185,129,0.2)', color: 'rgba(16,185,129,1)', letterSpacing: 0.5, textTransform: 'uppercase' }}>
-                                Now Singing
-                              </span>
-                            )}
-                          </div>
-                          <div className="singer-queue-song">
-                            {displaySong
-                              ? <QueueSongText label={`${isSinging ? 'Singing' : 'Next'}: ${displaySong.title || 'Unknown'} — ${displaySong.artist || 'Unknown'}${displaySong.discId ? ` (${displaySong.discId})` : ''}`}>
-                                  <strong className="singer-queue-song-prefix" style={{ color: 'var(--color-text-primary)' }}>{isSinging ? 'Singing:' : 'Next:'} </strong>
-                                  {displaySong.title || 'Unknown'} — {displaySong.artist || 'Unknown'}{renderDiscIdTag(displaySong.discId)}
-                                </QueueSongText>
-                              : <span style={{ opacity: 0.6 }}>No queued song</span>
-                            }
-                          </div>
-                          <div className="singer-queue-stats">
-                            <span title="Queued songs" aria-label={`${singer.queuedSongsCount} queued songs`}><MaterialIcon name="music_note" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.queuedSongsCount}</span>
-                            <span title="Songs sung" aria-label={`${singer.totalSongsSung} songs sung`}><MaterialIcon name="check_circle" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{singer.totalSongsSung}</span>
-                            {singer.lastSangAt && <span className="singer-queue-last-sang" title="Last sang"><MaterialIcon name="schedule" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />{formatTimeAgo(singer.lastSangAt)}</span>}
-                          </div>
-                        </div>
-
-                        {/* Actions */}
-                        <div className="singer-queue-actions">
-                          <button
-                            className="control-btn"
-                            title="View singer queue and history"
-                            aria-label={`View ${singer.displayName}'s queue and history`}
-                            onClick={() => openSingerModal(singer.singerId)}
-                            style={{ padding: '6px 10px', fontSize: 16, lineHeight: 1 }}
-                          >
-                            <MaterialIcon name="visibility" />
-                          </button>
-                          <button
-                            className="control-btn danger"
-                            title="Remove singer from rotation"
-                            aria-label={`Remove ${singer.displayName} from rotation`}
-                            disabled={busy}
-                            onClick={() => removeSingerFromRotation(singer.singerId)}
-                            style={{ padding: '6px 10px', fontSize: 13 }}
-                          >
-                            <MaterialIcon name="close" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                      )
-                    })
-                  })()}
-                </div>
-              )}
-
-              {/* Flat queue fallback — shown when queueState is not available */}
-              {!queueState && queue.length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 8 }}>
-                    (Flat queue — singer grouping unavailable)
-                  </div>
-                  {queue.map(item => (
-                    <div
-                      key={item.id}
-                      className={`queue-item ${item.status === 'playing' ? 'playing' : ''}`}
-                    >
-                      <span style={{ fontWeight: 600 }}>{item.requested_by}</span>
-                      {' — '}
-                      {item.title}{renderDiscIdTag(item.disc_id)} by {item.artist}
-                    </div>
-                  ))}
-                </div>
-              )}
+              </div>
             </div>
 
             {/* Singer History Manager Modal */}
@@ -5308,7 +3949,7 @@ function closeDetails(e: React.SyntheticEvent) {
                         {selectedSingerHistory.singer.lastSangAt && (
                           <span className="stat-pill"><MaterialIcon name="schedule" style={{ fontSize: 14, verticalAlign: 'text-bottom', marginRight: 3 }} />Last: {formatTimeAgo(selectedSingerHistory.singer.lastSangAt)}</span>
                         )}
-                        <span className="stat-pill" style={{ background: 'rgba(99,102,241,0.15)', color: 'var(--color-accent)' }}>
+                        <span className="stat-pill" style={{ background: 'var(--color-accent-soft)', color: 'var(--color-accent)' }}>
                           {selectedSingerHistory.singer.status}
                         </span>
                       </div>
@@ -5345,7 +3986,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                     onDragLeave={() => setModalSongDragOverId(null)}
                                     onDrop={() => handleModalSongDrop(song.queueId)}
                                     style={{
-                                      background: modalSongDragOverId === song.queueId ? 'rgba(99,102,241,0.15)' : 'var(--color-bg-secondary)',
+                                      background: modalSongDragOverId === song.queueId ? 'var(--color-accent-soft)' : 'var(--color-bg-secondary)',
                                       opacity: modalSongDraggedId === song.queueId ? 0.4 : 1,
                                       cursor: isDraggable ? 'grab' : 'default',
                                       transition: 'background 0.15s',
@@ -5360,8 +4001,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                         onEnd={() => { setModalSongDraggedId(null); setModalSongDragOverId(null) }}
                                         onDrop={(sourceId, targetId) => void handleModalSongDrop(Number(targetId), Number(sourceId))}
                                         style={{
-                                        background: 'rgba(99,102,241,0.9)',
-                                        color: 'white',
+                                        background: 'var(--color-accent)',
+                                        color: 'var(--color-on-accent)',
                                         borderRadius: 6,
                                         width: 22,
                                         height: 22,
@@ -5372,10 +4013,10 @@ function closeDetails(e: React.SyntheticEvent) {
                                         fontWeight: 700,
                                       }}>{i + 1}</QueueDragHandle>
                                     </td>
-                                    <td style={{ padding: '8px 6px', borderBottom: '1px solid var(--color-border)' }}>
-                                      <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
-                                      <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                                        {song.artist || 'Unknown'}{renderDiscIdTag(song.discId)}
+                                    <td className="singer-song-cell" style={{ padding: '8px 6px', borderBottom: '1px solid var(--color-border)' }}>
+                                      <ScrollingText className="singer-song-title" label={song.title || 'Unknown'}>{song.title || 'Unknown'}</ScrollingText>
+                                      <div className="singer-song-meta">
+                                        <ScrollingText label={song.artist || 'Unknown'}>{song.artist || 'Unknown'}</ScrollingText>{renderDiscIdTag(song.discId)}
                                       </div>
                                       {song.requestedAt && (
                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
@@ -5395,8 +4036,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                         padding: '2px 8px',
                                         borderRadius: 100,
                                         fontSize: 11,
-                                        background: song.status === 'playing' ? 'rgba(16,185,129,0.2)' : 'rgba(99,102,241,0.15)',
-                                        color: song.status === 'playing' ? '#10b981' : 'var(--color-accent)',
+                                        background: song.status === 'playing' ? 'var(--color-success-soft)' : 'var(--color-accent-soft)',
+                                        color: song.status === 'playing' ? 'var(--color-success)' : 'var(--color-accent)',
                                       }} title={song.status === 'playing' ? 'Playing' : 'Queued'}>
                                         <MaterialIcon name={song.status === 'playing' ? 'play_arrow' : 'music_note'} style={{ fontSize: 14 }} />
                                       </span>
@@ -5409,9 +4050,9 @@ function closeDetails(e: React.SyntheticEvent) {
                                           onClick={() => removeSongFromQueue(song.queueId)}
                                           title="Remove song from queue"
                                           style={{
-                                            background: 'rgba(239,68,68,0.15)',
-                                            color: '#ef4444',
-                                            border: '1px solid rgba(239,68,68,0.3)',
+                                            background: 'var(--color-danger-soft)',
+                                            color: 'var(--color-danger)',
+                                            border: '1px solid color-mix(in srgb, var(--color-danger) 30%, transparent)',
                                             borderRadius: 6,
                                             cursor: 'pointer',
                                             padding: '4px 8px',
@@ -5444,10 +4085,10 @@ function closeDetails(e: React.SyntheticEvent) {
                                 <tr key={song.queueId} style={{
                                   background: 'var(--color-bg-secondary)',
                                 }}>
-                                  <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)' }}>
-                                    <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                                      {song.artist || 'Unknown'}{renderDiscIdTag(song.discId)}
+                                  <td className="singer-song-cell" style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)' }}>
+                                    <ScrollingText className="singer-song-title" label={song.title || 'Unknown'}>{song.title || 'Unknown'}</ScrollingText>
+                                    <div className="singer-song-meta">
+                                      <ScrollingText label={song.artist || 'Unknown'}>{song.artist || 'Unknown'}</ScrollingText>{renderDiscIdTag(song.discId)}
                                     </div>
                                     {song.requestedAt && (
                                       <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
@@ -5467,8 +4108,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                       padding: '2px 8px',
                                       borderRadius: 100,
                                       fontSize: 11,
-                                      background: 'rgba(16,185,129,0.15)',
-                                      color: '#10b981',
+                                      background: 'var(--color-success-soft)',
+                                      color: 'var(--color-success)',
                                     }} title="Completed"><MaterialIcon name="check_circle" style={{ fontSize: 14 }} /></span>
                                   </td>
                                   <td style={{ padding: '8px 6px', textAlign: 'center', width: 80, borderBottom: '1px solid var(--color-border)' }}>
@@ -5503,10 +4144,10 @@ function closeDetails(e: React.SyntheticEvent) {
                                 <tr key={song.queueId} style={{
                                   background: 'var(--color-bg-secondary)',
                                 }}>
-                                  <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)' }}>
-                                    <div style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{song.title || 'Unknown'}</div>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                                      {song.artist || 'Unknown'}{renderDiscIdTag(song.discId)}
+                                  <td className="singer-song-cell" style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)' }}>
+                                    <ScrollingText className="singer-song-title" label={song.title || 'Unknown'}>{song.title || 'Unknown'}</ScrollingText>
+                                    <div className="singer-song-meta">
+                                      <ScrollingText label={song.artist || 'Unknown'}>{song.artist || 'Unknown'}</ScrollingText>{renderDiscIdTag(song.discId)}
                                     </div>
                                     {song.requestedAt && (
                                       <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
@@ -5519,8 +4160,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                       padding: '2px 8px',
                                       borderRadius: 100,
                                       fontSize: 11,
-                                      background: 'rgba(239,68,68,0.15)',
-                                      color: '#ef4444',
+                                      background: 'var(--color-danger-soft)',
+                                      color: 'var(--color-danger)',
                                     }} title={song.status === 'skipped' ? 'Skipped' : 'Removed'}>
                                       <MaterialIcon name={song.status === 'skipped' ? 'skip_next' : 'close'} style={{ fontSize: 14 }} />
                                     </span>
@@ -5829,6 +4470,26 @@ function closeDetails(e: React.SyntheticEvent) {
                   </div>
 
                   <div className="player-settings-scroll" style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+                  <div className="settings-section">
+                    <div className="settings-title">Request Page Theme</div>
+                    <label className="form-label" htmlFor="request-page-theme">Theme singers see on their phones</label>
+                    <select
+                      id="request-page-theme"
+                      className="form-input"
+                      value={requestTheme ?? ''}
+                      disabled={requestTheme === null || savingRequestTheme}
+                      onChange={e => void updateRequestTheme(e.target.value as ThemeId)}
+                    >
+                      {requestTheme === null && <option value="">Loading…</option>}
+                      {THEMES.map(theme => (
+                        <option key={theme.id} value={theme.id}>{theme.label}</option>
+                      ))}
+                    </select>
+                    <p style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>
+                      Singers can still pick their own theme from their profile menu.
+                    </p>
+                  </div>
+
                   {/* Auto-play Settings */}
                   <div className="settings-section">
                     <div className="settings-title">Auto-play Settings</div>
@@ -5865,7 +4526,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             left: 0,
                             right: 0,
                             bottom: 0,
-                            backgroundColor: autoPlay ? '#10b981' : '#374151',
+                            backgroundColor: autoPlay ? 'var(--color-success)' : 'var(--color-border-strong)',
                             transition: '. 4s',
                             borderRadius: '34px'
                           }}>
@@ -6247,7 +4908,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap'
                               }}>
-                                {playerBackgroundImageFilename || 'Legacy uploaded image'}
+                                <ScrollingText mode="hover" label={playerBackgroundImageFilename || 'Legacy uploaded image'}>{playerBackgroundImageFilename || 'Legacy uploaded image'}</ScrollingText>
                               </div>
                             </div>
                           )}
@@ -6418,15 +5079,8 @@ function closeDetails(e: React.SyntheticEvent) {
                                         title={image.filename}
                                         style={{ display: 'block', width: '100%', aspectRatio: '16 / 9', objectFit: 'cover' }}
                                       />
-                                      <div style={{
-                                        padding: '8px',
-                                        fontSize: '12px',
-                                        color: 'var(--color-text-secondary)',
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                        whiteSpace: 'nowrap'
-                                      }}>
-                                        {image.filename}
+                                      <div style={{ padding: '8px', fontSize: '12px', color: 'var(--color-text-secondary)' }}>
+                                        <ScrollingText mode="hover" label={image.filename}>{image.filename}</ScrollingText>
                                       </div>
                                       {selected && (
                                         <span style={{
@@ -6559,7 +5213,7 @@ function closeDetails(e: React.SyntheticEvent) {
                       )}
 
                       {playerBackgroundError && (
-                        <div style={{ fontSize: '13px', color: '#fca5a5' }}>
+                        <div style={{ fontSize: '13px', color: 'var(--color-danger)' }}>
                           {playerBackgroundError}
                         </div>
                       )}
@@ -6602,7 +5256,7 @@ function closeDetails(e: React.SyntheticEvent) {
                             left: 0,
                             right: 0,
                             bottom: 0,
-                            backgroundColor: overlayVisible ? '#10b981' : '#374151',
+                            backgroundColor: overlayVisible ? 'var(--color-success)' : 'var(--color-border-strong)',
                             transition: '.4s',
                             borderRadius: '34px'
                           }}>
@@ -6731,7 +5385,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 />
                                 <span style={{
                                   position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
-                                  backgroundColor: showRoller ? '#10b981' : '#374151',
+                                  backgroundColor: showRoller ? 'var(--color-success)' : 'var(--color-border-strong)',
                                   transition: '.4s', borderRadius: '34px'
                                 }}>
                                   <span style={{
@@ -6775,7 +5429,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 />
                                 <span style={{
                                   position: 'absolute', cursor: 'pointer', inset: 0,
-                                  backgroundColor: showProfilePictures ? '#10b981' : '#374151',
+                                  backgroundColor: showProfilePictures ? 'var(--color-success)' : 'var(--color-border-strong)',
                                   transition: '.4s', borderRadius: 34,
                                 }}>
                                   <span style={{
@@ -6811,7 +5465,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 />
                                 <span style={{
                                   position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
-                                  backgroundColor: showQrCode ? '#10b981' : '#374151',
+                                  backgroundColor: showQrCode ? 'var(--color-success)' : 'var(--color-border-strong)',
                                   transition: '.4s', borderRadius: '34px'
                                 }}>
                                   <span style={{
@@ -6846,7 +5500,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 />
                                 <span style={{
                                   position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
-                                  backgroundColor: showRequestsUrl ? '#10b981' : '#374151',
+                                  backgroundColor: showRequestsUrl ? 'var(--color-success)' : 'var(--color-border-strong)',
                                   transition: '.4s', borderRadius: '34px'
                                 }}>
                                   <span style={{
@@ -6897,7 +5551,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 />
                                 <span style={{
                                   position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
-                                  backgroundColor: showBreakMusicTrack ? '#10b981' : '#374151',
+                                  backgroundColor: showBreakMusicTrack ? 'var(--color-success)' : 'var(--color-border-strong)',
                                   transition: '.4s', borderRadius: '34px'
                                 }}>
                                   <span style={{
@@ -6992,7 +5646,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           />
                           <span style={{
                             position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
-                            backgroundColor: hideSingerQueue ? '#10b981' : '#374151',
+                            backgroundColor: hideSingerQueue ? 'var(--color-success)' : 'var(--color-border-strong)',
                             transition: '.4s', borderRadius: '34px'
                           }}>
                             <span style={{
@@ -7044,7 +5698,7 @@ function closeDetails(e: React.SyntheticEvent) {
                           />
                           <span style={{
                             position: 'absolute', cursor: hideSingerQueue ? 'pointer' : 'not-allowed', top: 0, left: 0, right: 0, bottom: 0,
-                            backgroundColor: keepRotationScrollerSingers ? '#10b981' : '#374151',
+                            backgroundColor: keepRotationScrollerSingers ? 'var(--color-success)' : 'var(--color-border-strong)',
                             transition: '.4s', borderRadius: '34px'
                           }}>
                             <span style={{
@@ -7397,7 +6051,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 gap: 8,
                                 padding: '8px 10px',
                                 fontSize: 13,
-                                borderBottom: '1px solid rgba(255,255,255,0.06)',
+                                borderBottom: '1px solid var(--color-border)',
                                 alignItems: 'center',
                                 cursor: 'grab'
                               }}
@@ -7409,14 +6063,12 @@ function closeDetails(e: React.SyntheticEvent) {
                               >
                                 <MaterialIcon name="add" style={{ fontSize: 18 }} />
                               </button>
-                              {breakColumnEnabled('song') && <span>{track.title}</span>}
-                              {breakColumnEnabled('artist') && <span>{track.artist || '—'}</span>}
-                              {breakColumnEnabled('genre') && <span>{track.genre || '—'}</span>}
+                              {breakColumnEnabled('song') && <ScrollingText mode="hover" label={track.title}>{track.title}</ScrollingText>}
+                              {breakColumnEnabled('artist') && <ScrollingText mode="hover" label={track.artist || '—'}>{track.artist || '—'}</ScrollingText>}
+                              {breakColumnEnabled('genre') && <ScrollingText mode="hover" label={track.genre || '—'}>{track.genre || '—'}</ScrollingText>}
                               {breakColumnEnabled('length') && <span>{formatDurationMs(track.duration_ms)}</span>}
                               {breakColumnEnabled('path') && (
-                                <span title={track.file_path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {track.file_path}
-                                </span>
+                                <ScrollingText mode="hover" label={track.file_path}>{track.file_path}</ScrollingText>
                               )}
                             </div>
                           ))}
@@ -7505,7 +6157,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                 </span>
                                 <div style={{ minWidth: 0 }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <div style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{track.title}</div>
+                                    <ScrollingText mode="hover" className="break-playlist-title" label={track.title}>{track.title}</ScrollingText>
                                     {isCurrent && (
                                       <span style={{ fontSize: 11, border: '1px solid var(--color-border-focus)', borderRadius: 999, padding: '1px 8px', color: 'var(--color-accent-hover)' }}>
                                         Now Playing
@@ -7761,39 +6413,18 @@ function closeDetails(e: React.SyntheticEvent) {
                               className="search-result"
                               onClick={() => replaceSong(replacingId, track. id)}
                             >
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {track. title || 'Unknown'}
-                                </div>
-                                <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {track.artist || 'Unknown'}
-                                  {track.disc_id && (
-                                    <span style={{
-                                      marginLeft: 8,
-                                      fontSize: 11,
-                                      padding: '1px 6px',
-                                      background: 'var(--color-bg-primary)',
-                                      borderRadius: '4px',
-                                      opacity: 0.8
-                                    }}>
-                                      {track.disc_id}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
+                              {renderSearchResultText(track, track.disc_id ? { text: track.disc_id } : undefined)}
                               <button
-                                className="control-btn primary"
-                                style={{
-                                  padding: '6px 14px',
-                                  fontSize: '13px',
-                                  minWidth: '70px'
-                                }}
+                                className="control-btn primary search-result-action"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   replaceSong(replacingId, track.id);
                                 }}
+                                disabled={busy}
+                                aria-label={`Replace with ${track.title || 'this song'}`}
+                                title="Replace with this song"
                               >
-                                Select
+                                <MaterialIcon name="swap_horiz" />
                               </button>
                             </div>
                           ))
@@ -7805,61 +6436,33 @@ function closeDetails(e: React.SyntheticEvent) {
                               className="search-result"
                               onClick={() => replaceSongWithKaraokeNerds(replacingId, track)}
                             >
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {track.title || 'Unknown'}
-                                </div>
-                                <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {track.artist || 'Unknown'}
-                                  {track.brand && (
-                                    <span style={{
-                                      marginLeft: 8,
-                                      fontSize: 11,
-                                      padding: '1px 6px',
-                                      background: 'linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(168, 85, 247, 0.2))',
-                                      borderRadius: '4px',
-                                      color: '#a855f7'
-                                    }}>
-                                      {track.brand}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
+                              {renderSearchResultText(track, track.brand ? { text: track.brand, brand: true } : undefined)}
                               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                                 {allowDownloads && (
                                   <button
-                                    className="control-btn"
-                                    style={{
-                                      padding: '6px 14px',
-                                      fontSize: '13px',
-                                      minWidth: '70px',
-                                      background: downloadingTrack === track.url ? 'var(--color-bg-secondary)' : 'linear-gradient(135deg, #10b981, #059669)',
-                                      color: 'white'
-                                    }}
+                                    className={`control-btn search-result-action${downloadingTrack === track.url ? '' : ' success'}`}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       downloadVideo(track.url, track.title, track.artist, track.brand);
                                     }}
                                     disabled={busy || downloadingTrack === track.url}
+                                    aria-label={downloadingTrack === track.url ? 'Downloading to local library' : 'Download to local library'}
                                     title="Download to local library"
                                   >
-                                    {downloadingTrack === track.url ? <MaterialIcon name="hourglass_top" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} /> : <MaterialIcon name="download" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />} Download
+                                    <MaterialIcon name={downloadingTrack === track.url ? 'hourglass_top' : 'download'} />
                                   </button>
                                 )}
                                 <button
-                                  className="control-btn"
-                                  style={{
-                                    padding: '6px 14px',
-                                    fontSize: '13px',
-                                    minWidth: '70px',
-                                    background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
-                                  }}
+                                  className="control-btn primary search-result-action"
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     replaceSongWithKaraokeNerds(replacingId, track);
                                   }}
+                                  disabled={busy}
+                                  aria-label={`Replace with ${track.title || 'this song'}`}
+                                  title="Replace with this song"
                                 >
-                                  Select
+                                  <MaterialIcon name="swap_horiz" />
                                 </button>
                               </div>
                             </div>
@@ -7919,7 +6522,7 @@ function closeDetails(e: React.SyntheticEvent) {
 
                   {/* Singer Name Field — hidden when opened from singer modal */}
                   {manualRequestForSingerId ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(99,102,241,0.1)', borderRadius: 8, border: '1px solid rgba(99,102,241,0.2)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'var(--color-accent-soft)', borderRadius: 8, border: '1px solid rgba(99,102,241,0.2)' }}>
                       <span style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>Adding for:</span>
                       <strong style={{ fontSize: 13 }}><MaterialIcon name="mic_external_on" style={{ fontSize: 15, verticalAlign: 'text-bottom', marginRight: 3 }} />{manualRequestName}</strong>
                       <button className="control-btn" type="button" onClick={() => setManualRequestForSingerId(null)}>Change Singer</button>
@@ -8189,26 +6792,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                   className="search-result"
                                   onClick={() => addManualRequestLocal(track.id)}
                                 >
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {track.title || 'Unknown'}
-                                    </div>
-                                    <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {track.artist || 'Unknown'}
-                                      {track.disc_id && (
-                                        <span style={{
-                                          marginLeft: 8,
-                                          fontSize: 11,
-                                          padding: '1px 6px',
-                                          background: 'var(--color-bg-primary)',
-                                          borderRadius: '4px',
-                                          opacity: 0.8
-                                        }}>
-                                          {track.disc_id}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
+                                  {renderSearchResultText(track, track.disc_id ? { text: track.disc_id } : undefined)}
                                   <button
                                     className="control-btn primary"
                                     style={{
@@ -8236,37 +6820,11 @@ function closeDetails(e: React.SyntheticEvent) {
                                   className="search-result"
                                   onClick={() => addManualRequestExternal(track)}
                                 >
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {track.title || 'Unknown'}
-                                    </div>
-                                    <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {track.artist || 'Unknown'}
-                                      {track.brand && (
-                                        <span style={{
-                                          marginLeft: 8,
-                                          fontSize: 11,
-                                          padding: '1px 6px',
-                                          background: 'linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(168, 85, 247, 0.2))',
-                                          borderRadius: '4px',
-                                          color: '#a855f7'
-                                        }}>
-                                          {track.brand}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
+                                  {renderSearchResultText(track, track.brand ? { text: track.brand, brand: true } : undefined)}
                                   <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                                     {allowDownloads && (
                                       <button
-                                        className="control-btn"
-                                        style={{
-                                          padding: '6px 10px',
-                                          fontSize: '13px',
-                                          minWidth: '40px',
-                                          background: downloadingTrack === track.url ? 'var(--color-bg-secondary)' : 'linear-gradient(135deg, #10b981, #059669)',
-                                          color: 'white'
-                                        }}
+                                        className={`control-btn search-result-action${downloadingTrack === track.url ? '' : ' success'}`}
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           downloadVideo(track.url, track.title, track.artist, track.brand);
@@ -8279,13 +6837,7 @@ function closeDetails(e: React.SyntheticEvent) {
                                       </button>
                                     )}
                                     <button
-                                      className="control-btn"
-                                      style={{
-                                        padding: '6px 10px',
-                                        fontSize: '13px',
-                                        minWidth: '40px',
-                                        background: 'linear-gradient(135deg, #7c3aed, #a855f7)'
-                                      }}
+                                      className="control-btn primary search-result-action"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         addManualRequestExternal(track);

@@ -95,7 +95,7 @@ export function InstallApp({ app, visible }: { app: 'Host' | 'Player'; visible: 
   if (!visible || installed || dismissed) return null
   return (
     <aside aria-label={`${app} app installation`} style={{
-      padding: '8px 16px', background: '#11111b', color: '#fff', textAlign: 'right',
+      padding: '8px 16px', background: 'var(--color-bg-secondary, #11111b)', color: 'var(--color-text-primary, #fff)', textAlign: 'right',
       ...(app === 'Player' ? {
         position: 'fixed', top: 'max(8px, env(safe-area-inset-top))',
         right: 'max(8px, env(safe-area-inset-right))', zIndex: 20,
@@ -103,12 +103,12 @@ export function InstallApp({ app, visible }: { app: 'Host' | 'Player'; visible: 
       } as const : {}),
     }}>
       <button type="button" onClick={() => void install()} disabled={busy}
-        style={{ minHeight: 44, padding: '8px 14px', borderRadius: 8, border: '1px solid #6366f1', background: '#24243c', color: '#fff', cursor: 'pointer' }}>
+        style={{ minHeight: 44, padding: '8px 14px', borderRadius: 8, border: '1px solid var(--color-accent, #6366f1)', background: 'var(--color-accent-soft, #24243c)', color: 'var(--color-text-primary, #fff)', cursor: 'pointer' }}>
         {busy ? 'Opening installer...' : `Install ${app} app`}
       </button>
       <button type="button" onClick={dismiss} disabled={busy}
         aria-label={`Dismiss ${app} app installation prompt`} title="Dismiss installation prompt"
-        style={{ minWidth: 44, minHeight: 44, marginLeft: 8, padding: 8, border: 0, borderRadius: 8, background: 'transparent', color: '#fff', cursor: 'pointer' }}>
+        style={{ minWidth: 44, minHeight: 44, marginLeft: 8, padding: 8, border: 0, borderRadius: 8, background: 'transparent', color: 'var(--color-text-primary, #fff)', cursor: 'pointer' }}>
         Dismiss
       </button>
       {error && <p role="alert">{error}</p>}

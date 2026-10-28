@@ -5,6 +5,11 @@ import { parseBooleanSetting } from "../utils/settings";
 import SocialLoginSettings from "../components/SocialLoginSettings";
 import AccountLinkDialog from "../components/AccountLinkDialog";
 import SingerAvatar from "../components/SingerAvatar";
+import { THEMES, applyTheme, clearTheme, isThemeId, type ThemeId } from "../theme";
+import { useStaffTheme } from "../useStaffTheme";
+import { AppBarContent } from "../appBarSlot";
+import "./Admin.css";
+import MaterialIcon, { renderStatusMessage } from "../components/MaterialIcon";
 
 type LibraryParseMode =
   | 'discid-artist-title'
@@ -57,42 +62,6 @@ type OidcPublicConfig = {
   passwordLoginEnabled: boolean;
 };
 
-function MaterialIcon({
-  name,
-  className = '',
-  style,
-}: {
-  name: string;
-  className?: string;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <span className={`material-symbols-rounded${className ? ` ${className}` : ''}`} aria-hidden="true" style={style}>
-      {name}
-    </span>
-  );
-}
-
-function renderStatusMessage(message: string) {
-  if (message.startsWith('⚠️')) {
-    return (
-      <>
-        <MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-        {message.replace(/^⚠️\s*/, '')}
-      </>
-    );
-  }
-  if (message.startsWith('✔')) {
-    return (
-      <>
-        <MaterialIcon name="check_circle" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />
-        {message.replace(/^✔\s*/, '')}
-      </>
-    );
-  }
-  return message;
-}
-
 const LIBRARY_PARSE_MODE_OPTIONS: Array<{
   value: LibraryParseMode;
   label: string;
@@ -135,51 +104,34 @@ const LIBRARY_PARSE_MODE_OPTIONS: Array<{
   },
 ];
 
-const ADMIN_CARD_STATE_KEY = 'karaokedock.admin.cardState';
+type AdminSection = "overview" | "libraries" | "break" | "system" | "gateway" | "users" | "social" | "oidc";
 
-type AdminCardState = {
-  mediaLibrariesExpanded: boolean;
-  breakMusicExpanded: boolean;
-  systemSettingsExpanded: boolean;
-  remoteGatewayExpanded: boolean;
-  usersExpanded: boolean;
-  oidcSettingsExpanded: boolean;
-  socialLoginExpanded: boolean;
-};
+const ADMIN_SECTION_STORAGE_KEY = "karaokedock.admin.section";
 
-function loadAdminCardState(): AdminCardState {
-  const defaults: AdminCardState = {
-    mediaLibrariesExpanded: true,
-    breakMusicExpanded: true,
-    systemSettingsExpanded: true,
-    remoteGatewayExpanded: true,
-    usersExpanded: true,
-    oidcSettingsExpanded: false,
-    socialLoginExpanded: false,
-  };
+const ADMIN_SECTIONS: Array<{ id: AdminSection; label: string; icon: string; description: string }> = [
+  { id: "overview", label: "Overview", icon: "bar_chart", description: "Library and queue statistics" },
+  { id: "libraries", label: "Media Libraries", icon: "library_music", description: "Karaoke folders and how they are scanned" },
+  { id: "break", label: "Break Music", icon: "music_note", description: "Break music folders and saved playlists" },
+  { id: "system", label: "System", icon: "settings", description: "Requests, downloads, background tasks and logging" },
+  { id: "gateway", label: "Remote Gateway", icon: "cloud_sync", description: "Public request gateway sync" },
+  { id: "users", label: "Users", icon: "group", description: "Host and admin accounts" },
+  { id: "social", label: "Social Login", icon: "account_circle", description: "Google and Facebook sign-in for singers" },
+  { id: "oidc", label: "SSO / OIDC", icon: "link", description: "Single sign-on for hosts and admins" },
+];
 
-  if (typeof window === 'undefined') {
-    return defaults;
-  }
+function isAdminSection(value: unknown): value is AdminSection {
+  return ADMIN_SECTIONS.some((section) => section.id === value);
+}
 
+function loadAdminSection(): AdminSection {
+  if (typeof window === "undefined") return "overview";
+  const fromHash = window.location.hash.replace(/^#/, "");
+  if (isAdminSection(fromHash)) return fromHash;
   try {
-    const raw = window.localStorage.getItem(ADMIN_CARD_STATE_KEY);
-    if (!raw) {
-      return defaults;
-    }
-
-    const parsed = JSON.parse(raw) as Partial<AdminCardState>;
-    return {
-      mediaLibrariesExpanded: parsed.mediaLibrariesExpanded ?? defaults.mediaLibrariesExpanded,
-      breakMusicExpanded: parsed.breakMusicExpanded ?? defaults.breakMusicExpanded,
-      systemSettingsExpanded: parsed.systemSettingsExpanded ?? defaults.systemSettingsExpanded,
-      remoteGatewayExpanded: parsed.remoteGatewayExpanded ?? defaults.remoteGatewayExpanded,
-      usersExpanded: parsed.usersExpanded ?? defaults.usersExpanded,
-      oidcSettingsExpanded: parsed.oidcSettingsExpanded ?? defaults.oidcSettingsExpanded,
-      socialLoginExpanded: parsed.socialLoginExpanded ?? defaults.socialLoginExpanded,
-    };
+    const stored = window.localStorage.getItem(ADMIN_SECTION_STORAGE_KEY);
+    return isAdminSection(stored) ? stored : "overview";
   } catch {
-    return defaults;
+    return "overview";
   }
 }
 
@@ -244,10 +196,13 @@ export default function Admin() {
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
   const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
+  const [themeId] = useStaffTheme();
+  const [requestTheme, setRequestTheme] = useState<ThemeId>("midnight");
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [allowDownloads, setAllowDownloads] = useState(true);
   const [showDownloadBrowser, setShowDownloadBrowser] = useState(false);
   const [stationMode, setStationMode] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [remoteGatewayEnabled, setRemoteGatewayEnabled] = useState(false);
   const [remoteGatewayUrl, setRemoteGatewayUrl] = useState("");
   const [remoteGatewayToken, setRemoteGatewayToken] = useState("");
@@ -256,8 +211,8 @@ export default function Admin() {
   const [remoteGatewayStatus, setRemoteGatewayStatus] = useState<any>(null);
   
   // Collapsible card states
-  const [cardState, setCardState] = useState<AdminCardState>(() => loadAdminCardState());
-  const { mediaLibrariesExpanded, breakMusicExpanded, systemSettingsExpanded, remoteGatewayExpanded, usersExpanded, oidcSettingsExpanded } = cardState;
+  const [activeSection, setActiveSection] = useState<AdminSection>(() => loadAdminSection());
+  const adminNavRef = useRef<HTMLElement | null>(null);
 
   // User Manager state
   const [users, setUsers] = useState<ManagedUser[]>([]);
@@ -312,10 +267,6 @@ export default function Admin() {
     if (!auth.sessionToken || !auth.isLoggedIn) return;
     const s = await api("/api/admin/stats", { headers: sessionHeaders });
     setStats(s);
-  }
-
-  function updateCardState<K extends keyof AdminCardState>(key: K, value: AdminCardState[K]) {
-    setCardState((current) => ({ ...current, [key]: value }));
   }
 
   function resetLibraryForm() {
@@ -469,35 +420,6 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    // Apply modern dark theme
-    document.documentElement.style.cssText = `
-      --color-bg-primary: #0a0a0f;
-      --color-bg-secondary: #16161d;
-      --color-bg-card: #1d1d27;
-      --color-bg-hover: #252533;
-      --color-accent: #6366f1;
-      --color-accent-hover: #7c7ff3;
-      --color-success: #10b981;
-      --color-warning: #f59e0b;
-      --color-danger: #ef4444;
-      --color-text-primary: #ffffff;
-      --color-text-secondary: #a1a1aa;
-      --color-text-muted: #71717a;
-      --color-border: rgba(255, 255, 255, 0.08);
-      --color-border-focus: rgba(99, 102, 241, 0.5);
-    `;
-    
-    document.body.style.cssText = `
-      background: linear-gradient(135deg, #0a0a0f 0%, #16161d 100%);
-      color: #ffffff;
-      margin: 0;
-      padding: 0;
-      min-height: 100vh;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    `;
-
     refreshLibs();
 
     // Show OIDC error from URL param if present
@@ -520,20 +442,33 @@ export default function Admin() {
     window.addEventListener('showAccountManagement', handleShowAccountManagement);
 
     return () => {
-      document.documentElement.style.cssText = '';
-      document.body.style.cssText = '';
+      clearTheme();
       window.removeEventListener('showAccountManagement', handleShowAccountManagement);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
+    try {
+      window.localStorage.setItem(ADMIN_SECTION_STORAGE_KEY, activeSection);
+    } catch {
+      // Storage blocked: the section still works for this visit.
     }
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${activeSection}`);
+    // On phones the section list scrolls sideways; keep the active one visible.
+    const nav = adminNavRef.current;
+    const active = nav?.querySelector<HTMLElement>(".admin-nav-item.active");
+    if (nav && active && nav.scrollWidth > nav.clientWidth) {
+      nav.scrollTo({ left: active.offsetLeft - (nav.clientWidth - active.offsetWidth) / 2, behavior: "smooth" });
+    }
+  }, [activeSection, auth.isLoggedIn, auth.isAdmin]);
 
-    window.localStorage.setItem(ADMIN_CARD_STATE_KEY, JSON.stringify(cardState));
-  }, [cardState]);
+  const visibleSections = ADMIN_SECTIONS.filter((section) =>
+    section.id === "gateway" ? stationMode : section.id === "social" || section.id === "oidc" ? !stationMode : true);
+
+  useEffect(() => {
+    if (settingsLoaded && !visibleSections.some((section) => section.id === activeSection)) setActiveSection("overview");
+  }, [settingsLoaded, stationMode, activeSection]);
 
   async function addLibrary() {
     if (!auth.sessionToken || !auth.isLoggedIn) return alert("Please login first");
@@ -784,10 +719,12 @@ export default function Admin() {
       setLocalLibraryEnabled(parseBooleanSetting(settings["libraries.local_enabled"]));
       setExternalLibraryEnabled(parseBooleanSetting(settings["libraries.external_enabled"]));
       setLocalBrowseEnabled(parseBooleanSetting(settings["requests.local_browse_enabled"]));
+      setRequestTheme(isThemeId(settings["requests.theme"]) ? settings["requests.theme"] : "midnight");
       setAllowDownloads(parseBooleanSetting(settings["ytdlp.allow_downloads"]));
       setBreakPlaylistsFolder(settings["break_music.playlists_folder"] || "/media/playlists");
       setImageUploadsDir(settings["images.upload_dir"] || "/media/images");
       setStationMode(settings["station.mode"] === true);
+      setSettingsLoaded(true);
       setRemoteGatewayEnabled(settings["remote_gateway.enabled"] === true);
       setRemoteGatewayUrl(settings["remote_gateway.url"] || "");
       setRemoteGatewayToken(settings["remote_gateway.api_token"] || "");
@@ -990,6 +927,28 @@ export default function Admin() {
         setTimeout(() => setBanner(""), 5000);
         setExternalLibraryEnabled(!enabled);
       }
+    }
+  }
+
+  useEffect(() => {
+    applyTheme(themeId);
+  }, [themeId]);
+
+  async function handleRequestThemeChange(theme: ThemeId) {
+    const previous = requestTheme;
+    setRequestTheme(theme);
+    try {
+      await api("/api/host/settings/request-theme", {
+        method: "PUT",
+        headers: { "x-session-token": auth.sessionToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ theme }),
+      });
+      setBanner(`✔ Request page theme set to ${THEMES.find((t) => t.id === theme)?.label ?? theme}`);
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update request page theme: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+      setRequestTheme(previous);
     }
   }
 
@@ -1231,688 +1190,17 @@ export default function Admin() {
 
   return (
     <div className="admin-page">
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
 
-        /* Animations */
-        @keyframes fadeInUp {
-          from { opacity: 0; transform: translateY(20px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes slideIn {
-          from { transform: translateX(-10px); opacity: 0; }
-          to { transform: translateX(0); opacity: 1; }
-        }
-
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-
-        .material-symbols-rounded {
-          font-family: 'Material Symbols Rounded';
-          font-weight: normal;
-          font-style: normal;
-          line-height: 1;
-          letter-spacing: normal;
-          text-transform: none;
-          display: inline-block;
-          white-space: nowrap;
-          word-wrap: normal;
-          direction: ltr;
-          -webkit-font-feature-settings: 'liga';
-          -webkit-font-smoothing: antialiased;
-        }
-
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-
-        /* Base */
-        .admin-page {
-          min-height: 100vh;
-          padding: 16px;
-          padding-bottom: env(safe-area-inset-bottom, 16px);
-          animation: fadeInUp 0.5s ease;
-        }
-
-        . container {
-          max-width: 1200px;
-          margin: 0 auto;
-        }
-
-        /* Header */
-        .header {
-          text-align: center;
-          margin-bottom: 32px;
-          animation: fadeInUp 0.6s ease;
-        }
-
-        .header-title {
-          font-size: clamp(28px, 5vw, 40px);
-          font-weight: 700;
-          margin: 0 0 8px 0;
-          background: linear-gradient(135deg, #6366f1 0%, #10b981 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          letter-spacing: -0.02em;
-        }
-
-        .header-subtitle {
-          color: var(--color-text-secondary);
-          font-size: clamp(14px, 2. 5vw, 16px);
-          margin: 0;
-        }
-
-        /* Cards */
-        .card {
-          background: var(--color-bg-card);
-          border: 1px solid var(--color-border);
-          border-radius: 20px;
-          padding: 24px;
-          margin-bottom: 20px;
-          box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
-          backdrop-filter: blur(10px);
-          animation: fadeInUp 0.6s ease backwards;
-          overflow: hidden;
-        }
-
-        .card:nth-child(2) { animation-delay: 0.1s; }
-        .card:nth-child(3) { animation-delay: 0.2s; }
-        .card:nth-child(4) { animation-delay: 0.3s; }
-
-        /* Banner */
-        .banner {
-          background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(245, 158, 11, 0.15));
-          border: 1px solid rgba(239, 68, 68, 0.3);
-          border-radius: 16px;
-          padding: 14px 20px;
-          margin-bottom: 20px;
-          font-weight: 500;
-          animation: slideIn 0.3s ease;
-        }
-
-        . banner. warning {
-          background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(239, 68, 68, 0.15));
-          border-color: rgba(245, 158, 11, 0.3);
-        }
-
-        .banner.success {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(99, 102, 241, 0.15));
-          border-color: rgba(16, 185, 129, 0.3);
-        }
-
-        /* Login Card */
-        .login-card {
-          max-width: 400px;
-          margin: 100px auto;
-        }
-
-        .login-header {
-          text-align: center;
-          margin-bottom: 32px;
-        }
-
-        .login-title {
-          font-size: 28px;
-          font-weight: 700;
-          margin-bottom: 8px;
-        }
-
-        /* Forms */
-        .form-group {
-          margin-bottom: 20px;
-        }
-
-        . form-label {
-          display: block;
-          font-size: 14px;
-          font-weight: 500;
-          color: var(--color-text-secondary);
-          margin-bottom: 8px;
-        }
-
-        .form-input {
-          width: 100%;
-          padding: 12px 16px;
-          background: var(--color-bg-secondary);
-          border: 2px solid var(--color-border);
-          border-radius: 12px;
-          color: var(--color-text-primary);
-          font-size: 15px;
-          transition: all 0.3s ease;
-          outline: none;
-          box-sizing: border-box;
-        }
-
-        .form-input:focus {
-          border-color: var(--color-accent);
-          box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
-        }
-
-        /* Buttons */
-        .btn {
-          padding: 12px 20px;
-          background: var(--color-bg-secondary);
-          border: 2px solid var(--color-border);
-          border-radius: 12px;
-          color: var(--color-text-primary);
-          font-weight: 600;
-          font-size: 14px;
-          cursor: pointer;
-          transition: all 0. 3s ease;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 8px;
-        }
-
-        .btn:hover:not(:disabled) {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          transform: translateY(-2px);
-          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
-        }
-
-        .btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .btn.primary {
-          background: linear-gradient(135deg, #6366f1, #8b5cf6);
-          border: none;
-          color: white;
-        }
-
-        .btn.success {
-          background: linear-gradient(135deg, #10b981, #059669);
-          border: none;
-          color: white;
-        }
-
-        .btn.danger {
-          background: linear-gradient(135deg, #ef4444, #dc2626);
-          border: none;
-          color: white;
-        }
-
-        .btn.ghost {
-          background: transparent;
-          border-color: transparent;
-        }
-
-        .btn.ghost:hover:not(:disabled) {
-          background: var(--color-bg-hover);
-          border-color: var(--color-border);
-        }
-
-        /* Icon-only button — compact square with a descriptive title tooltip */
-        .btn-icon {
-          padding: 8px;
-          min-width: 36px;
-          min-height: 36px;
-          font-size: 18px;
-          line-height: 1;
-          background: var(--color-bg-secondary);
-          border: 2px solid var(--color-border);
-          border-radius: 10px;
-          color: var(--color-text-primary);
-          cursor: pointer;
-          transition: all 0.3s ease;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          position: relative;
-        }
-
-        .btn-icon:hover:not(:disabled) {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          transform: translateY(-2px);
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
-        }
-
-        .btn-icon:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .btn-icon.danger {
-          background: linear-gradient(135deg, rgba(239,68,68,0.15), rgba(220,38,38,0.15));
-          border-color: rgba(239,68,68,0.4);
-        }
-
-        .btn-icon.danger:hover:not(:disabled) {
-          background: linear-gradient(135deg, #ef4444, #dc2626);
-          border-color: #ef4444;
-          color: white;
-        }
-
-        .btn-icon.primary {
-          background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(139,92,246,0.15));
-          border-color: rgba(99,102,241,0.4);
-        }
-
-        .btn-icon.primary:hover:not(:disabled) {
-          background: linear-gradient(135deg, #6366f1, #8b5cf6);
-          border-color: #6366f1;
-          color: white;
-        }
-
-        .btn-icon.success {
-          background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.15));
-          border-color: rgba(16,185,129,0.4);
-        }
-
-        .btn-icon.success:hover:not(:disabled) {
-          background: linear-gradient(135deg, #10b981, #059669);
-          border-color: #10b981;
-          color: white;
-        }
-
-        /* Stats Pills */
-        .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-          gap: 12px;
-          margin-bottom: 20px;
-        }
-
-        . stat-pill {
-          padding: 16px;
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 16px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 4px;
-          transition: all 0.3s ease;
-        }
-
-        .stat-pill:hover {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          transform: translateY(-2px);
-        }
-
-        .stat-icon {
-          font-size: 24px;
-          margin-bottom: 4px;
-        }
-
-        .stat-value {
-          font-size: 24px;
-          font-weight: 700;
-          color: var(--color-accent);
-        }
-
-        .stat-label {
-          font-size: 12px;
-          color: var(--color-text-secondary);
-          text-transform: uppercase;
-          letter-spacing: 0.05em;
-        }
-
-        /* Library List */
-        .library-list {
-          display: grid;
-          gap: 12px;
-        }
-
-        . library-item {
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 16px;
-          padding: 16px;
-          transition: all 0.3s ease;
-          animation: fadeInUp 0.4s ease backwards;
-        }
-
-        .library-item:hover {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          transform: translateX(4px);
-        }
-
-        .library-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: start;
-          gap: 12px;
-        }
-
-        .library-info {
-          flex: 1;
-          min-width: 0;
-        }
-
-        .library-name {
-          font-weight: 600;
-          font-size: 16px;
-          margin-bottom: 4px;
-        }
-
-        .library-path {
-          font-size: 13px;
-          color: var(--color-text-secondary);
-          font-family: 'Monaco', 'Courier New', monospace;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .library-actions {
-          display: flex;
-          gap: 8px;
-        }
-
-        /* Modal */
-        .modal-backdrop {
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(0, 0, 0, 0.8);
-          backdrop-filter: blur(4px);
-          z-index: 999;
-          animation: fadeIn 0.3s ease;
-        }
-
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-
-        .modal {
-          position: fixed;
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          background: var(--color-bg-card);
-          border: 1px solid var(--color-border);
-          border-radius: 20px;
-          padding: 24px;
-          z-index: 1000;
-          max-width: 800px;
-          width: 90%;
-          max-height: 85vh;
-          overflow: hidden;
-          box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
-          display: flex;
-          flex-direction: column;
-          animation: scaleIn 0.3s ease;
-        }
-
-        @keyframes scaleIn {
-          from {
-            transform: translate(-50%, -50%) scale(0.9);
-            opacity: 0;
-          }
-          to {
-            transform: translate(-50%, -50%) scale(1);
-            opacity: 1;
-          }
-        }
-
-        .modal-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 20px;
-        }
-
-        . modal-title {
-          font-size: 20px;
-          font-weight: 600;
-          margin: 0;
-        }
-
-        /* Browser */
-        .browser-path {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          padding: 12px 16px;
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 12px;
-          margin-bottom: 16px;
-          font-family: 'Monaco', 'Courier New', monospace;
-          font-size: 14px;
-        }
-
-        .breadcrumb {
-          display: flex;
-          gap: 6px;
-          align-items: center;
-        }
-
-        . breadcrumb-sep {
-          opacity: 0.3;
-        }
-
-        .breadcrumb-part {
-          cursor: pointer;
-          color: var(--color-accent);
-          transition: all 0.2s ease;
-        }
-
-        . breadcrumb-part:hover {
-          color: var(--color-accent-hover);
-          text-decoration: underline;
-        }
-
-        .browser-container {
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 12px;
-          padding: 8px;
-          height: 400px;
-          overflow-y: auto;
-          margin-bottom: 16px;
-        }
-
-        .folder-item {
-          padding: 12px 16px;
-          cursor: pointer;
-          border-radius: 8px;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          transition: all 0.2s ease;
-          border: 1px solid transparent;
-        }
-
-        .folder-item:hover {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-        }
-
-        .folder-icon {
-          font-size: 20px;
-        }
-
-        . folder-name {
-          flex: 1;
-          font-weight: 500;
-        }
-
-        /* Error Messages */
-        .error-msg {
-          background: rgba(239, 68, 68, 0.1);
-          border: 1px solid rgba(239, 68, 68, 0.3);
-          border-radius: 10px;
-          padding: 12px 16px;
-          color: #fca5a5;
-          font-size: 14px;
-          margin-bottom: 16px;
-        }
-
-        /* Loading */
-        .loading-spinner {
-          width: 20px;
-          height: 20px;
-          border: 2px solid var(--color-border);
-          border-top-color: var(--color-accent);
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-          display: inline-block;
-        }
-
-        /* Empty State */
-        .empty-state {
-          text-align: center;
-          padding: 48px 24px;
-          color: var(--color-text-secondary);
-        }
-
-        . empty-icon {
-          font-size: 64px;
-          margin-bottom: 16px;
-          opacity: 0.5;
-        }
-
-        . empty-text {
-          font-size: 16px;
-        }
-
-        . empty-subtext {
-          font-size: 14px;
-          margin-top: 8px;
-          opacity: 0.7;
-        }
-
-        /* Collapsible Card Header */
-        .card-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          cursor: pointer;
-          user-select: none;
-          margin-bottom: 20px;
-        }
-
-        .card-header h2 {
-          margin: 0;
-          font-size: 20px;
-        }
-
-        .card-toggle {
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border);
-          border-radius: 8px;
-          padding: 6px 12px;
-          color: var(--color-text-secondary);
-          font-size: 14px;
-          cursor: pointer;
-          transition: all 0.3s ease;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
-
-        .card-toggle:hover {
-          background: var(--color-bg-hover);
-          border-color: var(--color-accent);
-          color: var(--color-text-primary);
-        }
-
-        .card-content {
-          overflow: hidden;
-          transition: max-height 0.3s ease, opacity 0.3s ease;
-        }
-
-        .card-content.collapsed {
-          max-height: 0;
-          opacity: 0;
-          pointer-events: none;
-        }
-
-        .card-content.expanded {
-          max-height: none;
-          opacity: 1;
-        }
-
-        .disabled-overlay {
-          position: relative;
-          opacity: 0.4;
-          pointer-events: none;
-        }
-
-        .disabled-overlay::after {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: var(--color-bg-card);
-          opacity: 0.7;
-          pointer-events: none;
-        }
-
-        /* User info layout — allow date to wrap on small screens */
-        .user-meta {
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
-          gap: 4px 8px;
-          font-size: 13px;
-          color: var(--color-text-secondary);
-          font-family: 'Monaco', 'Courier New', monospace;
-        }
-
-        .user-meta-date {
-          /* Allow the date string to break onto its own line */
-          white-space: nowrap;
-        }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-          .admin-page {
-            padding: 12px;
-          }
-
-          . card {
-            padding: 16px;
-            border-radius: 16px;
-          }
-
-          . stats-grid {
-            grid-template-columns: repeat(2, 1fr);
-          }
-
-          .library-header {
-            flex-direction: column;
-          }
-
-          .library-actions {
-            width: 100%;
-            margin-top: 12px;
-            justify-content: flex-start;
-          }
-
-          /* On mobile keep btn-icon buttons small — do NOT stretch them */
-          .btn-icon {
-            flex: 0 0 auto;
-          }
-
-          .modal {
-            width: 95%;
-            padding: 20px;
-          }
-        }
-
-        @media (max-width: 480px) {
-          . stats-grid {
-            grid-template-columns: 1fr;
-          }
-        }
-      `}</style>
+      <AppBarContent>
+        <div className="app-bar-title">
+          <h1>Admin</h1>
+          {auth.isLoggedIn && auth.isAdmin && (
+            <div className="app-bar-subtitle">
+              <span>{visibleSections.find((section) => section.id === activeSection)?.label ?? "Overview"}</span>
+            </div>
+          )}
+        </div>
+      </AppBarContent>
 
       <div className="container">
         {banner && (
@@ -1979,21 +1267,18 @@ export default function Admin() {
               <>
                 {oidcConfig?.passwordLoginEnabled !== false && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0' }}>
-                    <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.1)' }} />
+                    <div style={{ flex: 1, height: 1, background: 'var(--color-border-strong)' }} />
                     <span style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>or</span>
-                    <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.1)' }} />
+                    <div style={{ flex: 1, height: 1, background: 'var(--color-border-strong)' }} />
                   </div>
                 )}
                 <a
                   href={`${API_BASE}/api/auth/oidc/login?returnTo=%2Fadmin`}
-                  className="btn"
+                  className="btn primary"
                   style={{
                     width: '100%',
                     display: 'flex',
                     justifyContent: 'center',
-                    background: oidcConfig.buttonColor,
-                    border: 'none',
-                    color: 'white',
                     textDecoration: 'none',
                     boxSizing: 'border-box',
                   }}
@@ -2017,6 +1302,25 @@ export default function Admin() {
           </div>
         ) : (
           <>
+            <div className="admin-layout">
+              <nav className="admin-nav" aria-label="Admin sections" ref={adminNavRef}>
+                {visibleSections.map((section) => (
+                  <button
+                    key={section.id}
+                    type="button"
+                    className={`admin-nav-item${activeSection === section.id ? " active" : ""}`}
+                    aria-current={activeSection === section.id ? "page" : undefined}
+                    onClick={() => setActiveSection(section.id)}
+                  >
+                    <MaterialIcon name={section.icon} />
+                    <span>{section.label}</span>
+                  </button>
+                ))}
+              </nav>
+
+              <div className="admin-content">
+            {activeSection === "overview" && (
+              <>
             {/* Stats Card */}
             <div className="card">
               <h2 style={{ margin: "0 0 20px", fontSize: 20 }}><MaterialIcon name="bar_chart" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />System Statistics</h2>
@@ -2076,17 +1380,30 @@ export default function Admin() {
                 </button>
               </div>
             </div>
+            <div className="admin-section-tiles">
+              {visibleSections.filter((section) => section.id !== "overview").map((section) => (
+                <button key={section.id} type="button" className="admin-section-tile" onClick={() => setActiveSection(section.id)}>
+                  <MaterialIcon name={section.icon} className="admin-section-tile-icon" />
+                  <span className="admin-section-tile-text">
+                    <strong>{section.label}</strong>
+                    <span>{section.description}</span>
+                  </span>
+                  <MaterialIcon name="chevron_right" className="admin-section-tile-chevron" />
+                </button>
+              ))}
+            </div>
+              </>
+            )}
 
+            {activeSection === "libraries" && (
+              <>
             {/* Media Libraries Card */}
             <div className="card">
-              <div className="card-header" onClick={() => updateCardState('mediaLibrariesExpanded', !mediaLibrariesExpanded)}>
+              <div className="card-header">
                 <h2><MaterialIcon name="library_music" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Media Libraries</h2>
-                <button className="card-toggle" type="button">
-                  {mediaLibrariesExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
-                </button>
               </div>
               
-              <div className={`card-content ${mediaLibrariesExpanded ? 'expanded' : 'collapsed'}`}>
+              <div className="card-content">
                 <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'flex-end' }}>
                   <button
                     className="btn-icon primary"
@@ -2146,17 +1463,18 @@ export default function Admin() {
               )}
               </div>
             </div>
+              </>
+            )}
 
+            {activeSection === "break" && (
+              <>
             {/* Break Music Card */}
             <div className="card">
-              <div className="card-header" onClick={() => updateCardState('breakMusicExpanded', !breakMusicExpanded)}>
+              <div className="card-header">
                 <h2><MaterialIcon name="music_note" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Break Music</h2>
-                <button className="card-toggle" type="button">
-                  {breakMusicExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
-                </button>
               </div>
 
-              <div className={`card-content ${breakMusicExpanded ? 'expanded' : 'collapsed'}`}>
+              <div className="card-content">
                 <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                     <button
@@ -2263,17 +1581,18 @@ export default function Admin() {
                 )}
               </div>
             </div>
+              </>
+            )}
 
+            {activeSection === "system" && (
+              <>
             {/* System Settings Card */}
             <div className="card">
-              <div className="card-header" onClick={() => updateCardState('systemSettingsExpanded', !systemSettingsExpanded)}>
+              <div className="card-header">
                 <h2><MaterialIcon name="settings" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />System Settings</h2>
-                <button className="card-toggle" type="button">
-                  {systemSettingsExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
-                </button>
               </div>
               
-              <div className={`card-content ${systemSettingsExpanded ? 'expanded' : 'collapsed'}`}>
+              <div className="card-content">
                 {/* Combined Library & Request Settings */}
                 <div style={{
                   background: "var(--color-bg-secondary)",
@@ -2337,6 +1656,20 @@ export default function Admin() {
                         style={{ width: 18, height: 18 }}
                       />
                       <span style={{ fontSize: 14 }}>Show Local Library Browse on Request Page</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14 }}>Request Page Theme</span>
+                      <select
+                        className="form-input"
+                        style={{ width: "auto", minWidth: 160, padding: "8px 12px" }}
+                        value={requestTheme}
+                        onChange={(e) => void handleRequestThemeChange(e.target.value as ThemeId)}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                      >
+                        {THEMES.map((theme) => (
+                          <option key={theme.id} value={theme.id}>{theme.label}</option>
+                        ))}
+                      </select>
                     </label>
                   </div>
                   <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
@@ -2578,17 +1911,18 @@ export default function Admin() {
               </div>
               </div>
             </div>
+              </>
+            )}
 
+            {activeSection === "gateway" && (
+              <>
             {/* Remote Requests Gateway Card */}
             {stationMode && (
               <div className="card">
-                <div className="card-header" onClick={() => updateCardState('remoteGatewayExpanded', !remoteGatewayExpanded)}>
+                <div className="card-header">
                   <h2><MaterialIcon name="cloud_sync" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />Remote Requests Gateway</h2>
-                  <button className="card-toggle" type="button">
-                    {remoteGatewayExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
-                  </button>
                 </div>
-                <div className={`card-content ${remoteGatewayExpanded ? 'expanded' : 'collapsed'}`}>
+                <div className="card-content">
                   <p style={{ margin: "0 0 16px", color: "var(--color-text-muted)", fontSize: 14 }}>
                     Configure the public Remote Requests Gateway that will mirror the Station catalog and forward singer requests back to this local Station.
                   </p>
@@ -2700,7 +2034,7 @@ export default function Admin() {
                       border: "1px solid var(--color-border)",
                       borderRadius: 12,
                       background: "var(--color-bg-secondary)",
-                      color: remoteGatewayStatus.ok === false ? "#fca5a5" : "var(--color-text-secondary)",
+                      color: remoteGatewayStatus.ok === false ? "var(--color-danger)" : "var(--color-text-secondary)",
                       fontSize: 13,
                     }}>
                       {remoteGatewayStatus.ok === false ? (
@@ -2720,16 +2054,17 @@ export default function Admin() {
                 </div>
               </div>
             )}
+              </>
+            )}
 
+            {activeSection === "users" && (
+              <>
             {/* User Manager Card */}
             <div className="card">
-              <div className="card-header" onClick={() => updateCardState('usersExpanded', !usersExpanded)}>
+              <div className="card-header">
                 <h2><MaterialIcon name="group" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />User Manager</h2>
-                <button className="card-toggle" type="button">
-                  {usersExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
-                </button>
               </div>
-              <div className={`card-content ${usersExpanded ? 'expanded' : 'collapsed'}`}>
+              <div className="card-content">
                 {usersLoadError && (
                   <div className="error-msg" role="alert">
                     {usersLoadError} <button className="btn ghost" onClick={() => void refreshUsers()}>Retry</button>
@@ -2795,13 +2130,13 @@ export default function Admin() {
                               {getUserDisplayName(user)}
                               <span style={{
                                 fontSize: 11, padding: '2px 8px', borderRadius: 999,
-                                background: user.role === 'admin' ? 'rgba(99,102,241,0.2)' : 'rgba(161,161,170,0.2)',
-                                color: user.role === 'admin' ? '#a5b4fc' : '#a1a1aa',
+                                background: user.role === 'admin' ? 'var(--color-accent-soft)' : 'color-mix(in srgb, var(--color-text-secondary) 20%, transparent)',
+                                color: user.role === 'admin' ? 'var(--color-accent-text)' : 'var(--color-text-secondary)',
                                 fontWeight: 600,
                               }}>{user.role}</span>
-                              {!user.is_active && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(239,68,68,0.2)', color: '#fca5a5', fontWeight: 600 }}>inactive</span>}
-                              {user.oidc_subject && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(16,185,129,0.2)', color: '#6ee7b7', fontWeight: 600 }}>SSO</span>}
-                              {user.social_provider && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(16,185,129,0.2)', color: '#6ee7b7', fontWeight: 600 }}>{user.social_provider === 'google' ? 'Google' : 'Facebook'}</span>}
+                              {!user.is_active && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'var(--color-danger-soft)', color: 'var(--color-danger)', fontWeight: 600 }}>inactive</span>}
+                              {user.oidc_subject && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'var(--color-success-soft)', color: 'var(--color-success)', fontWeight: 600 }}>SSO</span>}
+                              {user.social_provider && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'var(--color-success-soft)', color: 'var(--color-success)', fontWeight: 600 }}>{user.social_provider === 'google' ? 'Google' : 'Facebook'}</span>}
                             </div>
                             <div className="user-meta">
                               {getUserDisplayName(user) !== user.username && (
@@ -2845,11 +2180,11 @@ export default function Admin() {
                 )}
               </div>
             </div>
+              </>
+            )}
 
-            {!stationMode && (
-              <SocialLoginSettings key={auth.sessionToken} sessionToken={auth.sessionToken}
-                expanded={cardState.socialLoginExpanded}
-                onToggle={() => updateCardState('socialLoginExpanded', !cardState.socialLoginExpanded)} />
+            {!stationMode && activeSection === "social" && (
+              <SocialLoginSettings key={auth.sessionToken} sessionToken={auth.sessionToken} />
             )}
             {auth.isAdmin && mergeUser && (
               <AccountLinkDialog key={`${mergeUser.id}:${auth.sessionToken}`}
@@ -2859,15 +2194,12 @@ export default function Admin() {
                 onLinked={(sourceName) => void handleUserMerged(sourceName)} />
             )}
             {/* OIDC Settings Card */}
-            {!stationMode && (
+            {!stationMode && activeSection === "oidc" && (
             <div className="card">
-              <div className="card-header" onClick={() => updateCardState('oidcSettingsExpanded', !oidcSettingsExpanded)}>
+              <div className="card-header">
                 <h2><MaterialIcon name="link" style={{ fontSize: 24, verticalAlign: 'text-bottom', marginRight: 8 }} />SSO / OIDC Settings</h2>
-                <button className="card-toggle" type="button">
-                  {oidcSettingsExpanded ? <><MaterialIcon name="expand_less" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Collapse</> : <><MaterialIcon name="play_arrow" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 4 }} />Expand</>}
-                </button>
               </div>
-              <div className={`card-content ${oidcSettingsExpanded ? 'expanded' : 'collapsed'}`}>
+              <div className="card-content">
                 {oidcBanner && (
                   <div className={`banner ${oidcBanner.includes('✔') ? 'success' : ''}`} style={{ marginBottom: 16 }}>
                     {renderStatusMessage(oidcBanner)}
@@ -2915,13 +2247,7 @@ export default function Admin() {
                       <div className="form-group" style={{ margin: 0 }}>
                         <label className="form-label">Button Text</label>
                         <input className="form-input" type="text" value={oidcSettings.buttonText} onChange={(e) => setOidcSettings({ ...oidcSettings, buttonText: e.target.value })} placeholder="Login with SSO" />
-                      </div>
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Button Color</label>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                          <input type="color" value={oidcSettings.buttonColor} onChange={(e) => setOidcSettings({ ...oidcSettings, buttonColor: e.target.value })} style={{ width: 44, height: 40, borderRadius: 8, border: '2px solid var(--color-border)', cursor: 'pointer', padding: 2, background: 'var(--color-bg-secondary)' }} />
-                          <input className="form-input" type="text" value={oidcSettings.buttonColor} onChange={(e) => setOidcSettings({ ...oidcSettings, buttonColor: e.target.value })} placeholder="#6366f1" style={{ flex: 1 }} />
-                        </div>
+                        <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--color-text-muted)" }}>The button uses the current theme's colors.</p>
                       </div>
                     </div>
 
@@ -2960,7 +2286,7 @@ export default function Admin() {
                     {oidcSettings.buttonText && (
                       <div style={{ marginBottom: 16 }}>
                         <label className="form-label">Preview</label>
-                        <div style={{ padding: '12px 20px', borderRadius: 12, background: oidcSettings.buttonColor, color: 'white', display: 'inline-block', fontWeight: 600, fontSize: 14 }}>
+                        <div className="btn primary" style={{ display: 'inline-flex', pointerEvents: 'none' }}>
                           {oidcSettings.buttonText}
                         </div>
                       </div>
@@ -2980,6 +2306,9 @@ export default function Admin() {
               </div>
             </div>
             )}
+
+              </div>
+            </div>
 
             {showAddLibraryModal && (
               <>
