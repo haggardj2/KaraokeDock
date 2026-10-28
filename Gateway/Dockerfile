@@ -1,8 +1,10 @@
-FROM node:26.12.1-bookworm-slim AS deps
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++
+# Same Alpine base as the main KaraokeDock image. better-sqlite3 (the only dependency
+# with an install script) ships musl prebuilds for x64/arm64 and loads them at runtime,
+# so its node-gyp rebuild is skipped and no compiler toolchain is needed.
+FROM node:26.12.1-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 FROM deps AS build
 COPY tsconfig.json ./
@@ -10,7 +12,7 @@ COPY src ./src
 COPY scripts ./scripts
 RUN npm run build && npm prune --omit=dev
 
-FROM node:26.12.1-bookworm-slim AS runtime
+FROM node:26.12.1-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./

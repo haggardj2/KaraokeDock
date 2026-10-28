@@ -111,7 +111,7 @@ test('all Node container stages are pinned to patched releases', () => {
     const images = Array.from(read(file).matchAll(/^FROM (node:\S+)/gm), match => match[1]);
     assert.ok(images.length > 0);
     for (const image of images) {
-      assert.equal(image, file === 'Gateway/Dockerfile' ? 'node:26.12.1-bookworm-slim' : 'node:26.12.1-alpine');
+      assert.equal(image, 'node:26.12.1-alpine');
     }
   }
 });
