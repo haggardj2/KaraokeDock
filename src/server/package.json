@@ -1,6 +1,6 @@
 {
   "name": "karaoke-api",
-  "version": "4.0.20",
+  "version": "4.0.23",
   "type": "module",
   "private": true,
   "engines": {
