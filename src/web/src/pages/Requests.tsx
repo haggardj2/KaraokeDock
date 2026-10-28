@@ -1,9 +1,8 @@
-import React, {
+import {
   useEffect,
   useState,
   useRef,
   useCallback,
-  useLayoutEffect,
   useMemo,
 } from "react";
 import { api } from "../api";
@@ -15,34 +14,22 @@ import ThemePicker from "../components/ThemePicker";
 import { downloadJsonFile, readJsonFile, safeHistoryFilename } from "../utils/jsonFiles";
 import {
   BROWSE_LETTERS,
-  MAX_KEY_ADJUSTMENT,
-  MIN_KEY_ADJUSTMENT,
   SINGER_UUID_STORAGE_KEY,
   VENUE_THEME_CACHE_KEY,
   createSingerUuid,
   formatCount,
   getOrCreateSingerUuid,
-  groupKey,
-  searchRelevance,
   shouldHandleEnterKey,
   toLocalSearchTrack,
 } from "./requests/helpers";
-import type {
-  BrowseArtistRow,
-  BrowseCategory,
-  CombinedSearchGroup,
-  CombinedSearchTrack,
-  KaraokeNerdsTrack,
-  LyricsData,
-  SearchRow,
-  SelfSingerProfileResponse,
-  VersionPicker,
-} from "./requests/types";
+import type { SelfSingerProfileResponse } from "./requests/types";
 import CombinedVersionPickerDialog from "./requests/CombinedVersionPickerDialog";
 import LyricsDialog from "./requests/LyricsDialog";
-import SongResultCard, { type SongResultActions } from "./requests/SongResultCard";
+import SongResultCard from "./requests/SongResultCard";
 import { useMyQueue } from "./requests/useMyQueue";
 import MyQueueSheet from "./requests/MyQueueSheet";
+import { useSongSearch } from "./requests/useSongSearch";
+import { useSongActions } from "./requests/useSongActions";
 import {
   applyTheme,
   clearTheme,
@@ -76,7 +63,6 @@ import "./Requests.css";
 
 export default function Requests() {
   const auth = useAuth();
-  const [q, setQ] = useState("");
   const [requestedBy, setRequestedBy] = useState(() => (localStorage.getItem("karaoke-name") ?? "").trim());
   const [singerUuid, setSingerUuid] = useState(() => getOrCreateSingerUuid());
   const signedInRequestName = auth.isLoggedIn ? (
@@ -107,42 +93,7 @@ export default function Requests() {
     }
     return params;
   }, [requestedBy, requestSingerUuid]);
-  const [keyAdjustments, setKeyAdjustments] = useState<Map<string, number>>(
-    new Map(),
-  );
-  const [localViewMode, setLocalViewMode] = useState<"search" | "browse">(
-    "search",
-  );
-  const [localRows, setLocalRows] = useState<SearchRow[]>([]);
-  const [karaokeNerdsRows, setKaraokeNerdsRows] = useState<KaraokeNerdsTrack[]>(
-    [],
-  );
-  const [busy, setBusy] = useState(false);
-  const [knBusy, setKnBusy] = useState(false);
-  const [browseBusy, setBrowseBusy] = useState(false);
-  const [browseCategory, setBrowseCategory] =
-    useState<BrowseCategory>("artist");
-  const [browseLetters, setBrowseLetters] = useState<string[]>([]);
-  const [selectedBrowseLetter, setSelectedBrowseLetter] = useState("");
-  const [browseArtists, setBrowseArtists] = useState<BrowseArtistRow[]>([]);
-  const [selectedBrowseArtist, setSelectedBrowseArtist] = useState("");
-  const [browseSummary, setBrowseSummary] = useState("");
-  const [addingLocal, setAddingLocal] = useState<number | null>(null);
-  const [addingKaraokeNerds, setAddingKaraokeNerds] = useState<string | null>(
-    null,
-  );
-  const [recentlyAdded, setRecentlyAdded] = useState<Set<string>>(new Set());
   const [showNamePrompt, setShowNamePrompt] = useState(false);
-  const [kindFilter, setKindFilter] = useState<"all" | "mp4" | "cdgmp3">("all");
-  const [searchFieldFilter, setSearchFieldFilter] = useState<
-    "all" | "artist" | "title"
-  >("all");
-  const [showFilters, setShowFilters] = useState(false);
-  const [actionMenuOpen, setActionMenuOpen] = useState<string | null>(null);
-  const [lyricsPopupOpen, setLyricsPopupOpen] = useState<string | null>(null);
-  const [lyricsData, setLyricsData] = useState<LyricsData>({});
-  // Fuzzy suggestions (shown when main search returns no results)
-  const [fuzzySuggestions, setFuzzySuggestions] = useState<SearchRow[]>([]);
   // Requester's own queue items
   const historyImportInputRef = useRef<HTMLInputElement | null>(null);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
@@ -169,11 +120,6 @@ export default function Requests() {
     queueLoadRef,
     loadMyQueue,
   } = myQueueState;
-  // Collapsible result sections (collapsed by default)
-  // Source filter: 'all' | 'local' | 'online'
-  const [sourceFilter, setSourceFilter] = useState<"all" | "local" | "online">(
-    "all",
-  );
   // Name confirmation flow
   const [nameConfirmed, setNameConfirmed] = useState(false);
   const [nameError, setNameError] = useState("");
@@ -194,21 +140,81 @@ export default function Requests() {
   const [profilePanel, setProfilePanel] = useState<"image" | "history" | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState("");
-  // Version picker for consolidated song results
-  const [combinedVersionPicker, setCombinedVersionPicker] = useState<VersionPicker<CombinedSearchTrack> | null>(null);
-  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const actionMenuRef = useRef<HTMLDivElement | null>(null);
-  const lyricsPopupRef = useRef<HTMLDivElement | null>(null);
-  const browseArtistScrollYRef = useRef(0);
 
-  // Request acceptance settings
-  const [requestAcceptance, setRequestAcceptance] = useState<
-    "local" | "external" | "disabled"
-  >("local");
+  // Library availability from the venue's public settings
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
   const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
+  const {
+    q,
+    setQ,
+    localViewMode,
+    setLocalViewMode,
+    localRows,
+    setLocalRows,
+    karaokeNerdsRows,
+    setKaraokeNerdsRows,
+    selectedBrowseLetter,
+    setSelectedBrowseLetter,
+    selectedBrowseArtist,
+    setSelectedBrowseArtist,
+    browseSummary,
+    setBrowseSummary,
+    kindFilter,
+    setKindFilter,
+    searchFieldFilter,
+    setSearchFieldFilter,
+    showFilters,
+    setShowFilters,
+    fuzzySuggestions,
+    setFuzzySuggestions,
+    sourceFilter,
+    setSourceFilter,
+    searchTimeoutRef,
+    browseArtistScrollYRef,
+    doLocalSearch,
+    doKaraokeNerdsSearch,
+    isLocalBrowseMode,
+    showingBrowseArtistList,
+    showLocalResults,
+    showKnResults,
+    isLoading,
+    isKnLoading,
+    availableBrowseLetters,
+    visibleLocalRows,
+    visibleBrowseArtists,
+    groupedLocalRows,
+    groupedFuzzySuggestions,
+    combinedSearchGroups,
+    browseCombinedGroups,
+    browseCategory,
+    setBrowseCategory,
+  } = useSongSearch({ localLibraryEnabled, externalLibraryEnabled, localBrowseEnabled });
+  const {
+    addingLocal,
+    lyricsPopupOpen,
+    setLyricsPopupOpen,
+    lyricsData,
+    combinedVersionPicker,
+    setCombinedVersionPicker,
+    lyricsPopupRef,
+    fetchLyrics,
+    enqueueLocal,
+    enqueueKaraokeNerds,
+    songResultActions,
+  } = useSongActions({
+    requestedBy,
+    requestSingerUuid,
+    requesterJsonHeaders,
+    requireName: () => {
+      setShowNamePrompt(true);
+      setNameConfirmed(false);
+      openNameDialog();
+    },
+    // showToast is declared further down; call it lazily from the hook's async handlers.
+    showToast: (message, type) => showToast(message, type),
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -261,26 +267,6 @@ export default function Requests() {
   }
 
   useEffect(() => {
-    // Close popup when clicking outside
-    function handleDown(e: MouseEvent) {
-      if (actionMenuOpen) {
-        const el = actionMenuRef.current;
-        if (el && !el.contains(e.target as Node)) {
-          setActionMenuOpen(null);
-        }
-      }
-      if (lyricsPopupOpen) {
-        const el = lyricsPopupRef.current;
-        if (el && !el.contains(e.target as Node)) {
-          setLyricsPopupOpen(null);
-        }
-      }
-    }
-    document.addEventListener("mousedown", handleDown);
-    return () => document.removeEventListener("mousedown", handleDown);
-  }, [actionMenuOpen, lyricsPopupOpen]);
-
-  useEffect(() => {
     // Hide navigation
     const nav = document.querySelector("nav");
     const prevNavDisplay = nav ? (nav as HTMLElement).style.display : "";
@@ -301,14 +287,12 @@ export default function Requests() {
     async function loadSettings() {
       try {
         const settings = await api("/api/settings/public");
-        const acceptance = settings["requests.acceptance"] || "local";
         const localEnabled = settings["libraries.local_enabled"] !== false;
         const externalEnabled =
           settings["libraries.external_enabled"] !== false;
         const browseEnabled =
           settings["requests.local_browse_enabled"] !== false;
 
-        setRequestAcceptance(acceptance);
         setLocalLibraryEnabled(localEnabled);
         setExternalLibraryEnabled(externalEnabled);
         setLocalBrowseEnabled(browseEnabled);
@@ -327,7 +311,6 @@ export default function Requests() {
     return () => {
       clearTheme();
       if (nav) (nav as HTMLElement).style.display = prevNavDisplay;
-      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, []);
@@ -340,12 +323,6 @@ export default function Requests() {
     setThemeChoice(choice);
     saveThemeId(choice, globalThis.localStorage, REQUEST_THEME_STORAGE_KEY);
   }
-
-  useEffect(() => {
-    if (!localBrowseEnabled && localViewMode === "browse") {
-      setLocalViewMode("search");
-    }
-  }, [localBrowseEnabled, localViewMode]);
 
   // Save name to localStorage
   useEffect(() => {
@@ -454,391 +431,6 @@ export default function Requests() {
     if (!alreadyConfirmed && !auth.sessionToken) openNameDialog();
   }, []);
 
-  // Helper function to adjust key
-  const adjustKey = useCallback((trackKey: string, delta: number) => {
-    setKeyAdjustments((prev) => {
-      const next = new Map(prev);
-      const currentKey = next.get(trackKey) ?? 0;
-      const newKey = currentKey + delta;
-      if (newKey >= MIN_KEY_ADJUSTMENT && newKey <= MAX_KEY_ADJUSTMENT) {
-        next.set(trackKey, newKey);
-      }
-      return next;
-    });
-  }, []);
-
-  // Open or close a result's options sheet; CSS centres it (a bottom sheet on phones).
-  const handleActionMenuToggle = useCallback(
-    (e: React.MouseEvent, trackKey: string) => {
-      e.stopPropagation();
-      setActionMenuOpen((prev) => (prev === trackKey ? null : trackKey));
-    },
-    [],
-  );
-
-  // Function to fetch lyrics
-  const fetchLyrics = useCallback(
-    async (trackKey: string, artist: string, title: string) => {
-      // Set loading state
-      setLyricsData((prev) => ({
-        ...prev,
-        [trackKey]: { loading: true, lyrics: null, error: null },
-      }));
-
-      try {
-        // Create an AbortController for timeout
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-        const response = await fetch(
-          `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`,
-          {
-            signal: controller.signal,
-          },
-        );
-
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          throw new Error("Lyrics not found");
-        }
-
-        const data = await response.json();
-
-        setLyricsData((prev) => ({
-          ...prev,
-          [trackKey]: {
-            loading: false,
-            lyrics: data.lyrics || "No lyrics available",
-            error: null,
-          },
-        }));
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error && err.name === "AbortError"
-            ? "Request timeout - please try again"
-            : "Lyrics not found";
-
-        setLyricsData((prev) => ({
-          ...prev,
-          [trackKey]: { loading: false, lyrics: null, error: errorMessage },
-        }));
-      }
-    },
-    [],
-  );
-
-  // Local library search
-  const doLocalSearch = useCallback(async () => {
-    if (!q.trim()) {
-      setLocalRows([]);
-      setFuzzySuggestions([]);
-      return;
-    }
-    setBusy(true);
-    try {
-      let url = `/api/search?q=${encodeURIComponent(q.trim())}`;
-      if (kindFilter !== "all") {
-        url += `&kind=${kindFilter}`;
-      }
-      if (searchFieldFilter !== "all") {
-        url += `&field=${searchFieldFilter}`;
-      }
-      const r = await api(url);
-      const rows = Array.isArray(r) ? r : [];
-      setLocalRows(rows);
-      if (rows.length === 0 && q.trim().length >= 2) {
-        try {
-          let suggestionUrl = `/api/search/suggestions?q=${encodeURIComponent(q.trim())}`;
-          if (kindFilter !== "all") {
-            suggestionUrl += `&kind=${kindFilter}`;
-          }
-          if (searchFieldFilter !== "all") {
-            suggestionUrl += `&field=${searchFieldFilter}`;
-          }
-          const suggestions = await api(suggestionUrl);
-          setFuzzySuggestions(Array.isArray(suggestions) ? suggestions : []);
-        } catch (err) {
-          console.error("Fuzzy suggestion search error:", err);
-          setFuzzySuggestions([]);
-        }
-      } else {
-        setFuzzySuggestions([]);
-      }
-    } catch (err) {
-      console.error("Search error:", err);
-      setLocalRows([]);
-      setFuzzySuggestions([]);
-    } finally {
-      setBusy(false);
-    }
-  }, [q, kindFilter, searchFieldFilter]);
-
-  // Karaoke Nerds search
-  const doKaraokeNerdsSearch = useCallback(async () => {
-    if (!q.trim()) {
-      setKaraokeNerdsRows([]);
-      return;
-    }
-    setKnBusy(true);
-    try {
-      const r = await api(
-        `/api/karaoke-nerds/search?q=${encodeURIComponent(q.trim())}`,
-      );
-      const knRows = Array.isArray(r) ? r : [];
-      setKaraokeNerdsRows(knRows);
-    } catch (err) {
-      console.error("Karaoke Nerds search error:", err);
-      setKaraokeNerdsRows([]);
-    } finally {
-      setKnBusy(false);
-    }
-  }, [q]);
-
-  const loadBrowseLetters = useCallback(
-    async (category: BrowseCategory) => {
-      setBrowseBusy(true);
-      try {
-        const kindQuery = kindFilter !== "all" ? `&kind=${kindFilter}` : "";
-        const result = await api(
-          `/api/search/browse/letters?mode=${category}${kindQuery}`,
-        );
-        const letters = Array.isArray(result?.letters)
-          ? result.letters.filter(
-              (value: unknown): value is string => typeof value === "string",
-            )
-          : [];
-        setBrowseLetters(letters);
-        setSelectedBrowseLetter((current) => {
-          if (letters.includes(current)) return current;
-          if (letters.includes("#")) return "#";
-          return letters[0] ?? "";
-        });
-      } catch (err) {
-        console.error("Browse letters error:", err);
-        setBrowseLetters([]);
-        setSelectedBrowseLetter("");
-      } finally {
-        setBrowseBusy(false);
-      }
-    },
-    [kindFilter],
-  );
-
-  const loadBrowseArtists = useCallback(
-    async (letter: string) => {
-      setBrowseBusy(true);
-      setBrowseArtists([]);
-      setLocalRows([]);
-      setBrowseSummary(
-        q.trim() ? `Artists matching "${q.trim()}"` : `Artists starting with "${letter}"`,
-      );
-      try {
-        const kindQuery = kindFilter !== "all" ? `&kind=${kindFilter}` : "";
-        const searchQuery = q.trim()
-          ? `&q=${encodeURIComponent(q.trim())}`
-          : "";
-        const result = await api(
-          q.trim()
-            ? `/api/search?q=${encodeURIComponent(q.trim())}&field=artist${kindQuery}`
-            : `/api/search/browse/artists?letter=${encodeURIComponent(letter)}${searchQuery}${kindQuery}`,
-        );
-        if (q.trim()) {
-          setLocalRows(Array.isArray(result) ? result : []);
-          return;
-        }
-        const rawArtists: unknown[] = Array.isArray(result?.artists)
-          ? result.artists
-          : [];
-        const artists = rawArtists
-              .map((value: unknown): BrowseArtistRow | null => {
-                if (typeof value === "string") {
-                  const artist = value.trim();
-                  return artist ? { artist } : null;
-                }
-                if (!value || typeof value !== "object") return null;
-                const row = value as {
-                  artist?: unknown;
-                  songCount?: unknown;
-                  versionCount?: unknown;
-                };
-                if (typeof row.artist !== "string" || !row.artist.trim()) {
-                  return null;
-                }
-                const songCount = Number(row.songCount);
-                const versionCount = Number(row.versionCount);
-                return {
-                  artist: row.artist.trim(),
-                  songCount: Number.isFinite(songCount) ? songCount : undefined,
-                  versionCount: Number.isFinite(versionCount)
-                    ? versionCount
-                    : undefined,
-                };
-              })
-              .filter((value): value is BrowseArtistRow => value !== null);
-        setBrowseArtists(artists);
-      } catch (err) {
-        console.error("Browse artists error:", err);
-        setBrowseArtists([]);
-      } finally {
-        setBrowseBusy(false);
-      }
-    },
-    [kindFilter, q],
-  );
-
-  const loadBrowseTitles = useCallback(
-    async (letter: string) => {
-      setBrowseBusy(true);
-      setBrowseArtists([]);
-      setLocalRows([]);
-      setBrowseSummary(
-        q.trim() ? `Titles matching "${q.trim()}"` : `Titles starting with "${letter}"`,
-      );
-      try {
-        const kindQuery = kindFilter !== "all" ? `&kind=${kindFilter}` : "";
-        const searchQuery = q.trim()
-          ? `&q=${encodeURIComponent(q.trim())}`
-          : "";
-        const result = await api(
-          `/api/search/browse/titles?letter=${encodeURIComponent(letter)}${searchQuery}${kindQuery}`,
-        );
-        setLocalRows(Array.isArray(result) ? result : []);
-      } catch (err) {
-        console.error("Browse titles error:", err);
-        setLocalRows([]);
-      } finally {
-        setBrowseBusy(false);
-      }
-    },
-    [kindFilter, q],
-  );
-
-  const loadBrowseArtistTracks = useCallback(
-    async (artist: string) => {
-      setBrowseBusy(true);
-      setLocalRows([]);
-      setBrowseSummary(`Songs by ${artist}`);
-      try {
-        const kindQuery = kindFilter !== "all" ? `&kind=${kindFilter}` : "";
-        const result = await api(
-          `/api/search/browse/artist-tracks?artist=${encodeURIComponent(artist)}${kindQuery}`,
-        );
-        setLocalRows(Array.isArray(result) ? result : []);
-      } catch (err) {
-        console.error("Browse artist tracks error:", err);
-        setLocalRows([]);
-      } finally {
-        setBrowseBusy(false);
-      }
-    },
-    [kindFilter],
-  );
-
-  // Debounced search — fires both local and KN simultaneously
-  useEffect(() => {
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current);
-    }
-
-    if (localViewMode === "browse") {
-      if (!q.trim()) {
-        setKaraokeNerdsRows([]);
-        return;
-      }
-      searchTimeoutRef.current = setTimeout(() => {
-        if (externalLibraryEnabled) doKaraokeNerdsSearch();
-      }, 350);
-      return () => {
-        if (searchTimeoutRef.current) {
-          clearTimeout(searchTimeoutRef.current);
-        }
-      };
-    }
-
-    searchTimeoutRef.current = setTimeout(() => {
-      if (localLibraryEnabled) doLocalSearch();
-      if (externalLibraryEnabled) doKaraokeNerdsSearch();
-    }, 350);
-
-    return () => {
-      if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current);
-      }
-    };
-  }, [
-    q,
-    localViewMode,
-    localLibraryEnabled,
-    externalLibraryEnabled,
-    doLocalSearch,
-    doKaraokeNerdsSearch,
-  ]);
-
-  // Re-run searches when switching back from browse to search
-  useEffect(() => {
-    if (localViewMode === "browse") return;
-    if (q.trim()) {
-      if (localLibraryEnabled) doLocalSearch();
-      if (externalLibraryEnabled) doKaraokeNerdsSearch();
-    }
-  }, [localViewMode]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (localViewMode !== "browse") return;
-
-    setBrowseArtists([]);
-    setSelectedBrowseArtist("");
-    setLocalRows([]);
-    setBrowseSummary("");
-    loadBrowseLetters(browseCategory);
-  }, [localViewMode, browseCategory, kindFilter, loadBrowseLetters]);
-
-  useEffect(() => {
-    if (localViewMode !== "browse") return;
-
-    if (!selectedBrowseLetter) {
-      setBrowseArtists([]);
-      setSelectedBrowseArtist("");
-      setLocalRows([]);
-      setBrowseSummary("");
-      return;
-    }
-
-    setSelectedBrowseArtist("");
-    const timeout = setTimeout(() => {
-      if (browseCategory === "artist") {
-        loadBrowseArtists(selectedBrowseLetter);
-      } else {
-        loadBrowseTitles(selectedBrowseLetter);
-      }
-    }, 250);
-
-    return () => clearTimeout(timeout);
-  }, [
-    localViewMode,
-    browseCategory,
-    selectedBrowseLetter,
-    loadBrowseArtists,
-    loadBrowseTitles,
-  ]);
-
-  useEffect(() => {
-    if (localViewMode !== "browse" || browseCategory !== "artist") return;
-
-    if (!selectedBrowseArtist) {
-      setLocalRows([]);
-      return;
-    }
-
-    loadBrowseArtistTracks(selectedBrowseArtist);
-  }, [
-    localViewMode,
-    browseCategory,
-    selectedBrowseArtist,
-    loadBrowseArtistTracks,
-  ]);
-
   const showToast = (
     message: string,
     type: "success" | "error" = "success",
@@ -869,17 +461,6 @@ export default function Requests() {
     }, 3000);
   };
 
-  const isLocalBrowseMode = localViewMode === "browse";
-  const showingBrowseArtistList =
-    isLocalBrowseMode &&
-    browseCategory === "artist" &&
-    !!selectedBrowseLetter &&
-    !selectedBrowseArtist;
-  const showLocalResults = localLibraryEnabled && localRows.length > 0;
-  const showKnResults = externalLibraryEnabled && karaokeNerdsRows.length > 0;
-  const isLoading = busy || browseBusy;
-  const isKnLoading = knBusy;
-  const availableBrowseLetters = new Set(browseLetters);
 
   function openNameDialog() {
     setNameDraft(requestedBy);
@@ -920,157 +501,6 @@ export default function Requests() {
       setSavingName(false);
     }
   }
-
-  // Group local search results by normalised title + artist to deduplicate across disc IDs
-  type GroupedResult = {
-    key: string;
-    title: string;
-    artist: string;
-    versions: SearchRow[];
-    kind: string;
-  };
-  const visibleLocalRows = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    if (!isLocalBrowseMode || !query) return localRows;
-
-    return localRows.filter((row) => {
-      const value =
-        browseCategory === "artist" ? row.artist ?? "" : row.title ?? "";
-      return value.toLowerCase().includes(query);
-    });
-  }, [browseCategory, isLocalBrowseMode, localRows, q]);
-
-  const visibleBrowseArtists = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    if (!query) return browseArtists;
-    return browseArtists.filter((row) =>
-      row.artist.toLowerCase().includes(query),
-    );
-  }, [browseArtists, q]);
-
-  const groupedLocalRows = useMemo((): GroupedResult[] => {
-    const map = new Map<string, GroupedResult>();
-    for (const row of visibleLocalRows) {
-      const key = groupKey(row.title ?? "", row.artist ?? "");
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          title: row.title ?? "",
-          artist: row.artist ?? "",
-          versions: [],
-          kind: row.kind,
-        });
-      }
-      map.get(key)!.versions.push(row);
-    }
-    return Array.from(map.values());
-  }, [visibleLocalRows]);
-
-  const groupedFuzzySuggestions = useMemo((): GroupedResult[] => {
-    const map = new Map<string, GroupedResult>();
-    for (const row of fuzzySuggestions) {
-      const key = groupKey(row.title ?? "", row.artist ?? "");
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          title: row.title ?? "",
-          artist: row.artist ?? "",
-          versions: [],
-          kind: row.kind,
-        });
-      }
-      map.get(key)!.versions.push(row);
-    }
-    return Array.from(map.values());
-  }, [fuzzySuggestions]);
-
-  // Group Karaoke Nerds results by normalised title + artist
-  const visibleKaraokeNerdsRows = useMemo(() => {
-    if (!isLocalBrowseMode || !q.trim()) return karaokeNerdsRows;
-    const query = q.trim().toLowerCase();
-    return karaokeNerdsRows.filter((track) => {
-      const value = browseCategory === "artist" ? track.artist : track.title;
-      return (value ?? "").toLowerCase().includes(query);
-    });
-  }, [browseCategory, isLocalBrowseMode, karaokeNerdsRows, q]);
-
-  const combinedSearchGroups = useMemo((): CombinedSearchGroup[] => {
-    const tracks: CombinedSearchTrack[] = [];
-    if (
-      localLibraryEnabled &&
-      (isLocalBrowseMode || sourceFilter !== "online")
-    ) {
-      for (const row of localRows) {
-        tracks.push(toLocalSearchTrack(row));
-      }
-    }
-    if (
-      externalLibraryEnabled &&
-      (isLocalBrowseMode || sourceFilter !== "local")
-    ) {
-      for (const track of visibleKaraokeNerdsRows) {
-        tracks.push({
-          type: "online",
-          key: `kn-${track.url}`,
-          title: track.title ?? "",
-          artist: track.artist ?? "",
-          brand: track.brand ?? null,
-          track,
-        });
-      }
-    }
-
-    const deduped = new Map<string, CombinedSearchTrack>();
-    for (const track of tracks) {
-      const dedupeKey =
-        track.type === "online"
-          ? `online:${track.track.url.trim().toLowerCase().replace(/\/+$/, "")}`
-          : `local:${track.track.id}`;
-      if (!deduped.has(dedupeKey)) deduped.set(dedupeKey, track);
-    }
-
-    const groups = new Map<string, CombinedSearchGroup>();
-    for (const track of deduped.values()) {
-      const key = groupKey(track.title, track.artist);
-      if (!groups.has(key)) {
-        groups.set(key, {
-          key,
-          title: track.title,
-          artist: track.artist,
-          versions: [],
-        });
-      }
-      groups.get(key)!.versions.push(track);
-    }
-
-    return Array.from(groups.values())
-      .map((group) => ({
-        ...group,
-        versions: group.versions.sort((a, b) => {
-          const aVersion = a.type === "online" ? a.brand ?? "" : a.discId ?? "";
-          const bVersion = b.type === "online" ? b.brand ?? "" : b.discId ?? "";
-          return aVersion.localeCompare(bVersion, undefined, {
-            sensitivity: "base",
-            numeric: true,
-          });
-        }),
-      }))
-      .sort((a, b) => {
-        const relevance =
-          searchRelevance(q, a.title, a.artist) -
-          searchRelevance(q, b.title, b.artist);
-        if (relevance !== 0) return relevance;
-        return 0;
-      });
-  }, [
-    localRows,
-    visibleKaraokeNerdsRows,
-    localLibraryEnabled,
-    externalLibraryEnabled,
-    isLocalBrowseMode,
-    q,
-    sourceFilter,
-  ]);
 
   async function exportMySingerHistory() {
     const name = requestedBy.trim();
@@ -1168,153 +598,6 @@ export default function Requests() {
     if (request === profileLoadRef.current) setSingerProfile(result.profile);
   }
 
-  async function enqueueLocal(id: number, songTitle: string) {
-    const name = requestedBy.trim();
-    if (!name) {
-      setShowNamePrompt(true);
-      setNameConfirmed(false);
-      openNameDialog();
-      return;
-    }
-
-    const trackKey = `local-${id}`;
-    const keyAdjustment = keyAdjustments.get(trackKey) ?? 0;
-
-    setAddingLocal(id);
-    try {
-      await api("/api/queue", {
-        method: "POST",
-        headers: requesterJsonHeaders,
-        body: JSON.stringify({
-          trackId: id,
-          requestedBy: name,
-          singerUuid: requestSingerUuid,
-          keyAdjustment: keyAdjustment,
-        }),
-      });
-
-      // Mark as recently added
-      setRecentlyAdded((prev) => new Set(prev).add(trackKey));
-      setTimeout(() => {
-        setRecentlyAdded((prev) => {
-          const next = new Set(prev);
-          next.delete(trackKey);
-          return next;
-        });
-      }, 3000);
-
-      const keyText =
-        keyAdjustment !== 0
-          ? ` (Key: ${keyAdjustment > 0 ? "+" : ""}${keyAdjustment})`
-          : "";
-      showToast(
-        `Added "${songTitle || "Unknown"}" to ${name}'s queue${keyText}`,
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
-      if (
-        msg.includes("409") ||
-        msg.toLowerCase().includes("already requested")
-      ) {
-        showToast("⚠️ You already have this song in the queue", "error");
-      } else {
-        showToast("Failed to add song.  Please try again.", "error");
-        console.error(err);
-      }
-    } finally {
-      setAddingLocal(null);
-    }
-  }
-
-  async function enqueueKaraokeNerds(track: KaraokeNerdsTrack) {
-    const name = requestedBy.trim();
-    if (!name) {
-      setShowNamePrompt(true);
-      openNameDialog();
-      return;
-    }
-
-    const trackKey = `kn-${track.url}`;
-    const keyAdjustment = keyAdjustments.get(trackKey) ?? 0;
-
-    setAddingKaraokeNerds(track.url);
-    try {
-      await api("/api/karaoke-nerds/add", {
-        method: "POST",
-        headers: requesterJsonHeaders,
-        body: JSON.stringify({
-          title: track.title,
-          artist: track.artist,
-          url: track.url,
-          requestedBy: name,
-          singerUuid: requestSingerUuid,
-          keyAdjustment: keyAdjustment,
-        }),
-      });
-
-      // Mark as recently added
-      setRecentlyAdded((prev) => new Set(prev).add(trackKey));
-      setTimeout(() => {
-        setRecentlyAdded((prev) => {
-          const next = new Set(prev);
-          next.delete(trackKey);
-          return next;
-        });
-      }, 3000);
-
-      const keyText =
-        keyAdjustment !== 0
-          ? ` (Key: ${keyAdjustment > 0 ? "+" : ""}${keyAdjustment})`
-          : "";
-      showToast(
-        `Added "${track.title || "Unknown"}" to ${name}'s queue${keyText}`,
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
-      if (
-        msg.includes("409") ||
-        msg.toLowerCase().includes("already requested")
-      ) {
-        showToast("⚠️ You already have this song in the queue", "error");
-      } else {
-        showToast("Failed to add song. Please try again.", "error");
-        console.error(err);
-      }
-    } finally {
-      setAddingKaraokeNerds(null);
-    }
-  }
-
-
-  // Browse lists local songs only; give them the same shape as search results so both use SongResultCard.
-  const browseCombinedGroups = useMemo(
-    (): CombinedSearchGroup[] =>
-      groupedLocalRows.map((group) => ({
-        key: group.key,
-        title: group.title,
-        artist: group.artist,
-        versions: group.versions.map(toLocalSearchTrack),
-      })),
-    [groupedLocalRows],
-  );
-
-  const songResultActions: SongResultActions = {
-    recentlyAdded,
-    addingLocal,
-    addingKaraokeNerds,
-    keyAdjustments,
-    adjustKey,
-    actionMenuOpen,
-    setActionMenuOpen,
-    handleActionMenuToggle,
-    actionMenuRef,
-    setCombinedVersionPicker,
-    enqueueLocal,
-    enqueueKaraokeNerds,
-    setLyricsPopupOpen,
-    lyricsData,
-    fetchLyrics,
-  };
   return (
     <div className="requests-page request-page-gateway-theme">
 
