@@ -52,3 +52,14 @@ export const logger = {
     if (shouldLog('verbose')) console.log(...args);
   },
 };
+
+// Expected refusals (errors carrying a 4xx status, e.g. an expired session or a guest name that
+// belongs to an account) log as one warning line; anything else logs in full with its stack.
+export function logRequestFailure(context: string, error: unknown) {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    logger.warn(`${context}: ${status} ${error instanceof Error ? error.message : String(error)}`);
+  } else {
+    logger.error(`${context}:`, error);
+  }
+}

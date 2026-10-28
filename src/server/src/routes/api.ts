@@ -43,7 +43,7 @@ import { searchKaraokeNerds } from '../karaoke-nerds';
 import crypto from 'crypto';
 import * as oidc from 'openid-client';
 import { authLimiter, searchLimiter, queueLimiter } from '../middleware/rateLimiters';
-import { setLogLevel, logger, type LogLevel } from '../logger';
+import { setLogLevel, logger, logRequestFailure, type LogLevel } from '../logger';
 import {
   syncBackgroundTaskState,
   syncDurationProcessingTaskState,
@@ -270,7 +270,8 @@ async function deleteStoredPlayerBackgroundImageFile(image: StoredPlayerBackgrou
   await fs.unlink(filePath).catch(() => undefined);
 }
 
-async function writePlayerBackgroundImageFile(buffer: Buffer, mime: string, id: string = crypto.randomUUID()): Promise<StoredPlayerBackgroundImage> {
+async function writePlayerBackgroundImageFile(buffer: Buffer, mime: string): Promise<StoredPlayerBackgroundImage> {
+  const id = crypto.randomUUID();
   const updatedAt = new Date().toISOString();
   const filename = `player-background-${id}${getPlayerBackgroundImageExtension(mime)}`;
   const uploadDir = await ensureImageUploadsDir();
@@ -483,7 +484,7 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
     (req as any).user = { userId: identity.user?.id, role: 'admin' };
     next();
   } catch (err) {
-    console.error('adminGuard error:', err);
+    logRequestFailure(`adminGuard ${req.method} ${req.path}`, err);
     res.status(403).json({ error: 'Forbidden: Authentication error' });
   }
 };
@@ -5020,7 +5021,8 @@ apiRouter.post(
       return res.status(400).json({ error: 'Supported background formats are PNG, JPEG, WebP, and GIF' });
     }
 
-    const image = await writePlayerBackgroundImageFile(req.body, mime, 'static');
+    // A unique name per upload: earlier uploads stay in the image library instead of being overwritten.
+    const image = await writePlayerBackgroundImageFile(req.body, mime);
     await setSetting('player.backgroundImageMime', image.mime);
     await setSetting('player.backgroundImageFilename', image.filename);
     await setSetting('player.backgroundImageData', '');
@@ -6534,8 +6536,8 @@ apiRouter.post(
 );
 
 // JSON error handler
-apiRouter.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error('API error:', err);
+apiRouter.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logRequestFailure(`API ${req.method} ${req.path}`, err);
   if (err?.code === '23503' && [
     'queue_singer_id_fkey', 'rotation_singers_singer_id_fkey', 'song_requests_singer_id_fkey',
   ].includes(err.constraint)) {

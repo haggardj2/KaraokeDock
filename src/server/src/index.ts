@@ -1,4 +1,5 @@
 import '../scripts/check-runtime.cjs';
+import './consoleTimestamps';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -20,10 +21,6 @@ import { syncBackgroundTaskState } from './backgroundTasks';
 import { syncSnapshotSchedule } from './snapshots';
 import { createWebAppRouter } from './webApp';
 
-// Helper to add timestamps to console logs
-function timestamp() {
-  return new Date().toISOString();
-}
 
 
 const app = express();
@@ -63,13 +60,19 @@ async function writeBootstrapCredentialsFile(bootstrapAdmin: { username: string;
 // This allows Express to properly identify client IPs from X-Forwarded-For headers
 // Default: trust the first proxy (loopback, private networks)
 // Can be configured via TRUST_PROXY env variable:
-// - 'true' = trust all proxies
+// - 'true' = treated as 1 (trusting every proxy would let clients fake their IP)
 // - 'false' = trust no proxies  
 // - number = trust first N hops
 // - string = trust specific IP/CIDR ranges (comma-separated)
 const trustProxyValue = process.env.TRUST_PROXY || '1';
 if (trustProxyValue === 'true') {
-  app.set('trust proxy', true);
+  // Trusting every proxy lets any client fake X-Forwarded-For and so pick its own IP, which
+  // defeats rate limiting (express-rate-limit refuses it). Treat it as one proxy hop instead.
+  logger.warn(
+    "TRUST_PROXY=true would let clients fake their IP address; using 1 (one reverse proxy) instead. " +
+    'Set TRUST_PROXY to the number of proxies in front of KaraokeDock, or their IPs/CIDRs.',
+  );
+  app.set('trust proxy', 1);
 } else if (trustProxyValue === 'false') {
   app.set('trust proxy', false);
 } else if (!isNaN(Number(trustProxyValue))) {
@@ -122,7 +125,7 @@ function rejectUpgrade(socket: Duplex, statusCode: number, message: string) {
   socket.destroy();
 }
 
-console.log(`[${timestamp()}] CORS configured for origins:`, allowedOrigins);
+console.log('CORS configured for origins:', allowedOrigins);
 
 // Apply CORS middleware to all routes (including error responses)
 app.use(cors(corsOptions));
@@ -160,9 +163,9 @@ app.use((req, _res, next) => {
     ? (Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor.split(',')[0].trim())
     : req.socket.remoteAddress || 'unknown';
   if (req.method === 'GET' || req.path === '/api/player/timing' || req.path === '/api/break-music/timing' || req.path === '/api/break-music/auto-next') {
-    logger.verbose(`[${timestamp()}] Request from IP: ${ip} - ${req.method} ${req.path}`);
+    logger.verbose(`Request from IP: ${ip} - ${req.method} ${req.path}`);
   } else {
-    logger.info(`[${timestamp()}] Request from IP: ${ip} - ${req.method} ${req.path}`);
+    logger.info(`Request from IP: ${ip} - ${req.method} ${req.path}`);
   }
   next();
 });

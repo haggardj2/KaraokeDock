@@ -35,8 +35,40 @@
 }
 .profile-dialog button:disabled { opacity: 0.5; cursor: default; }
 .profile-image-editor { display: grid; justify-items: center; gap: 10px; min-width: 0; }
-.profile-file-picker { display: grid; gap: 6px; font-size: 13px; width: 100%; }
-.profile-file-picker input { width: 100%; min-width: 0; font-size: 13px; }
+.profile-image-editor .profile-file-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1px dashed var(--color-border-strong, #555);
+  border-radius: 12px;
+  background: var(--color-bg-secondary, #252532);
+  color: var(--color-text-primary, #fff);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.profile-image-editor .profile-file-picker:hover:not(.is-disabled) {
+  border-color: var(--color-accent, #6366f1);
+  background: var(--color-bg-hover, #2a2a38);
+}
+.profile-image-editor .profile-file-picker:focus-within {
+  outline: 2px solid var(--color-accent, #6366f1);
+  outline-offset: 2px;
+}
+.profile-image-editor .profile-file-picker.is-disabled { opacity: 0.5; cursor: default; }
+.profile-image-editor .profile-file-picker .material-symbols-rounded { font-size: 20px; }
+/* Visually hidden but still focusable and clickable through its label. */
+.profile-image-editor .profile-file-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 .profile-crop-mount { width: 100%; min-width: 0; }
 .profile-crop-mount.croppie-container { height: auto; }
 .profile-crop-empty { height: 0; }
@@ -46,6 +78,17 @@
 .profile-help { font-size: 12px; color: var(--color-text-secondary, #aaa); margin: 0; text-align: center; }
 .profile-error { color: var(--color-danger, #f87171); margin: 0; font-size: 13px; }
 .profile-editor-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.profile-image-editor .profile-editor-actions button { min-height: 40px; padding: 9px 16px; border-radius: 10px; font-weight: 600; }
+.profile-image-editor .profile-editor-actions .profile-editor-save {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--color-accent, #6366f1), var(--color-accent-2, #8b5cf6));
+  color: var(--color-on-accent, #fff);
+}
+.profile-image-editor .profile-editor-actions .profile-editor-remove {
+  border-color: color-mix(in srgb, var(--color-danger, #ef4444) 35%, transparent);
+  background: var(--color-danger-soft, #ef444422);
+  color: var(--color-danger, #ef4444);
+}
 .profile-history-actions { display: grid; gap: 12px; }
 .profile-dialog.request-name-dialog {
   width: min(720px, calc(100vw - 32px));

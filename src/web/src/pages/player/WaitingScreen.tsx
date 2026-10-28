@@ -163,7 +163,7 @@ export default function WaitingScreen({
           </h1>
           <p
             style={{
-              fontSize: "clamp(16px, 2. 5vw, 20px)",
+              fontSize: "clamp(16px, 2.5vw, 20px)",
               color: "var(--color-text-secondary)",
               textShadow: PLAYER_TEXT_SHADOW,
               margin: 0,

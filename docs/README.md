@@ -273,7 +273,7 @@ stored in PostgreSQL; they are not all configured through `.env`.
 | `MEDIA_ROOT` | Container media root, normally `/media` |
 | `WEB_APP_URL` | Reachable web origin used for default request/QR URLs |
 | `ORIGIN` | Comma-separated allowed browser origins |
-| `TRUST_PROXY` | Proxy trust configuration; match your actual proxy topology |
+| `TRUST_PROXY` | Proxy trust configuration; match your actual proxy topology (`1` for one reverse proxy, or its IP/CIDR). `true` is treated as `1`, since trusting every proxy would let clients fake their IP |
 
 The Compose file builds `DATABASE_URL` from the database credentials. Other
 deployments can provide `DATABASE_URL` directly, or use `DB_HOST`, `DB_PORT`,

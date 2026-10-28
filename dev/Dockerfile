@@ -21,6 +21,10 @@ RUN apk add --no-cache \
     python3 \
     py3-pip
 
+# Alpine's base layout ships empty /media/cdrom, /media/floppy and /media/usb; remove them so
+# only the mounted libraries appear under MEDIA_ROOT (/media). rmdir only removes empty folders.
+RUN rmdir /media/cdrom /media/floppy /media/usb
+
 RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
 COPY --from=ffmpeg /opt/ffmpeg /opt/ffmpeg

@@ -170,7 +170,7 @@ TRUST_PROXY=1
 
 The template leaves `WEB_APP_URL` and `ORIGIN` blank so you supply real browser-facing origins instead of accidentally using `localhost`. Do not add `/admin`, `/host`, or other paths. Google/Facebook sign-in and installation of the Host PWA require trusted HTTPS (except localhost for development).
 
-`TRUST_PROXY` defaults to `false` for direct access. Behind a reverse proxy, use the trusted proxy IP/CIDR or the correct hop count for your deployment; `1` assumes one trusted proxy hop. Ensure the proxy forwards WebSockets and prevent clients from bypassing it when relying on forwarded headers.
+`TRUST_PROXY` defaults to `false` for direct access. `true` is treated as `1`, because trusting every proxy would let clients fake their IP address and bypass rate limits. Behind a reverse proxy, use the trusted proxy IP/CIDR or the correct hop count for your deployment; `1` assumes one trusted proxy hop. Ensure the proxy forwards WebSockets and prevent clients from bypassing it when relying on forwarded headers.
 
 ### Optional performance setting
 

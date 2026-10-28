@@ -324,12 +324,13 @@ export default function Requests() {
     saveThemeId(choice, globalThis.localStorage, REQUEST_THEME_STORAGE_KEY);
   }
 
-  // Save name to localStorage
+  // Save the guest name to localStorage. A signed-in singer's account name is never saved as the
+  // guest name: after signing out it would belong to that account and be refused.
   useEffect(() => {
-    if (requestedBy.trim()) {
+    if (!isSignedInRequester && requestedBy.trim()) {
       localStorage.setItem("karaoke-name", requestedBy.trim());
     }
-  }, [requestedBy]);
+  }, [requestedBy, isSignedInRequester]);
 
   useEffect(() => {
     if (!signedInRequestName) return;
@@ -339,7 +340,6 @@ export default function Requests() {
     setNameConfirmed(true);
     setNameModalOpen(false);
     setShowNamePrompt(false);
-    localStorage.setItem("karaoke-name", signedInRequestName);
   }, [signedInRequestName]);
 
   useEffect(() => {
@@ -359,11 +359,8 @@ export default function Requests() {
     if (auth.sessionToken) {
       setNameModalOpen(false);
     } else {
-      localStorage.removeItem("karaoke-name");
-      setRequestedBy("");
-      setNameDraft("");
-      setNameConfirmed(false);
-      setNameModalOpen(true);
+      // Signing in may have linked this device's guest singer to the account, so start a new guest.
+      forgetGuestIdentity();
     }
   }, [auth.sessionToken]);
 
@@ -389,8 +386,15 @@ export default function Requests() {
         }
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      // The saved guest name or device belongs to a signed-in account (e.g. after signing out on
+      // Host or Admin): start over as a new guest and say why.
+      if (!isSignedInRequester && message.includes("linked to an account")) {
+        if (request === profileLoadRef.current) forgetGuestIdentity(message);
+        return;
+      }
       console.error("Failed to load singer profile:", error);
-      if (request === profileLoadRef.current) setProfileLoadError(error instanceof Error ? error.message : "Could not load profile picture.");
+      if (request === profileLoadRef.current) setProfileLoadError(message || "Could not load profile picture.");
     } finally {
       if (request === profileLoadRef.current) setProfileLoading(false);
     }
@@ -553,19 +557,23 @@ export default function Requests() {
     profileLoadRef.current++;
     setProfileMenuOpen(false);
     setProfilePanel(null);
+    forgetGuestIdentity();
+    setMyQueue([]);
+    setRevealedRemoveQueueId(null);
+    setSingerProfile(null);
+  }
+
+  // Start over as a new guest: a new device id, no saved name, and the name dialog open.
+  function forgetGuestIdentity(message = "") {
     localStorage.removeItem("karaoke-name");
-    localStorage.removeItem(SINGER_UUID_STORAGE_KEY);
     const nextUuid = createSingerUuid();
     localStorage.setItem(SINGER_UUID_STORAGE_KEY, nextUuid);
     setSingerUuid(nextUuid);
     setRequestedBy("");
-    setNameConfirmed(false);
     setNameDraft("");
+    setNameConfirmed(false);
+    setNameError(message);
     setNameModalOpen(true);
-    setMyQueue([]);
-    setRevealedRemoveQueueId(null);
-    setNameError("");
-    setSingerProfile(null);
   }
 
   async function saveProfileImage(crop: ProfileCrop, image?: Blob) {
