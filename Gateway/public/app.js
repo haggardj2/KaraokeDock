@@ -13,7 +13,6 @@ const logoutButton = document.querySelector('#logoutButton');
 const themeChoiceButtons = [...document.querySelectorAll('[data-theme-choice]')];
 const venueThemeSwatch = document.querySelector('#venueThemeSwatch');
 const searchInput = document.querySelector('#searchInput');
-const searchButton = document.querySelector('#searchButton');
 const clearSearchButton = document.querySelector('#clearSearchButton');
 const resultsEl = document.querySelector('#results');
 const pageTabs = [...document.querySelectorAll('.page-tab')];
@@ -31,6 +30,10 @@ const queueEl = document.querySelector('#queue');
 const messageEl = document.querySelector('#message');
 const queueFooter = document.querySelector('#queueFooter');
 const queueFooterSummary = document.querySelector('#queueFooterSummary');
+const queueFooterLabel = document.querySelector('#queueFooterLabel');
+const queueFooterBadge = document.querySelector('#queueFooterBadge');
+const singingAs = document.querySelector('#singingAs');
+const singingAsName = document.querySelector('#singingAsName');
 const queueDialog = document.querySelector('#queueDialog');
 const closeQueueDialog = document.querySelector('#closeQueueDialog');
 const openHistoryDialogButton = document.querySelector('#openHistoryDialog');
@@ -184,6 +187,8 @@ function saveSingerName(name) {
 
 function updateProfileButton() {
   profileButton.setAttribute('aria-label', `${singerName() || 'Singer'}: profile menu`);
+  singingAs.hidden = !singerName();
+  singingAsName.textContent = singerName();
   renderSingerProfile();
 }
 
@@ -768,6 +773,10 @@ function updateRequestPageVisibility() {
   setPage(showBrowse ? getActivePage() : 'search', { reload: false });
 }
 
+// Search runs as the singer types; only the newest request may render its results.
+let searchRequest = 0;
+let searchTimer = null;
+
 async function search() {
   if (requestsAreClosed()) {
     setPage('search');
@@ -778,8 +787,10 @@ async function search() {
     renderEmpty(resultsEl, 'Enter a search term.');
     return;
   }
+  const request = ++searchRequest;
   setMessage('Searching...');
   const response = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  if (request !== searchRequest) return;
   if (await applyRequestClosedResponse(response)) return;
   if (!response.ok) throw new Error(await response.text());
   const tracks = dedupeTracks(await response.json()).sort(compareTracks);
@@ -941,11 +952,11 @@ function renderResultGroup(group) {
   info.append(title, artist, meta);
 
   const button = document.createElement('button');
-  button.className = 'icon-action-button';
+  button.className = 'icon-action-button result-add-button';
   button.type = 'button';
-  button.textContent = group.length > 1 ? '☰' : '⋯';
-  button.title = group.length > 1 ? 'Choose version' : 'Options';
-  button.setAttribute('aria-label', group.length > 1 ? 'Choose version' : 'Options');
+  button.textContent = '+';
+  button.title = group.length > 1 ? 'Choose a version to add' : 'Add or see options';
+  button.setAttribute('aria-label', `${group.length > 1 ? 'Choose a version of' : 'Add'} ${title.textContent}`);
   button.addEventListener('click', () => {
     if (group.length > 1) {
       openVersionDialog(group);
@@ -1049,11 +1060,11 @@ function openVersionDialog(group) {
     info.append(title, meta);
 
     const optionsButton = document.createElement('button');
-    optionsButton.className = 'icon-action-button';
+    optionsButton.className = 'icon-action-button result-add-button';
     optionsButton.type = 'button';
-    optionsButton.textContent = '⋯';
-    optionsButton.title = 'Options';
-    optionsButton.setAttribute('aria-label', 'Options');
+    optionsButton.textContent = '+';
+    optionsButton.title = 'Add or see options';
+    optionsButton.setAttribute('aria-label', `Add ${versionLabel(track) || title.textContent}`);
     optionsButton.addEventListener('click', () => openOptionsDialog(track));
 
     row.append(info, optionsButton);
@@ -1154,9 +1165,14 @@ async function refreshQueue() {
 
 function updateQueueFooter() {
   const nextSong = lastQueueItems.find((item) => item.status === 'playing') || lastQueueItems.find((item) => item.status === 'queued');
-  queueFooterSummary.textContent = nextSong
-    ? `${nextSong.status === 'playing' ? '▶ Now Playing' : '⏳ Up Next'}: ${trackLabel(nextSong)}`
-    : 'No songs in queue yet — tap to view';
+  const activeCount = lastQueueItems.filter((item) => item.status === 'playing' || item.status === 'queued').length;
+  queueFooterLabel.hidden = !nextSong;
+  queueFooterLabel.textContent = nextSong?.status === 'playing' ? 'Now singing' : 'Up next';
+  queueFooterSummary.textContent = nextSong ? trackLabel(nextSong) : 'Your queue is empty';
+  queueFooterSummary.classList.toggle('is-empty', !nextSong);
+  queueFooterBadge.hidden = activeCount === 0;
+  queueFooterBadge.textContent = String(activeCount);
+  queueFooter.setAttribute('aria-label', `My queue, ${activeCount} active ${activeCount === 1 ? 'song' : 'songs'}`);
 }
 
 function renderQueue() {
@@ -1422,19 +1438,28 @@ async function importHistory(file) {
   }
 }
 
-searchButton.addEventListener('click', () => {
-  searchInput.blur();
-  search().catch((err) => setMessage(err.message, true));
-});
 searchInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
+    clearTimeout(searchTimer);
     searchInput.blur();
     search().catch((err) => setMessage(err.message, true));
   }
 });
-searchInput.addEventListener('input', updateClearSearchVisibility);
+searchInput.addEventListener('input', () => {
+  updateClearSearchVisibility();
+  clearTimeout(searchTimer);
+  if (!searchInput.value.trim()) {
+    searchRequest++;
+    renderEmpty(resultsEl, 'Search for a song to get started.');
+    setMessage('');
+    return;
+  }
+  searchTimer = setTimeout(() => search().catch((err) => setMessage(err.message, true)), 350);
+});
 clearSearchButton.addEventListener('click', () => {
+  clearTimeout(searchTimer);
+  searchRequest++;
   searchInput.value = '';
   updateClearSearchVisibility();
   renderEmpty(resultsEl, 'Search for a song to get started.');
