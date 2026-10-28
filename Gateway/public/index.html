@@ -5,8 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Karaoke Requests</title>
     <link rel="icon" type="image/png" href="/icon.png" />
+    <meta name="theme-color" content="#0a0a0f" />
     <link rel="stylesheet" href="/vendor/croppie/croppie.css" />
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/theme.js"></script>
   </head>
   <body class="requests-closed">
     <main class="requests-page">
@@ -18,6 +21,27 @@
           <button id="manageHistoryButton" type="button">Manage History</button>
           <button id="profileImageButton" type="button">Manage Profile Picture</button>
           <button id="editNameButton" type="button">Edit Name</button>
+          <div class="theme-picker" role="radiogroup" aria-label="Theme">
+            <div class="theme-picker-label">Theme</div>
+            <div class="theme-picker-options">
+              <button type="button" role="radio" class="theme-picker-option" data-theme-choice="venue">
+                <span id="venueThemeSwatch" class="theme-picker-swatch" data-theme-scope="midnight" aria-hidden="true"></span>
+                <span class="theme-picker-name">Venue</span>
+              </button>
+              <button type="button" role="radio" class="theme-picker-option" data-theme-choice="midnight">
+                <span class="theme-picker-swatch" data-theme-scope="midnight" aria-hidden="true"></span>
+                <span class="theme-picker-name">Midnight</span>
+              </button>
+              <button type="button" role="radio" class="theme-picker-option" data-theme-choice="stage">
+                <span class="theme-picker-swatch" data-theme-scope="stage" aria-hidden="true"></span>
+                <span class="theme-picker-name">Stage</span>
+              </button>
+              <button type="button" role="radio" class="theme-picker-option" data-theme-choice="daylight">
+                <span class="theme-picker-swatch" data-theme-scope="daylight" aria-hidden="true"></span>
+                <span class="theme-picker-name">Daylight</span>
+              </button>
+            </div>
+          </div>
           <button id="logoutButton" type="button">Logout</button>
         </div>
       </div>

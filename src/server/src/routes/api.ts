@@ -634,6 +634,7 @@ async function getRemoteGatewaySettingsPayload() {
     'libraries.external_enabled': await getSetting('libraries.external_enabled') !== false,
     'requests.acceptance': await getSetting('requests.acceptance') || 'local',
     'requests.local_browse_enabled': await getSetting('requests.local_browse_enabled') !== false,
+    'requests.theme': await getSetting('requests.theme') || 'midnight',
   };
 }
 

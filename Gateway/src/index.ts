@@ -43,7 +43,11 @@ type GatewaySettings = {
   requestAcceptance: 'local' | 'external' | 'disabled';
   localBrowseEnabled: boolean;
   stationConnected: boolean;
+  // Venue's Request Page Theme from Station; singers can still pick their own.
+  theme: 'midnight' | 'stage' | 'daylight';
 };
+
+const REQUEST_THEMES = ['midnight', 'stage', 'daylight'] as const;
 
 const PROFILE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_IMAGE_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
@@ -206,8 +210,8 @@ function getStationConnected() {
 }
 
 function getGatewaySettings(): GatewaySettings {
-  const rows = db.prepare('SELECT key, value FROM gateway_meta WHERE key IN (?, ?, ?, ?)')
-    .all('libraries.local_enabled', 'libraries.external_enabled', 'requests.acceptance', 'requests.local_browse_enabled') as { key: string; value: string }[];
+  const rows = db.prepare('SELECT key, value FROM gateway_meta WHERE key IN (?, ?, ?, ?, ?)')
+    .all('libraries.local_enabled', 'libraries.external_enabled', 'requests.acceptance', 'requests.local_browse_enabled', 'requests.theme') as { key: string; value: string }[];
   const values = new Map(rows.map((row) => [row.key, row.value]));
   const boolValue = (key: string, fallback: boolean) => {
     const raw = values.get(key);
@@ -221,6 +225,7 @@ function getGatewaySettings(): GatewaySettings {
     requestAcceptance: requestAcceptance === 'external' || requestAcceptance === 'disabled' ? requestAcceptance : 'local',
     localBrowseEnabled: boolValue('requests.local_browse_enabled', true),
     stationConnected: getStationConnected(),
+    theme: REQUEST_THEMES.find((theme) => theme === values.get('requests.theme')) ?? 'midnight',
   };
 }
 
@@ -1122,6 +1127,7 @@ app.put('/api/station/settings', requireStationToken, (req, res) => {
     'libraries.external_enabled',
     'requests.acceptance',
     'requests.local_browse_enabled',
+    'requests.theme',
   ]);
   const upsert = db.prepare(`
     INSERT INTO gateway_meta(key, value)

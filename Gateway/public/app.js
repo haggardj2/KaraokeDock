@@ -10,6 +10,8 @@ const closeManageHistoryDialog = document.querySelector('#closeManageHistoryDial
 const manageHistoryStatus = document.querySelector('#manageHistoryStatus');
 const editNameButton = document.querySelector('#editNameButton');
 const logoutButton = document.querySelector('#logoutButton');
+const themeChoiceButtons = [...document.querySelectorAll('[data-theme-choice]')];
+const venueThemeSwatch = document.querySelector('#venueThemeSwatch');
 const searchInput = document.querySelector('#searchInput');
 const searchButton = document.querySelector('#searchButton');
 const clearSearchButton = document.querySelector('#clearSearchButton');
@@ -695,7 +697,17 @@ async function loadPublicConfig() {
   if (!response.ok) return;
   const config = await response.json();
   if (config.settings) publicSettings = normalizePublicSettings(config.settings);
+  window.KaraokeTheme.setVenue(config.settings?.theme);
+  renderThemePicker();
   updateRequestPageVisibility();
+}
+
+function renderThemePicker() {
+  const choice = window.KaraokeTheme.choice();
+  venueThemeSwatch.dataset.themeScope = window.KaraokeTheme.venue();
+  for (const button of themeChoiceButtons) {
+    button.setAttribute('aria-checked', String(button.dataset.themeChoice === choice));
+  }
 }
 
 async function applyRequestClosedResponse(response) {
@@ -1480,6 +1492,12 @@ logoutButton.addEventListener('click', () => {
   setProfileMenu(false);
   logoutProfile();
 });
+for (const button of themeChoiceButtons) {
+  button.addEventListener('click', () => {
+    window.KaraokeTheme.setChoice(button.dataset.themeChoice);
+    renderThemePicker();
+  });
+}
 document.addEventListener('click', (event) => {
   if (!profileMenu.hidden && !profileMenu.contains(event.target) && !profileButton.contains(event.target)) {
     setProfileMenu(false);
@@ -1545,6 +1563,7 @@ importHistoryButton.addEventListener('click', () => {
 historyImportInput.addEventListener('change', () => importHistory(historyImportInput.files?.[0]));
 
 singerNameInput.value = localStorage.getItem(singerNameKey) || '';
+renderThemePicker();
 updateProfileButton();
 await loadSingerProfile().catch(() => {});
 updateClearSearchVisibility();

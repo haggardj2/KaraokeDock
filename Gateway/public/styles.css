@@ -1,21 +1,3 @@
-:root {
-  color-scheme: dark;
-  --color-bg-primary: #0a0a0f;
-  --color-bg-secondary: #16161d;
-  --color-bg-card: #1d1d27;
-  --color-bg-hover: #252533;
-  --color-accent: #6366f1;
-  --color-accent-hover: #7c7ff3;
-  --color-success: #10b981;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-text-primary: #ffffff;
-  --color-text-secondary: #a1a1aa;
-  --color-text-muted: #71717a;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-focus: rgba(99, 102, 241, 0.5);
-}
-
 * {
   box-sizing: border-box;
 }
@@ -23,7 +5,8 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: linear-gradient(135deg, #0a0a0f 0%, #16161d 100%);
+  background: var(--color-bg-gradient);
+  background-attachment: fixed;
   color: var(--color-text-primary);
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -59,13 +42,13 @@ button:disabled {
 button.primary,
 .result-card button.primary,
 .version-row button {
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  color: white;
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  color: var(--color-on-accent);
 }
 
 button.success {
   background: var(--color-success);
-  color: white;
+  color: var(--color-on-accent);
 }
 
 button.compact {
@@ -87,8 +70,8 @@ button.secondary {
 }
 
 button.danger {
-  background: rgba(239, 68, 68, 0.14);
-  color: #fecaca;
+  background: var(--color-danger-soft);
+  color: color-mix(in srgb, var(--color-danger) 35%, var(--color-text-primary));
 }
 
 .requests-page {
@@ -129,8 +112,8 @@ body:not(.requests-closed) #closedPage {
   border-radius: 50%;
   overflow: hidden;
   border: 1px solid var(--color-border);
-  background: rgba(29, 29, 39, 0.92);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  background: var(--color-bg-elevated);
+  box-shadow: 0 8px 24px var(--color-shadow);
   backdrop-filter: blur(12px);
 }
 
@@ -248,7 +231,7 @@ body:not(.requests-closed) #closedPage {
 
 .profile-image-actions .danger {
   color: var(--color-danger);
-  border-color: rgba(239, 68, 68, 0.35);
+  border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
 }
 
 @media (max-height: 440px) {
@@ -302,13 +285,13 @@ body:not(.requests-closed) #closedPage {
   top: calc(100% + 8px);
   right: 0;
   display: grid;
-  min-width: 180px;
+  min-width: 300px;
   gap: 6px;
   padding: 8px;
   border: 1px solid var(--color-border);
   border-radius: 16px;
   background: var(--color-bg-card);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 16px 48px var(--color-shadow);
 }
 
 .profile-menu[hidden] {
@@ -345,7 +328,7 @@ body:not(.requests-closed) #closedPage {
   object-fit: contain;
   margin: 8px auto 14px;
   display: block;
-  filter: drop-shadow(0 12px 24px rgba(99, 102, 241, 0.32));
+  filter: drop-shadow(0 12px 24px color-mix(in srgb, var(--color-accent) 32%, transparent));
 }
 
 .header-title {
@@ -353,7 +336,7 @@ body:not(.requests-closed) #closedPage {
   font-size: clamp(28px, 5vw, 40px);
   font-weight: 700;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -371,7 +354,7 @@ body:not(.requests-closed) #closedPage {
   border: 1px solid var(--color-border);
   border-radius: 20px;
   background: var(--color-bg-card);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 24px var(--color-shadow);
   backdrop-filter: blur(10px);
   animation: fadeInUp 0.6s ease backwards;
 }
@@ -399,8 +382,8 @@ body:not(.requests-closed) #closedPage {
 }
 
 .page-tab.active {
-  border-color: rgba(99, 102, 241, 0.45);
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.32), rgba(139, 92, 246, 0.26));
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 32%, transparent), color-mix(in srgb, var(--color-accent-2) 26%, transparent));
   color: var(--color-text-primary);
 }
 
@@ -444,7 +427,7 @@ body:not(.requests-closed) #closedPage {
 .form-input:focus,
 .search-input:focus {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 10%, transparent);
 }
 
 .search-wrapper {
@@ -466,7 +449,7 @@ body:not(.requests-closed) #closedPage {
   padding: 0;
   border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
   transform: translateY(-50%);
   color: var(--color-text-muted);
   font-size: 20px;
@@ -545,7 +528,7 @@ body:not(.requests-closed) #closedPage {
 
 .browse-letter-select:focus {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 10%, transparent);
 }
 
 .initial-button {
@@ -557,9 +540,9 @@ body:not(.requests-closed) #closedPage {
 }
 
 .initial-button.active {
-  border-color: rgba(99, 102, 241, 0.45);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent);
 }
 
 .browse-subheader {
@@ -638,13 +621,13 @@ body:not(.requests-closed) #closedPage {
 }
 
 .meta-tag.brand {
-  background: rgba(124, 58, 237, 0.2);
-  color: #c4b5fd;
+  background: color-mix(in srgb, var(--color-accent-2) 20%, transparent);
+  color: var(--color-accent-text);
 }
 
 .action-menu-button {
   white-space: nowrap;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
 }
 
 .icon-action-button {
@@ -658,14 +641,14 @@ body:not(.requests-closed) #closedPage {
   padding: 0;
   border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: rgba(99, 102, 241, 0.16);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
   color: var(--color-text-primary);
   font-size: 20px;
   line-height: 1;
 }
 
 .icon-action-button:hover:not(:disabled) {
-  background: rgba(99, 102, 241, 0.28);
+  background: color-mix(in srgb, var(--color-accent) 28%, transparent);
 }
 
 .option-icon-button {
@@ -676,8 +659,8 @@ body:not(.requests-closed) #closedPage {
 }
 
 .option-icon-button.primary {
-  border-color: rgba(139, 92, 246, 0.45);
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border-color: color-mix(in srgb, var(--color-accent-2) 45%, transparent);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
 }
 
 .option-icon-button.secondary {
@@ -686,9 +669,9 @@ body:not(.requests-closed) #closedPage {
 }
 
 .option-icon-button.success {
-  border-color: rgba(16, 185, 129, 0.45);
+  border-color: color-mix(in srgb, var(--color-success) 45%, transparent);
   background: var(--color-success);
-  color: white;
+  color: var(--color-on-accent);
 }
 
 .result-options {
@@ -737,7 +720,7 @@ body:not(.requests-closed) #closedPage {
 
 .queue-item.drop-target {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.16);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
 .queue-info {
@@ -773,8 +756,8 @@ body:not(.requests-closed) #closedPage {
   border: 1px solid var(--color-border);
   border-radius: 18px;
   padding: 14px 16px;
-  background: rgba(29, 29, 39, 0.94);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  background: var(--color-bg-elevated);
+  box-shadow: 0 12px 40px var(--color-shadow);
   backdrop-filter: blur(14px);
   text-align: left;
 }
@@ -809,11 +792,11 @@ body:not(.requests-closed) #closedPage {
   background: var(--color-bg-card);
   color: var(--color-text-primary);
   padding: 0;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 24px 80px var(--color-shadow);
 }
 
 .app-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.78);
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 
@@ -871,10 +854,10 @@ body:not(.requests-closed) #closedPage {
   z-index: 60;
   width: min(32rem, calc(100% - 32px));
   padding: 14px 16px;
-  border: 1px solid rgba(16, 185, 129, 0.35);
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, transparent);
   border-radius: 16px;
-  background: rgba(17, 24, 39, 0.96);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  background: var(--color-bg-elevated);
+  box-shadow: 0 16px 48px var(--color-shadow);
   color: var(--color-text-primary);
   font-weight: 700;
   opacity: 0;
@@ -979,4 +962,90 @@ body:not(.requests-closed) #closedPage {
   .queue-footer-summary {
     max-width: 48vw;
   }
+}
+
+/* Theme picker in the profile menu (mirrors Station's ThemePicker). */
+.theme-picker {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.theme-picker-label {
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.theme-picker-options {
+  display: flex;
+  gap: 4px;
+}
+
+/* Doubled class selectors so the profile-menu button styles don't override these. */
+.theme-picker .theme-picker-option {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 2px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: center;
+}
+
+.theme-picker .theme-picker-option:hover:not(:disabled) {
+  transform: none;
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.theme-picker .theme-picker-option[aria-checked="true"],
+.theme-picker .theme-picker-option[aria-checked="true"]:hover:not(:disabled) {
+  border-color: var(--color-border-focus);
+  background: var(--color-accent-soft);
+  color: var(--color-text-primary);
+}
+
+.theme-picker .theme-picker-option:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Each swatch carries data-theme-scope, so these tokens are that theme's colours. */
+.theme-picker-swatch {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--color-bg-card);
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
+}
+
+.theme-picker-swatch::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+}
+
+.theme-picker-option[aria-checked="true"] .theme-picker-swatch {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+.theme-picker-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
