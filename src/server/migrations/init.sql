@@ -192,6 +192,9 @@ CREATE TABLE IF NOT EXISTS break_music_tracks (
 CREATE INDEX IF NOT EXISTS idx_break_music_tracks_title ON break_music_tracks (LOWER(title));
 CREATE INDEX IF NOT EXISTS idx_break_music_tracks_artist ON break_music_tracks (LOWER(artist));
 CREATE INDEX IF NOT EXISTS idx_break_music_tracks_file_path_trgm ON break_music_tracks USING gin (file_path gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_break_music_tracks_title_trgm ON break_music_tracks USING gin (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_break_music_tracks_artist_trgm ON break_music_tracks USING gin (artist gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_break_music_tracks_genre_trgm ON break_music_tracks USING gin (genre gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS break_music_playlists (
   id SERIAL PRIMARY KEY,

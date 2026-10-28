@@ -979,135 +979,21 @@
   }
 }
 
-:is(.host-page, .host-bar-actions) .break-manager-modal {
-  width: min(96vw, 1180px);
-  max-width: 1180px;
-  max-height: 90vh;
-  height: min(90vh, 860px);
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-body {
-  min-height: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-toolbar {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 16px;
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-layout {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  overflow: hidden;
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-panel {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-splitter {
-  width: 10px;
-  min-width: 10px;
-  cursor: col-resize;
-  border-radius: 8px;
-  background: transparent;
-  position: relative;
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-splitter::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--color-border);
-}
 
-:is(.host-page, .host-bar-actions) .break-manager-card {
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-bg-secondary);
-  min-height: 0;
-}
 
-:is(.host-page, .host-bar-actions) .break-playlist-row {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  gap: 8px;
-  padding: 8px 10px;
-  align-items: center;
-  border-bottom: 1px solid var(--color-border);
-  font-size: 13px;
-}
 
-:is(.host-page, .host-bar-actions) .break-playlist-row.dragging {
-  opacity: 0.55;
-}
 
-:is(.host-page, .host-bar-actions) .break-playlist-row.current {
-  background: var(--color-accent-soft);
-}
 
-:is(.host-page, .host-bar-actions) .break-table-header-cell {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
 
-:is(.host-page, .host-bar-actions) .break-table-header-sort {
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-  padding: 0;
-  margin: 0;
-  min-width: 0;
-}
 
-:is(.host-page, .host-bar-actions) .break-table-header-resizer {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  width: 12px;
-  height: calc(100% + 12px);
-  cursor: col-resize;
-}
 
-:is(.host-page, .host-bar-actions) .break-columns-popover {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 10;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-bg-secondary);
-  box-shadow: 0 10px 28px var(--color-shadow);
-  padding: 12px;
-  min-width: 190px;
-  display: grid;
-  gap: 8px;
-}
 
 :is(.host-page, .host-bar-actions) .modal-header {
   display: flex;
@@ -1268,10 +1154,6 @@
 
 :is(.host-page, .host-bar-actions) .singer-song-meta > span { flex: 0 0 auto; }
 
-:is(.host-page, .host-bar-actions) .break-playlist-title {
-  font-weight: 600;
-  font-size: 13px;
-}
 
 :is(.host-page, .host-bar-actions) .search-result:hover {
   background: var(--color-bg-hover);
@@ -1477,34 +1359,11 @@
     justify-content: center !important;
   }
 
-  :is(.host-page, .host-bar-actions) .break-manager-modal {
-    width: 95%;
-    top: 0;
-    transform: translate(-50%, 0);
-    max-height: 100svh;
-    height: 100svh;
-    border-radius: 0 0 20px 20px;
-  }
 
-  :is(.host-page, .host-bar-actions) .break-manager-modal .modal-header {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    background: var(--color-bg-card);
-    padding-bottom: 4px;
-  }
 
-  :is(.host-page, .host-bar-actions) .break-manager-layout {
-    flex-direction: column;
-  }
 
-  :is(.host-page, .host-bar-actions) .break-manager-layout .break-manager-panel {
-    flex: 1 1 0 !important;
-  }
 
-  :is(.host-page, .host-bar-actions) .break-manager-splitter {
-    display: none;
-  }
+
 }
 
 /* Even smaller screens */
@@ -1536,5 +1395,585 @@
 
   :is(.host-page, .host-bar-actions) .controls-grid .control-btn span {
     font-size:  16px !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Break music manager: playlist bar, library (paged) and playlist side by side;
+   on phones the two lists become tabs and the dialog fills the screen.
+   --------------------------------------------------------------------------- */
+:is(.host-page, .host-bar-actions) .break-manager-modal {
+  width: min(96vw, 1180px);
+  max-width: 1180px;
+  height: min(90vh, 860px);
+  max-height: 90vh;
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-modal .modal-header h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+:is(.host-page, .host-bar-actions) .break-close:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-bar select {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-body .control-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-menu,
+:is(.host-page, .host-bar-actions) .break-columns-menu {
+  position: relative;
+}
+
+:is(.host-page, .host-bar-actions) .break-menu-popover,
+:is(.host-page, .host-bar-actions) .break-columns-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 220px;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 12px 32px var(--color-shadow);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+:is(.host-page, .host-bar-actions) .break-menu-popover button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+:is(.host-page, .host-bar-actions) .break-menu-popover button:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+:is(.host-page, .host-bar-actions) .break-menu-popover button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+:is(.host-page, .host-bar-actions) .break-menu-popover .is-danger {
+  color: var(--color-danger);
+}
+
+:is(.host-page, .host-bar-actions) .break-columns-popover {
+  gap: 8px;
+  min-width: 170px;
+  padding: 12px;
+}
+
+:is(.host-page, .host-bar-actions) .break-columns-popover label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+:is(.host-page, .host-bar-actions) .break-message {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+:is(.host-page, .host-bar-actions) .break-message.is-error {
+  color: var(--color-danger);
+}
+
+/* Tabs are only for phones; desktop shows both panes. */
+:is(.host-page, .host-bar-actions) .break-manager-tabs {
+  display: none;
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-splitter {
+  position: relative;
+  width: 12px;
+  min-width: 12px;
+  cursor: col-resize;
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-splitter::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-border);
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-splitter:hover::before {
+  background: var(--color-accent);
+}
+
+:is(.host-page, .host-bar-actions) .break-manager-card {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-secondary);
+}
+
+/* Library */
+:is(.host-page, .host-bar-actions) .break-library-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:is(.host-page, .host-bar-actions) .break-search {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-search .search-input {
+  width: 100%;
+  margin: 0;
+  padding-left: 40px;
+}
+
+:is(.host-page, .host-bar-actions) .break-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  color: var(--color-text-muted);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+:is(.host-page, .host-bar-actions) .break-library-summary,
+:is(.host-page, .host-bar-actions) .break-playlist-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+:is(.host-page, .host-bar-actions) .break-library-summary .control-btn {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+:is(.host-page, .host-bar-actions) .break-library-header,
+:is(.host-page, .host-bar-actions) .break-library-row {
+  display: grid;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+:is(.host-page, .host-bar-actions) .break-library-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-block: 8px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:is(.host-page, .host-bar-actions) .break-library-row {
+  font-size: 13px;
+  cursor: grab;
+  /* Off-screen rows cost nothing to lay out, so long lists stay smooth. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
+}
+
+:is(.host-page, .host-bar-actions) .break-library-row:hover {
+  background: var(--color-bg-hover);
+}
+
+:is(.host-page, .host-bar-actions) .break-lib-text {
+  display: none;
+}
+
+:is(.host-page, .host-bar-actions) .break-add-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+:is(.host-page, .host-bar-actions) .break-add-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+:is(.host-page, .host-bar-actions) .break-add-button.is-added {
+  border-color: var(--color-success-border);
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+:is(.host-page, .host-bar-actions) .break-add-button .material-symbols-rounded {
+  font-size: 20px;
+}
+
+:is(.host-page, .host-bar-actions) .break-table-header-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-table-header-sort {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+:is(.host-page, .host-bar-actions) .break-table-header-resizer {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 12px;
+  height: calc(100% + 12px);
+  cursor: col-resize;
+}
+
+:is(.host-page, .host-bar-actions) .break-library-sentinel {
+  height: 1px;
+}
+
+:is(.host-page, .host-bar-actions) .break-list-message {
+  padding: 16px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+:is(.host-page, .host-bar-actions) .break-load-more {
+  margin: 4px auto 12px;
+}
+
+:is(.host-page, .host-bar-actions) .break-inline-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent-text);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Playlist */
+:is(.host-page, .host-bar-actions) .break-playlist-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-head .break-playlist-name {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-weight: 600;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-summary strong {
+  color: var(--color-text-primary);
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 13px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-row.dragging {
+  opacity: 0.55;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-row.current {
+  background: var(--color-accent-soft);
+}
+
+:is(.host-page, .host-bar-actions) .break-drag-handle {
+  display: inline-flex;
+  justify-content: center;
+  color: var(--color-text-muted);
+  cursor: grab;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-row.current .break-drag-handle {
+  color: var(--color-accent-text);
+  cursor: default;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-text {
+  min-width: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-meta {
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:is(.host-page, .host-bar-actions) .break-now-playing {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+:is(.host-page, .host-bar-actions) .break-playlist-actions {
+  display: flex;
+  gap: 2px;
+}
+
+:is(.host-page, .host-bar-actions) .break-row-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+:is(.host-page, .host-bar-actions) .break-row-button:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+:is(.host-page, .host-bar-actions) .break-row-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+:is(.host-page, .host-bar-actions) .break-row-button.is-danger:hover:not(:disabled) {
+  color: var(--color-danger);
+}
+
+:is(.host-page, .host-bar-actions) .break-row-button .material-symbols-rounded {
+  font-size: 20px;
+}
+
+@media (max-width: 768px) {
+  /* Full screen, one list at a time. */
+  :is(.host-page, .host-bar-actions) .break-manager-modal {
+    top: 0;
+    left: 0;
+    width: 100%;
+    max-width: 100%;
+    height: 100svh;
+    max-height: 100svh;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    border: 0;
+    border-radius: 0;
+    transform: none;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-playlist-bar .break-btn-label {
+    display: none;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-manager-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: var(--color-bg-secondary);
+  }
+
+  :is(.host-page, .host-bar-actions) .break-manager-tabs button {
+    display: inline-flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 40px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-manager-tabs button[aria-selected="true"] {
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+  }
+
+  :is(.host-page, .host-bar-actions) .break-tab-count {
+    padding: 0 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 16%, transparent);
+    font-size: 12px;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-manager-splitter,
+  :is(.host-page, .host-bar-actions) .break-columns-menu,
+  :is(.host-page, .host-bar-actions) .break-library-header,
+  :is(.host-page, .host-bar-actions) .break-lib-cell,
+  :is(.host-page, .host-bar-actions) .break-move {
+    display: none !important;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-manager-panel {
+    display: none;
+    flex: 1 1 auto !important;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-manager-panel.is-active-tab {
+    display: flex;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-library-row {
+    grid-template-columns: 40px minmax(0, 1fr) !important;
+    padding: 8px 10px;
+    cursor: default;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-lib-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-lib-title {
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-lib-meta {
+    overflow: hidden;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :is(.host-page, .host-bar-actions) .break-add-button,
+  :is(.host-page, .host-bar-actions) .break-row-button {
+    width: 40px;
+    height: 40px;
   }
 }

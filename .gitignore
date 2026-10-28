@@ -82,3 +82,4 @@ Thumbs.db
 /redeploy-webkaraoke.sh
 PlayerTV/release/KaraokeDock-Player-1.1.3-v7-unsigned.apk
 PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-unsigned.apk
+dev/build-and-publish.test.mjs

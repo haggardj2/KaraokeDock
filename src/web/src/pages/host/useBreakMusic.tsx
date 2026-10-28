@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import { api } from '../../api'
 import { useAuth } from '../../auth-context'
 import { formatTime } from './format'
-import { matchesBreakTrack, optionalPlaylistId, samePlaylistOrder, type BreakTrack } from '../../break-playlist'
+import { optionalPlaylistId, samePlaylistOrder, type BreakTrack } from '../../break-playlist'
 import type { BreakColumnKey, BreakColumnVisibility, BreakColumnWidths, BreakPlaylist, BreakSortState } from './types'
 
 const DEFAULT_BREAK_COLUMNS: BreakColumnVisibility = {
@@ -10,8 +10,13 @@ const DEFAULT_BREAK_COLUMNS: BreakColumnVisibility = {
   artist: true,
   genre: true,
   length: true,
-  path: true,
+  path: false,
 }
+
+// The library is fetched a page at a time (large libraries have thousands of tracks).
+const BREAK_LIBRARY_PAGE_SIZE = 100
+// "Add all" asks first when it would add more tracks than this.
+const BREAK_ADD_ALL_CONFIRM_THRESHOLD = 200
 
 const BREAK_COLUMNS_STORAGE_KEY = 'host.breakMusicColumns'
 
@@ -51,6 +56,10 @@ export function useBreakMusic({ headers, setBanner }: {
   const [showBreakPlaylistModal, setShowBreakPlaylistModal] = useState(false)
   const [breakSearchQuery, setBreakSearchQuery] = useState('')
   const [breakLibraryTracks, setBreakLibraryTracks] = useState<BreakTrack[]>([])
+  const [breakLibraryTotal, setBreakLibraryTotal] = useState(0)
+  const [breakLibraryLoading, setBreakLibraryLoading] = useState(false)
+  // Phones show one pane at a time.
+  const [breakManagerTab, setBreakManagerTab] = useState<'playlist' | 'library'>('playlist')
   const [breakPlaylistTracks, setBreakPlaylistTracks] = useState<BreakTrack[]>([])
   const [breakPlaylistTrackIds, setBreakPlaylistTrackIds] = useState<number[]>([])
   const [breakDraggedTrackId, setBreakDraggedTrackId] = useState<number | null>(null)
@@ -78,6 +87,9 @@ export function useBreakMusic({ headers, setBanner }: {
   const [showBreakColumnMenu, setShowBreakColumnMenu] = useState(false)
   const [breakLibraryPanePercent, setBreakLibraryPanePercent] = useState(62)
   const breakPlaylistTracksRef = useRef<BreakTrack[]>([])
+  const breakLibraryTracksRef = useRef<BreakTrack[]>([])
+  const breakLibraryRequestRef = useRef(0)
+  const breakLibraryLoadingRef = useRef(false)
   const breakColumnMenuRef = useRef<HTMLDivElement | null>(null)
   const breakManagerLayoutRef = useRef<HTMLDivElement | null>(null)
   const breakPlaylistSyncRequestRef = useRef(0)
@@ -182,21 +194,50 @@ export function useBreakMusic({ headers, setBanner }: {
     await loadBreakMusicState()
   }
 
-  async function loadBreakMusicLibrary(query: string = '') {
-    if (!auth.sessionToken || !auth.canHost) {
-      console.warn('Cannot load break music library without authentication')
-      return [] as BreakTrack[]
-    }
+  function breakLibraryParams(extra: Record<string, string>) {
+    return new URLSearchParams({
+      q: breakSearchQuery.trim(),
+      sort: breakSort.column,
+      dir: breakSort.direction,
+      ...extra,
+    }).toString()
+  }
+
+  // One page of the library for the current search and sort; reset starts again from the top.
+  async function loadBreakMusicLibrary(reset = true) {
+    if (!auth.sessionToken || !auth.canHost) return
+    const request = ++breakLibraryRequestRef.current
+    const offset = reset ? 0 : breakLibraryTracksRef.current.length
+    breakLibraryLoadingRef.current = true
+    setBreakLibraryLoading(true)
     try {
-      const result = await api(`/api/break-music/search?q=${encodeURIComponent(query)}`, { headers })
-      const tracks = Array.isArray(result) ? result : []
-      setBreakLibraryTracks(tracks)
-      return tracks
+      const result = await api(
+        `/api/break-music/library?${breakLibraryParams({ offset: String(offset), limit: String(BREAK_LIBRARY_PAGE_SIZE) })}`,
+        { headers },
+      )
+      if (request !== breakLibraryRequestRef.current) return
+      const page: BreakTrack[] = Array.isArray(result?.tracks) ? result.tracks : []
+      const next = reset ? page : [...breakLibraryTracksRef.current, ...page]
+      breakLibraryTracksRef.current = next
+      setBreakLibraryTracks(next)
+      setBreakLibraryTotal(Number(result?.total) || 0)
     } catch (error) {
       console.error('Could not load break music library:', error)
-      setBreakManagerError(error instanceof Error ? error.message : 'Could not load the break music library.')
-      throw error
+      if (request === breakLibraryRequestRef.current) {
+        setBreakManagerError(error instanceof Error ? error.message : 'Could not load the break music library.')
+      }
+    } finally {
+      if (request === breakLibraryRequestRef.current) {
+        breakLibraryLoadingRef.current = false
+        setBreakLibraryLoading(false)
+      }
     }
+  }
+
+  // Called when the library list is scrolled near its end.
+  function loadMoreBreakLibrary() {
+    if (breakLibraryLoadingRef.current || breakLibraryTracksRef.current.length >= breakLibraryTotal) return
+    void loadBreakMusicLibrary(false)
   }
 
   function setBreakEditorTracks(tracks: BreakTrack[]) {
@@ -225,13 +266,13 @@ export function useBreakMusic({ headers, setBanner }: {
     setBreakManagerError('')
     try {
       await breakSyncChainRef.current
-      const [, playlists] = await Promise.all([
-        loadBreakMusicLibrary(''),
+      // The library loads on its own (see the effect below), so the playlist shows straight away.
+      const [playlists, active] = await Promise.all([
         api('/api/break-music/playlists', { headers }) as Promise<BreakPlaylist[]>,
+        breakDraftRef.current ? Promise.resolve(null) : hydrateBreakActivePlaylist(),
       ])
       setBreakPlaylists(playlists)
-      if (!breakDraftRef.current) {
-        const active = await hydrateBreakActivePlaylist()
+      if (active && !breakDraftRef.current) {
         const activeId = optionalPlaylistId(active.activePlaylistId)
         setBreakPlaylistName(previous => previous || playlists.find(playlist => playlist.id === activeId)?.name || '')
         setSelectedBreakPlaylistId(previous => previous || (activeId === null ? '' : String(activeId)))
@@ -403,13 +444,25 @@ export function useBreakMusic({ headers, setBanner }: {
     setBreakPlaylistTracksAndSync([])
   }
 
-  function addAllBreakTracksToPlaylist() {
-    const toAdd = sortedFilteredBreakLibraryTracks
+  // Adds every track matching the current search (not just the loaded page), skipping ones
+  // already in the playlist.
+  async function addAllBreakTracksToPlaylist() {
+    if (!auth.sessionToken || !auth.canHost || breakManagerBusyRef.current) return
+    let toAdd: BreakTrack[]
+    try {
+      const result = await api(`/api/break-music/library?${breakLibraryParams({ all: '1' })}`, { headers })
+      toAdd = Array.isArray(result?.tracks) ? result.tracks : []
+    } catch (error) {
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not load the matching tracks.')
+      return
+    }
     if (toAdd.length === 0) return
     const playlist = breakPlaylistTracksRef.current
     const existingIds = new Set(playlist.map((t) => t.id))
     const newTracks = toAdd.filter((t) => !existingIds.has(t.id))
     if (newTracks.length === 0) return
+    if (newTracks.length > BREAK_ADD_ALL_CONFIRM_THRESHOLD &&
+        !window.confirm(`Add ${newTracks.length.toLocaleString()} tracks to the playlist?`)) return
     const hasIndexedCurrentTrack =
       !breakDraftRef.current && breakMusicTrack != null &&
       breakPlaylistIndex >= 0 &&
@@ -419,6 +472,34 @@ export function useBreakMusic({ headers, setBanner }: {
     const next = [...playlist]
     next.splice(insertAt, 0, ...newTracks)
     setBreakPlaylistTracksAndSync(next)
+  }
+
+  // Moves a playlist track to play right after the current song.
+  function playBreakTrackNext(index: number) {
+    const target = currentBreakPlaylistRowIndex >= 0 ? currentBreakPlaylistRowIndex + 1 : 0
+    if (index === target || index === currentBreakPlaylistRowIndex) return
+    moveBreakTrackToPlaylistIndex(index, index < target ? target - 1 : target)
+  }
+
+  async function deleteBreakPlaylist(playlistId: number) {
+    if (!auth.sessionToken || !auth.canHost || breakManagerBusyRef.current) return
+    const name = breakPlaylists.find(playlist => playlist.id === playlistId)?.name || 'this playlist'
+    if (!window.confirm(`Delete the saved playlist "${name}"? Whatever is playing now keeps playing.`)) return
+    breakManagerBusyRef.current = true
+    setBreakManagerBusy(true)
+    setBreakManagerError('')
+    try {
+      await api(`/api/break-music/playlists/${playlistId}`, { method: 'DELETE', headers })
+      setBreakPlaylists(previous => previous.filter(playlist => playlist.id !== playlistId))
+      setSelectedBreakPlaylistId(previous => (previous === String(playlistId) ? '' : previous))
+      if (activeBreakPlaylistId === playlistId) setActiveBreakPlaylistId(null)
+      setBreakManagerNotice(`Deleted "${name}".`)
+    } catch (error) {
+      setBreakManagerError(error instanceof Error ? error.message : 'Could not delete playlist.')
+    } finally {
+      breakManagerBusyRef.current = false
+      setBreakManagerBusy(false)
+    }
   }
 
   function shuffleBreakPlaylist() {
@@ -468,9 +549,22 @@ export function useBreakMusic({ headers, setBanner }: {
     setBreakPlaylistTracksAndSync(next)
   }
 
-  const filteredBreakLibraryTracks = useMemo(() => {
-    return breakLibraryTracks.filter(track => matchesBreakTrack(track, breakSearchQuery))
-  }, [breakLibraryTracks, breakSearchQuery])
+  // Library tracks already in the playlist show as "Added".
+  const breakPlaylistTrackIdSet = useMemo(() => new Set(breakPlaylistTracks.map(track => track.id)), [breakPlaylistTracks])
+
+  // Reload the library from the top when the dialog opens (straight away) or the search or sort
+  // changes (typing is debounced).
+  const breakLibraryShownRef = useRef(false)
+  useEffect(() => {
+    if (!showBreakPlaylistModal) {
+      breakLibraryShownRef.current = false
+      return
+    }
+    const delay = breakLibraryShownRef.current ? 250 : 0
+    breakLibraryShownRef.current = true
+    const timer = setTimeout(() => void loadBreakMusicLibrary(true), delay)
+    return () => clearTimeout(timer)
+  }, [showBreakPlaylistModal, breakSearchQuery, breakSort.column, breakSort.direction, headers])
 
   const breakPlaylistDurationMs = useMemo(
     () => breakPlaylistTracks.reduce((acc, t) => acc + (t.duration_ms || 0), 0),
@@ -565,22 +659,6 @@ export function useBreakMusic({ headers, setBanner }: {
     })
   }
 
-  const sortedFilteredBreakLibraryTracks = useMemo(() => {
-    const tracks = [...filteredBreakLibraryTracks]
-    const directionMultiplier = breakSort.direction === 'asc' ? 1 : -1
-    const compareText = (a: string | null | undefined, b: string | null | undefined) =>
-      (a || '').localeCompare(b || '', undefined, { sensitivity: 'base' })
-    tracks.sort((a, b) => {
-      let result = 0
-      if (breakSort.column === 'song') result = compareText(a.title, b.title)
-      else if (breakSort.column === 'artist') result = compareText(a.artist, b.artist) || compareText(a.title, b.title)
-      else if (breakSort.column === 'genre') result = compareText(a.genre, b.genre) || compareText(a.title, b.title)
-      else if (breakSort.column === 'length') result = (a.duration_ms || 0) - (b.duration_ms || 0)
-      else if (breakSort.column === 'path') result = compareText(a.file_path, b.file_path)
-      return result * directionMultiplier
-    })
-    return tracks
-  }, [filteredBreakLibraryTracks, breakSort])
 
   function buildBreakGridTemplate() {
     const cols: string[] = []
@@ -660,6 +738,14 @@ export function useBreakMusic({ headers, setBanner }: {
     setBreakSearchQuery,
     breakLibraryTracks,
     setBreakLibraryTracks,
+    breakLibraryTotal,
+    breakLibraryLoading,
+    breakManagerTab,
+    setBreakManagerTab,
+    loadMoreBreakLibrary,
+    breakPlaylistTrackIdSet,
+    playBreakTrackNext,
+    deleteBreakPlaylist,
     breakPlaylistTracks,
     setBreakPlaylistTracks,
     breakPlaylistTrackIds,
@@ -735,7 +821,6 @@ export function useBreakMusic({ headers, setBanner }: {
     shuffleBreakPlaylist,
     moveBreakTrackInPlaylist,
     moveBreakTrackToPlaylistIndex,
-    filteredBreakLibraryTracks,
     breakPlaylistDurationMs,
     currentBreakPlaylistRowIndex,
     activeBreakPlaylistName,
@@ -746,7 +831,6 @@ export function useBreakMusic({ headers, setBanner }: {
     getBreakColumnLimits,
     startBreakColumnResize,
     toggleBreakSort,
-    sortedFilteredBreakLibraryTracks,
     buildBreakGridTemplate,
     canDropOnBreakPlaylist,
     getBreakDraggedTrackId,

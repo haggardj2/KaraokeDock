@@ -40,5 +40,6 @@ psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/023_singer_social_login.sq
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/024_shared_singer_identity.sql
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/025_break_music_path_search.sql
 psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/026_account_login_links.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f migrations/027_break_music_library_search.sql
 
 echo "Migrations completed successfully"

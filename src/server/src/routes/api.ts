@@ -6222,6 +6222,54 @@ apiRouter.get(
   })
 );
 
+// The break-music manager's library: one page at a time (or every match with all=1, for
+// "Add all"), sorted and searched on the server so large libraries open quickly.
+const BREAK_LIBRARY_SORTS: Record<string, string> = {
+  song: 'LOWER(title)',
+  artist: 'LOWER(artist)',
+  genre: 'LOWER(genre)',
+  length: 'duration_ms',
+  path: 'file_path',
+};
+const BREAK_LIBRARY_PAGE_SIZE = 100;
+const BREAK_LIBRARY_MAX_PAGE_SIZE = 500;
+
+apiRouter.get(
+  '/break-music/library',
+  hostGuard,
+  searchLimiter,
+  ah(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const sortExpression = BREAK_LIBRARY_SORTS[String(req.query.sort)] ?? BREAK_LIBRARY_SORTS.artist;
+    const direction = req.query.dir === 'desc' ? 'DESC' : 'ASC';
+    const all = req.query.all === '1';
+    const offset = all ? 0 : Math.max(0, Math.trunc(Number(req.query.offset) || 0));
+    const limit = all ? null : Math.min(BREAK_LIBRARY_MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(req.query.limit) || BREAK_LIBRARY_PAGE_SIZE)));
+    const params: unknown[] = [];
+    let where = '';
+    if (q) {
+      params.push(q.replace(/[\\%_]/g, '\\$&'));
+      where = `WHERE title ILIKE '%' || $1 || '%'
+                  OR artist ILIKE '%' || $1 || '%'
+                  OR genre ILIKE '%' || $1 || '%'
+                  OR file_path ILIKE '%' || $1 || '%'`;
+    }
+    const page = limit === null ? '' : `LIMIT ${limit} OFFSET ${offset}`;
+    const [rows, count] = await Promise.all([
+      query(
+        `SELECT id, title, artist, genre, duration_ms, file_path
+           FROM break_music_tracks
+           ${where}
+          ORDER BY ${sortExpression} ${direction} NULLS LAST, LOWER(title), id
+          ${page}`,
+        params,
+      ),
+      query<{ total: number }>(`SELECT COUNT(*)::int AS total FROM break_music_tracks ${where}`, params),
+    ]);
+    res.json({ tracks: rows.rows, total: count.rows[0].total, offset });
+  })
+);
+
 apiRouter.get(
   '/break-music/state',
   ah(async (_req, res) => {
@@ -6398,6 +6446,22 @@ apiRouter.get(
         ORDER BY updated_at DESC, id DESC`
     );
     res.json(r.rows);
+  })
+);
+
+apiRouter.delete(
+  '/break-music/playlists/:id',
+  hostGuard,
+  ah(async (req, res) => {
+    const playlistId = Number(req.params.id);
+    if (!isPositiveTrackId(playlistId)) return res.status(400).json({ error: 'Invalid playlist id' });
+    const deleted = await query('DELETE FROM break_music_playlists WHERE id = $1', [playlistId]);
+    if (!deleted.rowCount) return res.status(404).json({ error: 'Playlist not found' });
+    // The running tracks keep playing; they just stop being "the loaded playlist".
+    const state = await getBreakMusicState();
+    if (state.activePlaylistId === playlistId) await setBreakMusicState({ activePlaylistId: null });
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true });
   })
 );
 
