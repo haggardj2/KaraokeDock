@@ -125,6 +125,11 @@ export function getTheme(id: ThemeId): ThemeDefinition {
   return THEMES.find((theme) => theme.id === id) ?? THEMES[0]
 }
 
+// The theme's colours as CSS custom properties, for scoping a theme to one element.
+export function themeCssVars(id: ThemeId): Record<string, string> {
+  return Object.fromEntries(Object.entries(getTheme(id).tokens).map(([name, value]) => [`--color-${name}`, value]))
+}
+
 export function themeCssText(id: ThemeId): string {
   const theme = getTheme(id)
   const vars = Object.entries(theme.tokens).map(([name, value]) => `--color-${name}: ${value};`)
@@ -162,6 +167,11 @@ export function loadRequestThemeChoice(storage: Pick<Storage, 'getItem'> | undef
 export function resolveRequestTheme(choice: RequestThemeChoice, venueTheme: unknown): ThemeId {
   if (choice !== 'venue') return choice
   return isThemeId(venueTheme) ? venueTheme : DEFAULT_THEME_ID
+}
+
+// The Player (TV) is always a dark screen, so a light venue theme falls back to the default dark one.
+export function resolvePlayerTheme(venueTheme: unknown): ThemeId {
+  return isThemeId(venueTheme) && getTheme(venueTheme).scheme === 'dark' ? venueTheme : DEFAULT_THEME_ID
 }
 
 export function applyTheme(id: ThemeId) {

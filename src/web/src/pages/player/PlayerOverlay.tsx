@@ -122,7 +122,7 @@ export default function PlayerOverlay({
               style={{
                 fontSize: `${tickerFontSize}px`,
                 fontWeight: 600,
-                color: "#fff",
+                color: "var(--color-text-primary)",
                 textShadow: "2px 2px 4px rgba(0,0,0,0.9)",
                 letterSpacing: "0.5px",
               }}

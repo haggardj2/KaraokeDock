@@ -7,6 +7,8 @@ import {
   REQUEST_THEME_STORAGE_KEY,
   loadRequestThemeChoice,
   resolveRequestTheme,
+  resolvePlayerTheme,
+  themeCssVars,
   loadThemeId,
   saveThemeId,
   themeCssText,
@@ -72,5 +74,22 @@ describe('request page theme choice', () => {
     assert.equal(loadThemeId(storage), 'daylight')
     assert.equal(loadRequestThemeChoice(storage), 'stage')
     assert.equal(loadRequestThemeChoice(createStorage({ [REQUEST_THEME_STORAGE_KEY]: 'bogus' })), 'venue')
+  })
+})
+
+describe('player theme', () => {
+  it('follows a dark venue theme and keeps the TV dark for a light one', () => {
+    assert.equal(resolvePlayerTheme('stage'), 'stage')
+    assert.equal(resolvePlayerTheme('midnight'), 'midnight')
+    assert.equal(resolvePlayerTheme('daylight'), DEFAULT_THEME_ID)
+    assert.equal(resolvePlayerTheme(undefined), DEFAULT_THEME_ID)
+    assert.equal(resolvePlayerTheme('neon'), DEFAULT_THEME_ID)
+  })
+
+  it('exposes theme tokens as scoped CSS custom properties', () => {
+    const vars = themeCssVars('stage')
+    const stage = THEMES.find((theme) => theme.id === 'stage')
+    assert.equal(vars['--color-accent'], stage.tokens.accent)
+    assert.equal(Object.keys(vars).length, Object.keys(stage.tokens).length)
   })
 })

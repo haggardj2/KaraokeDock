@@ -5973,6 +5973,7 @@ apiRouter.put(
       return res.status(400).json({ error: `theme must be one of: ${REQUEST_THEMES.join(', ')}` });
     }
     await setSetting('requests.theme', theme);
+    postQueueUpdate('requests.theme', { theme });
     res.json({ ok: true, theme });
   }),
 );

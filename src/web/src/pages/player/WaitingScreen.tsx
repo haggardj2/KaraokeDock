@@ -1,6 +1,6 @@
 import type { OverlaySettings } from "../../components/QueueOverlay";
 import SingerAvatar from "../../components/SingerAvatar";
-import { formatSingerName, type QItem } from "./helpers";
+import { formatSingerName, PLAYER_TEXT_SHADOW, type QItem } from "./helpers";
 
 // What the Player shows between songs: the next singer (with the autoplay countdown), or a
 // "Waiting for singers" splash with the request URL. A custom background replaces the splash.
@@ -25,7 +25,7 @@ export default function WaitingScreen({
     <>
       {upNext.length > 0 ? (
         <div
-          className="player-waiting"
+          className={`player-waiting${isCustomPlayerBackground ? " player-waiting-panel" : ""}`}
           style={{
             position: "relative",
             zIndex: 1,
@@ -44,10 +44,8 @@ export default function WaitingScreen({
               className="player-countdown"
               style={{
                 fontSize: "clamp(24px, 4vw, 40px)",
-                background: "linear-gradient(135deg, #10b981, #34d399)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
+                color: "var(--color-success)",
+                textShadow: PLAYER_TEXT_SHADOW,
                 fontWeight: 700,
                 animation: "pulse 2s ease infinite",
               }}
@@ -62,10 +60,11 @@ export default function WaitingScreen({
               fontSize: "clamp(32px, 5vw, 56px)",
               margin: 0,
               fontWeight: 700,
-              background: "linear-gradient(135deg, #6366f1, #a855f7)",
+              background: "linear-gradient(135deg, var(--color-accent), var(--color-accent-2))",
               WebkitBackgroundClip: "text",
               WebkitTextFillColor: "transparent",
               backgroundClip: "text",
+              filter: "drop-shadow(0 2px 8px rgba(0, 0, 0, 0.85))",
               letterSpacing: "-0.02em",
             }}
           >
@@ -84,7 +83,8 @@ export default function WaitingScreen({
               style={{
                 fontSize: "clamp(24px, 4vw, 48px)",
                 fontWeight: 700,
-                color: "#ffffff",
+                color: "var(--color-text-primary)",
+                textShadow: PLAYER_TEXT_SHADOW,
                 marginBottom: "8px",
               }}
             >
@@ -94,7 +94,8 @@ export default function WaitingScreen({
               <div
                 style={{
                   fontSize: "clamp(14px, 2vw, 20px)",
-                  color: "rgba(161, 161, 170, 1)",
+                  color: "var(--color-text-secondary)",
+                  textShadow: PLAYER_TEXT_SHADOW,
                 }}
               >
                 {upNext[0].title || "Unknown"} •{" "}
@@ -118,10 +119,11 @@ export default function WaitingScreen({
               fontSize: "clamp(32px, 6vw, 64px)",
               fontWeight: 700,
               margin: "0 0 16px 0",
-              background: "linear-gradient(135deg, #6366f1, #a855f7)",
+              background: "linear-gradient(135deg, var(--color-accent), var(--color-accent-2))",
               WebkitBackgroundClip: "text",
               WebkitTextFillColor: "transparent",
               backgroundClip: "text",
+              filter: "drop-shadow(0 2px 8px rgba(0, 0, 0, 0.85))",
               letterSpacing: "-0.02em",
             }}
           >
@@ -130,7 +132,8 @@ export default function WaitingScreen({
           <p
             style={{
               fontSize: "clamp(16px, 2. 5vw, 20px)",
-              color: "rgba(161, 161, 170, 1)",
+              color: "var(--color-text-secondary)",
+              textShadow: PLAYER_TEXT_SHADOW,
               margin: 0,
             }}
           >
@@ -141,7 +144,7 @@ export default function WaitingScreen({
               className="player-requests-url"
               style={{
                 fontSize: "clamp(16px, 2.1vw, 24px)",
-                color: "rgba(226, 232, 240, 0.95)",
+                color: "var(--color-text-primary)",
                 margin: "16px 0 0 0",
                 fontFamily:
                   '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
@@ -151,9 +154,9 @@ export default function WaitingScreen({
                 wordBreak: "break-word",
                 padding: "12px 20px",
                 borderRadius: 999,
-                background: "rgba(15, 23, 42, 0.72)",
-                border: "1px solid rgba(148, 163, 184, 0.28)",
-                boxShadow: "0 10px 30px rgba(15, 23, 42, 0.25)",
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-border-strong)",
+                boxShadow: "0 10px 30px rgba(0, 0, 0, 0.35)",
               }}
             >
               {splashRequestsUrl}

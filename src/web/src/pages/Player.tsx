@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -25,6 +26,7 @@ import {
   RotationScrollerSinger,
 } from "./player/helpers";
 import { keepPlayerScreenAwake } from "../playerWakeLock";
+import { resolvePlayerTheme, themeCssVars } from "../theme";
 import PlayerBackground from "./player/PlayerBackground";
 import PlayerOverlay from "./player/PlayerOverlay";
 import WaitingScreen from "./player/WaitingScreen";
@@ -55,6 +57,9 @@ export default function Player() {
   const [wakeLockMessage, setWakeLockMessage] = useState<string | null>(null);
   const wakeLockRef = useRef<ReturnType<typeof keepPlayerScreenAwake> | null>(null);
   const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
+  // Colours follow the venue's Request Page Theme (dark themes only; see resolvePlayerTheme).
+  const [playerThemeId, setPlayerThemeId] = useState(() => resolvePlayerTheme(null));
+  const themeStyle = useMemo(() => themeCssVars(playerThemeId) as CSSProperties, [playerThemeId]);
   const [rotationScrollerSingers, setRotationScrollerSingers] = useState<
     RotationScrollerSinger[]
   >([]);
@@ -266,7 +271,8 @@ export default function Player() {
 
   useEffect(() => {
     api("/api/settings/public")
-      .then((settings: { "requests.url"?: string }) => {
+      .then((settings: { "requests.url"?: string; "requests.theme"?: string }) => {
+        setPlayerThemeId(resolvePlayerTheme(settings["requests.theme"]));
         if (
           typeof settings["requests.url"] === "string" &&
           settings["requests.url"].trim()
@@ -342,6 +348,9 @@ export default function Player() {
                   return prevDelay;
                 });
               }
+            }
+            if (msg.type === "requests.theme") {
+              setPlayerThemeId(resolvePlayerTheme(msg.theme));
             }
             if (msg.type === "player.background.settings") {
               applyBackgroundSettings(msg);
@@ -912,8 +921,9 @@ export default function Player() {
           onMouseMove={handleMouseMove}
           onMouseEnter={() => setShowControls(true)}
           style={{
+            ...themeStyle,
             background: "#000",
-            color: "#e5e7eb",
+            color: "var(--color-text-primary)",
             display: "grid",
             placeItems: "center",
             fontFamily: "system-ui, -apple-system, sans-serif",
@@ -1030,8 +1040,9 @@ export default function Player() {
         onMouseMove={handleMouseMove}
         onMouseEnter={() => setShowControls(true)}
         style={{
+          ...themeStyle,
           background: "#000",
-          color: "#e5e7eb",
+          color: "var(--color-text-primary)",
           overflow: "hidden",
           cursor: showControls ? "default" : "none",
         }}

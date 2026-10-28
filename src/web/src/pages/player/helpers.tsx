@@ -236,6 +236,9 @@ export function getSingerTickerToken(name: string | null | undefined, short = fa
   return `[[SINGER:${encodeURIComponent(name)}:${short ? "1" : "0"}]]`;
 }
 
+// Keeps light text readable over a photo or slideshow background.
+export const PLAYER_TEXT_SHADOW = "0 2px 10px rgba(0, 0, 0, 0.85)";
+
 export function renderHighlightedTickerText(text: string, highlightedText: string, keyPrefix: string) {
   if (!highlightedText || !text.includes(highlightedText)) return text;
   return text.split(highlightedText).map((part, index) => (
@@ -243,10 +246,10 @@ export function renderHighlightedTickerText(text: string, highlightedText: strin
       {index > 0 && (
         <span
           style={{
-            color: "#facc15",
+            color: "var(--color-warning)",
             fontWeight: 800,
             textShadow:
-              "0 0 12px rgba(250, 204, 21, 0.65), 2px 2px 4px rgba(0,0,0,0.95)",
+              "0 0 12px color-mix(in srgb, var(--color-warning) 65%, transparent), 2px 2px 4px rgba(0,0,0,0.95)",
           }}
         >
           {highlightedText}
