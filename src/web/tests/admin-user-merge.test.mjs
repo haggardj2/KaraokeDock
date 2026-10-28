@@ -5,6 +5,9 @@ import { parseSync } from 'oxc-parser'
 import { transpile } from './transpile.mjs'
 
 const source = readFileSync(new URL('../src/pages/Admin.tsx', import.meta.url), 'utf8')
+// Admin's logic lives in the useAdmin hook and its pure helpers in shared.ts.
+const adminLogic = readFileSync(new URL('../src/pages/admin/useAdmin.tsx', import.meta.url), 'utf8')
+const adminShared = readFileSync(new URL('../src/pages/admin/shared.ts', import.meta.url), 'utf8')
 function parse(source) {
   const result = parseSync('component.tsx', source)
   assert.deepEqual(result.errors, [])
@@ -34,7 +37,7 @@ function loadFunction(name, environment, textSource = source) {
 
 describe('Admin User Manager singer merging', () => {
   it('uses the canonical singer name with account-name fallbacks', () => {
-    const displayName = loadFunction('getUserDisplayName', {})
+    const displayName = loadFunction('getUserDisplayName', {}, adminShared)
     assert.equal(displayName({ singer_display_name: 'Kept Singer', display_name: 'Old Social Name', username: 'login' }), 'Kept Singer')
     assert.equal(displayName({ singer_display_name: null, display_name: 'Social Name', username: 'login' }), 'Social Name')
     assert.equal(displayName({ singer_display_name: null, display_name: null, username: 'login' }), 'login')
@@ -49,7 +52,7 @@ describe('Admin User Manager singer merging', () => {
       auth: { retrySessionValidation: () => calls.push(['session']) },
       setBanner: message => calls.push(['banner', message]),
       refreshUsers: async () => calls.push(['refresh']),
-    })
+    }, adminLogic)
     await complete('Duplicate Singer')
     assert.deepEqual(calls.map(call => call[0]), ['dialog', 'session', 'banner', 'refresh'])
     assert.equal(calls[0][1], null)
@@ -65,7 +68,7 @@ describe('Admin User Manager singer merging', () => {
       setUsers: () => assert.fail('Must not replace users with a failed response'),
       api: async () => { throw new Error('Connection lost') },
       console: { error() {} },
-    })
+    }, adminLogic)
     await refresh()
     assert.deepEqual(errors, ['', 'Connection lost'])
   })
