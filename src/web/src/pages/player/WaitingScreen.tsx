@@ -21,6 +21,31 @@ export default function WaitingScreen({
   countdown: number | null;
   splashRequestsUrl: string;
 }) {
+  // The request URL shows in every waiting state, so singers can find it with or without a queue or background.
+  const requestsUrl = overlaySettings.showRequestsUrl ? (
+    <p
+      className="player-requests-url"
+      style={{
+        fontSize: "clamp(16px, 2.1vw, 24px)",
+        color: "var(--color-text-primary)",
+        margin: "16px 0 0 0",
+        fontFamily:
+          '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
+        fontWeight: 700,
+        letterSpacing: "0.04em",
+        textTransform: "lowercase",
+        wordBreak: "break-word",
+        padding: "12px 20px",
+        borderRadius: 999,
+        background: "var(--color-bg-elevated)",
+        border: "1px solid var(--color-border-strong)",
+        boxShadow: "0 10px 30px rgba(0, 0, 0, 0.35)",
+      }}
+    >
+      {splashRequestsUrl}
+    </p>
+  ) : null;
+
   return (
     <>
       {upNext.length > 0 ? (
@@ -103,8 +128,15 @@ export default function WaitingScreen({
               </div>
             )}
           </div>
+          {requestsUrl}
         </div>
-      ) : isCustomPlayerBackground ? null : (
+      ) : isCustomPlayerBackground ? (
+        requestsUrl && (
+          <div className="player-waiting" style={{ position: "relative", zIndex: 1, textAlign: "center" }}>
+            {requestsUrl}
+          </div>
+        )
+      ) : (
         <div
           className="player-waiting"
           style={{
@@ -139,29 +171,7 @@ export default function WaitingScreen({
           >
             Add your song from the request page!
           </p>
-          {overlaySettings.showRequestsUrl && (
-            <p
-              className="player-requests-url"
-              style={{
-                fontSize: "clamp(16px, 2.1vw, 24px)",
-                color: "var(--color-text-primary)",
-                margin: "16px 0 0 0",
-                fontFamily:
-                  '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
-                fontWeight: 700,
-                letterSpacing: "0.04em",
-                textTransform: "lowercase",
-                wordBreak: "break-word",
-                padding: "12px 20px",
-                borderRadius: 999,
-                background: "var(--color-bg-elevated)",
-                border: "1px solid var(--color-border-strong)",
-                boxShadow: "0 10px 30px rgba(0, 0, 0, 0.35)",
-              }}
-            >
-              {splashRequestsUrl}
-            </p>
-          )}
+          {requestsUrl}
         </div>
       )}
     </>

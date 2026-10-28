@@ -67,12 +67,21 @@ describe('client page routing', () => {
   })
 
   it('keeps the normal layout and correct page on registered routes', () => {
-    for (const [path, page] of [['/', 'Requests'], ['/request', 'Requests'], ['/player', 'Player'], ['/host', 'Host'], ['/admin', 'Admin']]) {
-      const result = renderRoute(path)
+    for (const [path, page, loggedIn] of [['/', 'Requests'], ['/request', 'Requests'], ['/player', 'Player'], ['/host', 'Host', true], ['/admin', 'Admin', true]]) {
+      const result = renderRoute(path, { loggedIn })
       assert.match(result.html, /<nav/, path)
       assert.ok(result.html.includes(`data-logo-menu="${path}"`), path)
       assert.ok(result.html.includes(`${page} page`), path)
       assert.equal(result.authMounted, true, path)
+    }
+  })
+
+  it('hides the app bar on Host and Admin until signed in', () => {
+    for (const [path, page] of [['/host', 'Host'], ['/admin', 'Admin']]) {
+      const signedOut = renderRoute(path)
+      assert.doesNotMatch(signedOut.html, /<nav/, path)
+      assert.ok(signedOut.html.includes(`${page} page`), path)
+      assert.match(renderRoute(path, { loggedIn: true }).html, /<nav/, path)
     }
   })
 

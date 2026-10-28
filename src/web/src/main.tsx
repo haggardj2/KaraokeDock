@@ -93,6 +93,9 @@ function Nav() {
     setAvatarLoadFailed(false);
   }, [auth.profile.picture]);
 
+  // Signed-out Host and Admin show only their sign-in card, without the app bar.
+  if (showAuthButton && !auth.isLoggedIn) return null;
+
   return (
     <nav className="app-bar" aria-label="KaraokeDock">
       <LogoMenu currentPath={location.pathname} showAdmin={!auth.isLoggedIn || auth.isAdmin} />
