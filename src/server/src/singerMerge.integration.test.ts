@@ -158,7 +158,7 @@ describe.runIf(enabled)('shared canonical singer merge against PostgreSQL and HT
     });
     vi.mocked(oidc.authorizationCodeGrant).mockResolvedValue({
       access_token: 'not-persisted', claims: () => ({
-        sub: 'host-subject', email: 'host@example.com', name: 'Provider changed host name', picture: 'https://images.example/host',
+        sub: 'host-subject', email: 'host@example.com', name: 'Provider changed host name', picture: 'https://images.example/host', groups: ['karaokedock_admin'],
       }),
     } as any);
     const start = await request('/auth/oidc/login', undefined, 'GET', null);
@@ -170,6 +170,15 @@ describe.runIf(enabled)('shared canonical singer merge against PostgreSQL and HT
     expect(exchange.status).toBe(200);
     return await exchange.json() as { sessionToken: string; role: string; displayName: string; picture: string };
   }
+
+  it('keeps earlier SSO sessions signed in when the same user signs in on another device', async () => {
+    const host = await oidcUser();
+    const firstDevice = await oidcLogin();
+    const secondDevice = await oidcLogin();
+    for (const signedIn of [firstDevice, secondDevice]) {
+      expect(await validateSessionInfo(signedIn.sessionToken)).toMatchObject({ valid: true, userId: host.id, role: 'admin' });
+    }
+  });
 
   it('links distinct singers through admin-only account routes and lists only canonical local/OIDC users', async () => {
     const host = await oidcUser();

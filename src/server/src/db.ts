@@ -371,12 +371,16 @@ export async function updateUser(id: number, updates: {
 
   if (fields.length === 1) return getUserById(id); // nothing to update
 
+  // SSO sign-in re-syncs the role on every login, so only an actual change should revoke sessions;
+  // otherwise signing in on one device would sign the user out everywhere else.
+  const previousRole = updates.role !== undefined ? (await getUserById(id))?.role : undefined;
+
   values.push(id);
   const res = await query<User>(
     `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
     values
   );
-  if (res.rows[0] && (updates.is_active === false || updates.role !== undefined)) {
+  if (res.rows[0] && (updates.is_active === false || (updates.role !== undefined && updates.role !== previousRole))) {
     await query('DELETE FROM sessions WHERE user_id = $1 OR login_user_id = $1', [id]);
   }
   return res.rows[0] || null;
