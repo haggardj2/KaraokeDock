@@ -15,6 +15,42 @@ import ProfileDialog from "../components/ProfileDialog";
 import ThemePicker from "../components/ThemePicker";
 import { downloadJsonFile, readJsonFile, safeHistoryFilename } from "../utils/jsonFiles";
 import {
+  BROWSE_LETTERS,
+  MAX_KEY_ADJUSTMENT,
+  MIN_KEY_ADJUSTMENT,
+  MOBILE_BREAKPOINT,
+  SINGER_UUID_STORAGE_KEY,
+  VENUE_THEME_CACHE_KEY,
+  createSingerUuid,
+  formatCount,
+  formatTrackKind,
+  getOrCreateSingerUuid,
+  groupKey,
+  normalizeArtistForGroup,
+  normalizeMyQueueItems,
+  reorderQueuedItems,
+  searchRelevance,
+  shouldHandleEnterKey,
+} from "./requests/helpers";
+import type {
+  BrowseArtistRow,
+  BrowseCategory,
+  CombinedSearchGroup,
+  CombinedSearchTrack,
+  KaraokeNerdsTrack,
+  LyricsData,
+  MyQueueItem,
+  SearchRow,
+  SelfSingerProfileResponse,
+  VersionPicker,
+} from "./requests/types";
+import CombinedVersionPickerDialog from "./requests/CombinedVersionPickerDialog";
+import VersionPickerDialog from "./requests/VersionPickerDialog";
+import KnVersionPickerDialog from "./requests/KnVersionPickerDialog";
+import LyricsDialog from "./requests/LyricsDialog";
+import { useMyQueue } from "./requests/useMyQueue";
+import MyQueueSheet from "./requests/MyQueueSheet";
+import {
   REQUEST_THEME_STORAGE_KEY,
   THEMES,
   applyTheme,
@@ -34,205 +70,11 @@ import {
 } from "../social-login";
 import "./Requests.css";
 
-const VENUE_THEME_CACHE_KEY = "karaokedock.venueTheme";
-
-function formatCount(count: number, noun: string) {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
-const MIN_KEY_ADJUSTMENT = -6;
-const MAX_KEY_ADJUSTMENT = 6;
-const MOBILE_BREAKPOINT = 640;
-const BROWSE_LETTERS = ["#", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("")];
-const SINGER_UUID_STORAGE_KEY = "karaoke-singer-uuid";
-
-type SearchRow = {
-  id: number;
-  title: string | null;
-  artist: string | null;
-  disc_id: string | null;
-  kind: "mp4" | "cdgmp3" | "zip" | "mp3";
-  matched_term?: string | null;
-};
-
-type KaraokeNerdsTrack = {
-  title: string;
-  artist: string;
-  url: string;
-  brand?: string;
-  source: "karaoke-nerds";
-};
-
-type MyQueueItem = {
-  id: number;
-  title: string | null;
-  artist: string | null;
-  status: string;
-};
-
-type BrowseCategory = "artist" | "title";
-
-type SelfSingerProfileResponse = {
-  singerId: string;
-  singerUuid: string;
-  displayName: string;
-  canUpload: boolean;
-  profile: SingerProfile;
-};
-
-type BrowseArtistRow = {
-  artist: string;
-  songCount?: number;
-  versionCount?: number;
-};
-
-type CombinedSearchTrack =
-  | {
-      type: "local";
-      key: string;
-      title: string;
-      artist: string;
-      discId: string | null;
-      kind: string | null;
-      track: SearchRow;
-    }
-  | {
-      type: "online";
-      key: string;
-      title: string;
-      artist: string;
-      brand: string | null;
-      track: KaraokeNerdsTrack;
-    };
-
-type CombinedSearchGroup = {
-  key: string;
-  title: string;
-  artist: string;
-  versions: CombinedSearchTrack[];
-};
-
-function normalizeMyQueueItems(items: unknown): MyQueueItem[] {
-  if (!Array.isArray(items)) return [];
-  return items
-    .map((item) => {
-      if (!item || typeof item !== "object") return null;
-      const row = item as {
-        id?: unknown;
-        title?: unknown;
-        artist?: unknown;
-        status?: unknown;
-      };
-      const id = Number(row.id);
-      if (!Number.isFinite(id)) return null;
-      return {
-        id,
-        title: typeof row.title === "string" ? row.title : null,
-        artist: typeof row.artist === "string" ? row.artist : null,
-        status: typeof row.status === "string" ? row.status : "",
-      };
-    })
-    .filter((item): item is MyQueueItem => item !== null);
-}
-
-function reorderQueuedItems(
-  items: MyQueueItem[],
-  draggedId: number,
-  targetId: number,
-): { items: MyQueueItem[]; queuedIds: number[] } | null {
-  if (draggedId === targetId) return null;
-  const queued = items.filter((item) => item.status === "queued");
-  const fromIdx = queued.findIndex((item) => item.id === draggedId);
-  const toIdx = queued.findIndex((item) => item.id === targetId);
-  if (fromIdx === -1 || toIdx === -1) return null;
-
-  const reordered = [...queued];
-  reordered.splice(toIdx, 0, reordered.splice(fromIdx, 1)[0]);
-  const queuedIds = reordered.map((item) => item.id);
-  const nextQueued = [...reordered];
-  const nextItems = items.map((item) =>
-    item.status === "queued" ? nextQueued.shift()! : item,
-  );
-  return { items: nextItems, queuedIds };
-}
-
-function shouldHandleEnterKey(
-  event: React.KeyboardEvent<HTMLInputElement>,
-): boolean {
-  const nativeEvent = event.nativeEvent as KeyboardEvent & {
-    isComposing?: boolean;
-  };
-  return event.key === "Enter" && !nativeEvent.isComposing;
-}
-
 /**
  * Normalize an artist name for grouping:
  * - Lowercase
  * - Invert "Artist, The" / "Artist, A" / "Artist, An" → "the artist" etc.
  */
-function normalizeArtistForGroup(artist: string): string {
-  const trimmed = artist.trim();
-  const inverted = trimmed.replace(
-    /^(.+),\s*(a|an|the)$/i,
-    (_, name, article) => `${article} ${name}`.toLowerCase(),
-  );
-  return inverted.toLowerCase();
-}
-
-function groupKey(title: string, artist: string): string {
-  return `${title.toLowerCase().trim()}|${normalizeArtistForGroup(artist)}`;
-}
-
-function searchRelevance(
-  query: string,
-  title: string,
-  artist: string,
-): number {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return 0;
-
-  const normalizedTitle = title.trim().toLowerCase();
-  const normalizedArtist = artist.trim().toLowerCase();
-  const combined = `${normalizedArtist} ${normalizedTitle}`.trim();
-  const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
-
-  if (normalizedTitle === normalizedQuery) return 0;
-  if (normalizedArtist === normalizedQuery) return 1;
-  if (combined === normalizedQuery) return 2;
-  if (normalizedTitle.startsWith(normalizedQuery)) return 3;
-  if (normalizedArtist.startsWith(normalizedQuery)) return 4;
-  if (normalizedTitle.includes(normalizedQuery)) return 5;
-  if (normalizedArtist.includes(normalizedQuery)) return 6;
-  if (combined.includes(normalizedQuery)) return 7;
-  if (tokens.every((token) => combined.includes(token))) return 8;
-  return 9;
-}
-
-function formatTrackKind(kind: string | null | undefined): string {
-  if (kind === "mp4") return "Video";
-  if (kind === "cdgmp3") return "CDG";
-  return kind?.toUpperCase() ?? "";
-}
-
-function createSingerUuid(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
-    (
-      Number(char) ^
-      (Math.random() * 16) >> (Number(char) / 4)
-    ).toString(16),
-  );
-}
-
-function getOrCreateSingerUuid(): string {
-  const existing = localStorage.getItem(SINGER_UUID_STORAGE_KEY);
-  if (existing) return existing;
-  const next = createSingerUuid();
-  localStorage.setItem(SINGER_UUID_STORAGE_KEY, next);
-  return next;
-}
 
 export default function Requests() {
   const auth = useAuth();
@@ -315,45 +157,35 @@ export default function Requests() {
     null,
   );
   const [lyricsPopupOpen, setLyricsPopupOpen] = useState<string | null>(null);
-  const [lyricsData, setLyricsData] = useState<{
-    [key: string]: {
-      loading: boolean;
-      lyrics: string | null;
-      error: string | null;
-    };
-  }>({});
+  const [lyricsData, setLyricsData] = useState<LyricsData>({});
   // Fuzzy suggestions (shown when main search returns no results)
   const [fuzzySuggestions, setFuzzySuggestions] = useState<SearchRow[]>([]);
   // Requester's own queue items
-  const [myQueue, setMyQueue] = useState<MyQueueItem[]>([]);
-  const [myQueueLoading, setMyQueueLoading] = useState(false);
-  const [myQueueOpen, setMyQueueOpen] = useState(false);
-  const [removingQueueId, setRemovingQueueId] = useState<number | null>(null);
-  const [requeueingQueueId, setRequeueingQueueId] = useState<number | null>(
-    null,
-  );
-  const [revealedRemoveQueueId, setRevealedRemoveQueueId] = useState<
-    number | null
-  >(null);
-  const [dragOverQueueId, setDragOverQueueId] = useState<number | null>(null);
-  const [draggingQueueId, setDraggingQueueId] = useState<number | null>(null);
-  const myQueueRef = useRef<MyQueueItem[]>([]);
-  const draggingQueueIdRef = useRef<number | null>(null);
   const historyImportInputRef = useRef<HTMLInputElement | null>(null);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const profileButtonRef = useRef<HTMLButtonElement | null>(null);
   const profileLoadRef = useRef(0);
-  const queueLoadRef = useRef(0);
   const requesterSessionRef = useRef(auth.sessionToken);
   const requesterSessionChanged = requesterSessionRef.current !== auth.sessionToken;
-  const completedLongClickRef = useRef<{
-    id: number;
-    startX: number;
-    startY: number;
-    timeout: ReturnType<typeof setTimeout>;
-  } | null>(null);
-  const pendingQueueOrderRef = useRef<number[] | null>(null);
-  const queueDragChangedRef = useRef(false);
+  const myQueueState = useMyQueue({
+    requestedBy,
+    requesterSessionChanged,
+    requestSingerUuid,
+    requesterHeaders,
+    requesterJsonHeaders,
+    buildRequesterParams,
+    // showToast is declared further down; call it lazily from the hook's async handlers.
+    showToast: (message, type) => showToast(message, type),
+  });
+  const {
+    myQueue,
+    setMyQueue,
+    setMyQueueLoading,
+    setMyQueueOpen,
+    setRevealedRemoveQueueId,
+    queueLoadRef,
+    loadMyQueue,
+  } = myQueueState;
   // Collapsible result sections (collapsed by default)
   const [localExpanded, setLocalExpanded] = useState(false);
   const [knExpanded, setKnExpanded] = useState(false);
@@ -382,21 +214,9 @@ export default function Requests() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState("");
   // Version picker for consolidated song results
-  const [versionPicker, setVersionPicker] = useState<{
-    title: string;
-    artist: string;
-    versions: SearchRow[];
-  } | null>(null);
-  const [knVersionPicker, setKnVersionPicker] = useState<{
-    title: string;
-    artist: string;
-    versions: KaraokeNerdsTrack[];
-  } | null>(null);
-  const [combinedVersionPicker, setCombinedVersionPicker] = useState<{
-    title: string;
-    artist: string;
-    versions: CombinedSearchTrack[];
-  } | null>(null);
+  const [versionPicker, setVersionPicker] = useState<VersionPicker<SearchRow> | null>(null);
+  const [knVersionPicker, setKnVersionPicker] = useState<VersionPicker<KaraokeNerdsTrack> | null>(null);
+  const [combinedVersionPicker, setCombinedVersionPicker] = useState<VersionPicker<CombinedSearchTrack> | null>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1375,227 +1195,6 @@ export default function Requests() {
     sourceFilter,
   ]);
 
-  const loadMyQueue = useCallback(async () => {
-    if (requesterSessionChanged) return;
-    const request = ++queueLoadRef.current;
-    const name = requestedBy.trim();
-    if (!name) {
-      setMyQueue([]);
-      return;
-    }
-    setMyQueueLoading(true);
-    try {
-      const items = await api(
-        `/api/queue/by-requester?${buildRequesterParams().toString()}`,
-        { headers: requesterHeaders },
-      );
-      if (request === queueLoadRef.current) setMyQueue(normalizeMyQueueItems(items));
-    } catch (error) {
-      if (request === queueLoadRef.current) {
-        console.error("Could not load singer queue:", error);
-        setMyQueue([]);
-      }
-    } finally {
-      if (request === queueLoadRef.current) setMyQueueLoading(false);
-    }
-  }, [buildRequesterParams, requestedBy, requesterHeaders, requesterSessionChanged]);
-
-  useEffect(() => {
-    void loadMyQueue();
-    return () => { queueLoadRef.current++; };
-  }, [loadMyQueue]);
-
-  useEffect(() => {
-    myQueueRef.current = myQueue;
-  }, [myQueue]);
-
-  const applyMyQueueReorder = useCallback(
-    (draggedId: number, targetId: number) => {
-      const result = reorderQueuedItems(
-        myQueueRef.current,
-        draggedId,
-        targetId,
-      );
-      if (!result) return null;
-      myQueueRef.current = result.items;
-      pendingQueueOrderRef.current = result.queuedIds;
-      queueDragChangedRef.current = true;
-      setMyQueue(result.items);
-      return result.queuedIds;
-    },
-    [],
-  );
-
-  const beginMyQueueDrag = useCallback(
-    (event: React.PointerEvent<HTMLElement>, queueId: number) => {
-      if (event.button !== 0) return;
-      if ((event.target as HTMLElement).closest("button")) return;
-      draggingQueueIdRef.current = queueId;
-      pendingQueueOrderRef.current = myQueueRef.current
-        .filter((queueItem) => queueItem.status === "queued")
-        .map((queueItem) => queueItem.id);
-      queueDragChangedRef.current = false;
-      setDraggingQueueId(queueId);
-      setDragOverQueueId(queueId);
-      event.currentTarget.setPointerCapture(event.pointerId);
-      event.preventDefault();
-    },
-    [],
-  );
-
-  const moveMyQueueDrag = useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      const draggedId = draggingQueueIdRef.current;
-      if (!draggedId) return;
-      const target = document
-        .elementFromPoint(event.clientX, event.clientY)
-        ?.closest("[data-my-queue-id]");
-      const targetId = Number(target?.getAttribute("data-my-queue-id"));
-      if (Number.isFinite(targetId) && targetId !== draggedId) {
-        setDragOverQueueId(targetId);
-        applyMyQueueReorder(draggedId, targetId);
-      }
-    },
-    [applyMyQueueReorder],
-  );
-
-  const endMyQueueDrag = useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-      const orderedIds = pendingQueueOrderRef.current;
-      const changed = queueDragChangedRef.current;
-      draggingQueueIdRef.current = null;
-      pendingQueueOrderRef.current = null;
-      queueDragChangedRef.current = false;
-      setDraggingQueueId(null);
-      setDragOverQueueId(null);
-      if (changed && orderedIds) void reorderMyQueue(orderedIds);
-    },
-    [reorderMyQueue],
-  );
-
-  const cancelMyQueueDrag = useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-      draggingQueueIdRef.current = null;
-      pendingQueueOrderRef.current = null;
-      queueDragChangedRef.current = false;
-      setDraggingQueueId(null);
-      setDragOverQueueId(null);
-    },
-    [],
-  );
-
-  const beginCompletedQueueLongClick = useCallback(
-    (event: React.PointerEvent<HTMLElement>, queueId: number) => {
-      if (event.button !== 0) return;
-      if ((event.target as HTMLElement).closest("button")) return;
-      const target = event.currentTarget;
-      completedLongClickRef.current = {
-        id: queueId,
-        startX: event.clientX,
-        startY: event.clientY,
-        timeout: setTimeout(() => {
-          setRevealedRemoveQueueId((current) =>
-            current === queueId ? null : queueId,
-          );
-        }, 550),
-      };
-      target.setPointerCapture(event.pointerId);
-    },
-    [],
-  );
-
-  const moveCompletedQueueLongClick = useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      const longClick = completedLongClickRef.current;
-      if (!longClick) return;
-      const moved =
-        Math.abs(event.clientX - longClick.startX) > 10 ||
-        Math.abs(event.clientY - longClick.startY) > 10;
-      if (moved) {
-        clearTimeout(longClick.timeout);
-        completedLongClickRef.current = null;
-      }
-    },
-    [],
-  );
-
-  const endCompletedQueueLongClick = useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-      if (completedLongClickRef.current) {
-        clearTimeout(completedLongClickRef.current.timeout);
-      }
-      completedLongClickRef.current = null;
-    },
-    [],
-  );
-
-  const cancelCompletedQueueLongClick = useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-      if (completedLongClickRef.current) {
-        clearTimeout(completedLongClickRef.current.timeout);
-      }
-      completedLongClickRef.current = null;
-    },
-    [],
-  );
-
-  async function removeFromMyQueue(queueId: number) {
-    const name = requestedBy.trim();
-    if (!name) return;
-    setRemovingQueueId(queueId);
-    try {
-      await api(
-        `/api/queue/${queueId}/self-remove?${buildRequesterParams().toString()}`,
-        { method: "DELETE", headers: requesterHeaders },
-      );
-      await loadMyQueue();
-      setRevealedRemoveQueueId(null);
-      showToast("Song removed from queue");
-    } catch (err) {
-      showToast("Could not remove song. Please try again.", "error");
-      console.error(err);
-    } finally {
-      setRemovingQueueId(null);
-    }
-  }
-
-  async function requeueFromMyQueue(queueId: number, songTitle: string | null) {
-    const name = requestedBy.trim();
-    if (!name) return;
-    setRequeueingQueueId(queueId);
-    try {
-      await api(`/api/queue/${queueId}/self-requeue`, {
-        method: "POST",
-        headers: requesterJsonHeaders,
-        body: JSON.stringify({ name, singerUuid: requestSingerUuid }),
-      });
-      await loadMyQueue();
-      showToast(`Added "${songTitle || "Unknown"}" back to ${name}'s queue`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
-      if (msg.includes("409") || msg.toLowerCase().includes("already")) {
-        showToast("You already have this song in the queue", "error");
-      } else {
-        showToast("Could not add song back. Please try again.", "error");
-        console.error(err);
-      }
-    } finally {
-      setRequeueingQueueId(null);
-    }
-  }
-
   async function exportMySingerHistory() {
     const name = requestedBy.trim();
     if (!name) return;
@@ -1690,23 +1289,6 @@ export default function Requests() {
       { method: "DELETE", headers: requesterHeaders },
     );
     if (request === profileLoadRef.current) setSingerProfile(result.profile);
-  }
-
-  async function reorderMyQueue(orderedIds: number[]) {
-    const name = requestedBy.trim();
-    if (!name) return;
-    try {
-      await api("/api/queue/self-reorder", {
-        method: "PATCH",
-        headers: requesterJsonHeaders,
-        body: JSON.stringify({ name, singerUuid: requestSingerUuid, queueIds: orderedIds }),
-      });
-      await loadMyQueue();
-      showToast("Queue order updated");
-    } catch (err) {
-      showToast("Could not reorder queue. Please try again.", "error");
-      console.error(err);
-    }
   }
 
   async function enqueueLocal(id: number, songTitle: string) {
@@ -1950,355 +1532,7 @@ export default function Requests() {
           </ProfileDialog>
         )}
 
-        {/* Bottom footer bar — My Queue / next song */}
-        {nameConfirmed &&
-          createPortal(
-            <>
-              {myQueueOpen && (
-                <>
-                  <div
-                    style={{ position: "fixed", inset: 0, zIndex: 999 }}
-                    onClick={() => setMyQueueOpen(false)}
-                  />
-                  <div
-                    className="my-queue-sheet request-page-gateway-theme-portal"
-                    role="dialog"
-                    aria-label="My queue"
-                    style={{
-                      position: "fixed",
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      zIndex: 1000,
-                      background: "var(--color-bg-card)",
-                      border: "1px solid var(--color-border)",
-                      borderBottom: "none",
-                      borderRadius: "18px 18px 0 0",
-                      boxShadow: "0 -12px 42px var(--color-shadow)",
-                      width: "min(720px, 100vw)",
-                      height: "min(78vh, 620px)",
-                      margin: "0 auto",
-                      paddingBottom: "env(safe-area-inset-bottom, 0px)",
-                      display: "flex",
-                      flexDirection: "column",
-                      animation: "slideUpDrawer 0.22s ease-out",
-                    }}
-                  >
-                    <div
-                      style={{
-                        padding: "12px 14px",
-                        borderBottom: "1px solid var(--color-border)",
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        flexShrink: 0,
-                      }}
-                    >
-                      <span className="my-queue-heading">
-                        <span className="material-symbols-rounded" aria-hidden="true">queue_music</span>
-                        My Queue
-                      </span>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "var(--color-text-secondary)",
-                            cursor: "pointer",
-                            fontSize: 13,
-                          }}
-                          onClick={() => void loadMyQueue()}
-                          aria-label="Refresh my queue"
-                          title="Refresh"
-                          className="my-queue-icon-button"
-                        >
-                          <span className="material-symbols-rounded" aria-hidden="true">refresh</span>
-                        </button>
-                        <button
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "var(--color-text-secondary)",
-                            cursor: "pointer",
-                            fontSize: 16,
-                            padding: "0 2px",
-                          }}
-                          onClick={() => setMyQueueOpen(false)}
-                          aria-label="Close my queue"
-                          title="Close"
-                          className="my-queue-icon-button"
-                        >
-                          <span className="material-symbols-rounded" aria-hidden="true">close</span>
-                        </button>
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        overflowY: "auto",
-                        padding: 12,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 6,
-                      }}
-                    >
-                      {myQueueLoading ? (
-                        <div
-                          style={{
-                            color: "var(--color-text-secondary)",
-                            fontSize: 13,
-                            padding: "8px 0",
-                          }}
-                        >
-                          Loading…
-                        </div>
-                      ) : myQueue.length === 0 ? (
-                        <div
-                          style={{
-                            color: "var(--color-text-muted)",
-                            fontSize: 13,
-                            padding: "8px 0",
-                          }}
-                        >
-                          Nothing in queue yet.
-                        </div>
-                      ) : (
-                        <>
-                          {myQueue.some((i) => i.status === "queued") &&
-                            myQueue.filter((i) => i.status === "queued")
-                              .length > 1 && (
-                              <div className="my-queue-hint">
-                                Drag a song to reorder
-                              </div>
-                            )}
-                          {myQueue.some(
-                            (i) =>
-                              i.status === "done" || i.status === "finished",
-                          ) && (
-                            <div className="my-queue-hint">
-                              Press and hold a sung song to remove it
-                            </div>
-                          )}
-                          {myQueue.map((item) => {
-                            const isCompleted =
-                              item.status === "done" ||
-                              item.status === "finished";
-                            const isQueued = item.status === "queued";
-                            const isRemoveRevealed =
-                              revealedRemoveQueueId === item.id;
-                            return (
-                              <div
-                                key={item.id}
-                                data-my-queue-id={item.id}
-                                draggable={false}
-                                onDragStart={(e) => {
-                                  e.preventDefault();
-                                }}
-                              onPointerDown={
-                                isQueued
-                                  ? (e) => beginMyQueueDrag(e, item.id)
-                                  : isCompleted
-                                    ? (e) =>
-                                        beginCompletedQueueLongClick(e, item.id)
-                                    : undefined
-                              }
-                              onPointerMove={
-                                isQueued
-                                  ? moveMyQueueDrag
-                                  : isCompleted
-                                    ? moveCompletedQueueLongClick
-                                    : undefined
-                              }
-                              onPointerUp={
-                                isQueued
-                                  ? endMyQueueDrag
-                                  : isCompleted
-                                    ? endCompletedQueueLongClick
-                                    : undefined
-                              }
-                              onPointerCancel={
-                                isQueued
-                                  ? cancelMyQueueDrag
-                                  : isCompleted
-                                    ? cancelCompletedQueueLongClick
-                                    : undefined
-                              }
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 10,
-                                padding: "12px",
-                                minHeight: 56,
-                                background:
-                                  dragOverQueueId === item.id
-                                    ? "var(--color-accent-soft)"
-                                    : "var(--color-bg-secondary)",
-                                borderRadius: 8,
-                                opacity:
-                                  draggingQueueId === item.id ? 0.75 : 1,
-                                cursor: isQueued ? "grab" : "default",
-                                border:
-                                  dragOverQueueId === item.id
-                                    ? "1px dashed color-mix(in srgb, var(--color-accent) 50%, transparent)"
-                                    : "1px solid transparent",
-                                touchAction: isQueued
-                                  ? "none"
-                                  : isCompleted
-                                    ? "pan-y"
-                                    : undefined,
-                                userSelect: "none",
-                                transition: "background 0.16s ease",
-                              }}
-                            >
-                              {item.status === "queued" && (
-                                <span
-                                  style={{
-                                    display: "inline-flex",
-                                    color: "var(--color-text-muted)",
-                                    flexShrink: 0,
-                                    cursor: "grab",
-                                    padding: "4px 0",
-                                  }}
-                                >
-                                  <span className="material-symbols-rounded" aria-hidden="true">drag_indicator</span>
-                                </span>
-                              )}
-                              <div className="my-queue-text">
-                                <div className={`my-queue-title${isCompleted ? " is-done" : ""}`}>
-                                  {item.title || "Unknown"}
-                                </div>
-                                <div className="my-queue-artist">
-                                  {item.artist || "Unknown"}
-                                </div>
-                                <span
-                                  className={`my-queue-status ${
-                                    item.status === "playing"
-                                      ? "is-singing"
-                                      : isQueued
-                                        ? "is-queued"
-                                        : "is-done"
-                                  }`}
-                                >
-                                  {item.status === "playing"
-                                    ? "Singing now"
-                                    : isQueued
-                                      ? "Queued"
-                                      : item.status === "skipped"
-                                        ? "Skipped"
-                                        : "Sung"}
-                                </span>
-                              </div>
-                              <div className="my-queue-actions">
-                                {isQueued && (
-                                  <button
-                                    type="button"
-                                    className="my-queue-action danger"
-                                    disabled={removingQueueId === item.id}
-                                    onClick={() =>
-                                      void removeFromMyQueue(item.id)
-                                    }
-                                    aria-label={`Remove ${item.title || "song"} from my queue`}
-                                  >
-                                    <span className="material-symbols-rounded" aria-hidden="true">delete</span>
-                                    <span>{removingQueueId === item.id ? "Removing…" : "Remove"}</span>
-                                  </button>
-                                )}
-                                {isCompleted && !isRemoveRevealed && (
-                                  <button
-                                    type="button"
-                                    className="my-queue-action primary"
-                                    disabled={requeueingQueueId === item.id}
-                                    onClick={() =>
-                                      void requeueFromMyQueue(
-                                        item.id,
-                                        item.title,
-                                      )
-                                    }
-                                    aria-label={`Sing ${item.title || "this song"} again`}
-                                  >
-                                    <span className="material-symbols-rounded" aria-hidden="true">replay</span>
-                                    <span>{requeueingQueueId === item.id ? "Adding…" : "Sing again"}</span>
-                                  </button>
-                                )}
-                                {isCompleted && isRemoveRevealed && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      className="my-queue-action"
-                                      onClick={() =>
-                                        setRevealedRemoveQueueId(null)
-                                      }
-                                    >
-                                      <span>Cancel</span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="my-queue-action danger"
-                                      disabled={removingQueueId === item.id}
-                                      onClick={() =>
-                                        void removeFromMyQueue(item.id)
-                                      }
-                                      aria-label={`Remove ${item.title || "song"} from my history`}
-                                    >
-                                      <span className="material-symbols-rounded" aria-hidden="true">delete</span>
-                                      <span>{removingQueueId === item.id ? "Removing…" : "Remove"}</span>
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                            );
-                          })}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-              {/* Static footer bar */}
-              {(() => {
-                const nextSong =
-                  myQueue.find((i) => i.status === "playing") ??
-                  myQueue.find((i) => i.status === "queued");
-                const activeCount = myQueue.filter(
-                  (i) => i.status === "queued" || i.status === "playing",
-                ).length;
-                return (
-                  <button
-                    type="button"
-                    className="queue-footer request-page-gateway-theme-portal"
-                    aria-expanded={myQueueOpen}
-                    aria-label={`My queue, ${activeCount} active ${activeCount === 1 ? "song" : "songs"}`}
-                    onClick={() => {
-                      setMyQueueOpen((o) => !o);
-                      if (!myQueueOpen) void loadMyQueue();
-                    }}
-                  >
-                    <span className="queue-footer-icon" aria-hidden="true">
-                      <span className="material-symbols-rounded">queue_music</span>
-                      {activeCount > 0 && <span className="queue-footer-badge">{activeCount}</span>}
-                    </span>
-                    <span className="queue-footer-text">
-                      {nextSong ? (
-                        <>
-                          <span className="queue-footer-label">
-                            {nextSong.status === "playing" ? "Now singing" : "Up next"}
-                          </span>
-                          <span className="queue-footer-title">{nextSong.title || "Unknown"}</span>
-                        </>
-                      ) : (
-                        <span className="queue-footer-empty">Your queue is empty</span>
-                      )}
-                    </span>
-                    <span className="queue-footer-action">
-                      My Queue
-                      <span className="material-symbols-rounded" aria-hidden="true">expand_less</span>
-                    </span>
-                  </button>
-                );
-              })()}
-            </>,
-            document.body,
-          )}
+        <MyQueueSheet myQueue={myQueueState} nameConfirmed={nameConfirmed} />
 
         {/* Search Card — only shown after name is confirmed */}
         {nameConfirmed && (
@@ -4189,460 +3423,44 @@ export default function Requests() {
         )}
       </div>
 
-      {/* Combined Version Picker Modal */}
-      {combinedVersionPicker && (
-        <>
-          <div
-            className="action-menu-overlay"
-            onClick={() => setCombinedVersionPicker(null)}
-          />
-          <div className="action-menu version-dialog">
-            <div className="action-menu-header">
-              <h3 className="action-menu-title">
-                {combinedVersionPicker.title || "Choose a version"}
-              </h3>
-              <div className="dialog-actions">
-                <button
-                  className="icon-action-button secondary"
-                  type="button"
-                  aria-label="View lyrics"
-                  title="View lyrics"
-                  onClick={() => {
-                    const firstVersion = combinedVersionPicker.versions[0];
-                    if (!firstVersion) return;
-                    setCombinedVersionPicker(null);
-                    setLyricsPopupOpen(firstVersion.key);
-                    if (!lyricsData[firstVersion.key]) {
-                      fetchLyrics(
-                        firstVersion.key,
-                        combinedVersionPicker.artist || "Unknown Artist",
-                        combinedVersionPicker.title || "Unknown Title",
-                      );
-                    }
-                  }}
-                >
-                  ♪
-                </button>
-                <button
-                  className="action-menu-close"
-                  type="button"
-                  onClick={() => setCombinedVersionPicker(null)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-            <div className="version-list">
-              {combinedVersionPicker.versions.map((version) => {
-                const isLocal = version.type === "local";
-                const label = isLocal
-                  ? version.discId || "Version"
-                  : version.brand || "Karaoke Version";
-                const meta = [
-                  !isLocal ? "🌐 Online" : null,
-                  isLocal ? formatTrackKind(version.kind) : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ");
-                return (
-                  <article key={version.key} className="version-row">
-                    <div>
-                      <strong>{label}</strong>
-                      {meta && <span>{meta}</span>}
-                    </div>
-                    <button
-                      className="icon-action-button"
-                      type="button"
-                      aria-label="Add version"
-                      title="Add version"
-                      onClick={() => {
-                        setCombinedVersionPicker(null);
-                        if (version.type === "local") {
-                          void enqueueLocal(
-                            version.track.id,
-                            version.title || "Unknown",
-                          );
-                        } else {
-                          void enqueueKaraokeNerds(version.track);
-                        }
-                      }}
-                    >
-                      +
-                    </button>
-                  </article>
-                );
-              })}
-            </div>
-          </div>
-        </>
-      )}
+      <CombinedVersionPickerDialog
+        combinedVersionPicker={combinedVersionPicker}
+        setCombinedVersionPicker={setCombinedVersionPicker}
+        setLyricsPopupOpen={setLyricsPopupOpen}
+        lyricsData={lyricsData}
+        fetchLyrics={fetchLyrics}
+        enqueueLocal={enqueueLocal}
+        enqueueKaraokeNerds={enqueueKaraokeNerds}
+      />
 
-      {/* Version Picker Modal */}
-      {versionPicker && (
-        <>
-          <div
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "var(--color-overlay)",
-              zIndex: 200,
-            }}
-            onClick={() => setVersionPicker(null)}
-          />
-          <div
-            style={{
-              position: "fixed",
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%,-50%)",
-              zIndex: 201,
-              background: "var(--color-bg-card)",
-              borderRadius: 16,
-              border: "1px solid var(--color-border)",
-              boxShadow: "0 16px 64px var(--color-shadow)",
-              width: "min(420px, 92vw)",
-              maxHeight: "80vh",
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <div
-              style={{
-                padding: "16px 20px",
-                borderBottom: "1px solid var(--color-border)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 16 }}>
-                  {versionPicker.title}
-                </div>
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: "var(--color-text-secondary)",
-                    marginTop: 2,
-                  }}
-                >
-                  {versionPicker.artist} — Pick a version
-                </div>
-              </div>
-              <div className="dialog-actions">
-                <button
-                  className="icon-action-button secondary"
-                  type="button"
-                  aria-label="View lyrics"
-                  title="View lyrics"
-                  onClick={() => {
-                    const firstVersion = versionPicker.versions[0];
-                    if (!firstVersion) return;
-                    const trackKey = `local-${firstVersion.id}`;
-                    setVersionPicker(null);
-                    setLyricsPopupOpen(trackKey);
-                    if (!lyricsData[trackKey]) {
-                      fetchLyrics(
-                        trackKey,
-                        versionPicker.artist || "Unknown Artist",
-                        versionPicker.title || "Unknown Title",
-                      );
-                    }
-                  }}
-                >
-                  ♪
-                </button>
-                <button
-                  className="action-menu-close"
-                  type="button"
-                  onClick={() => setVersionPicker(null)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-            <div
-              style={{
-                overflowY: "auto",
-                padding: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              {versionPicker.versions.map((v) => (
-                <button
-                  key={v.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                    padding: "12px 14px",
-                    background: "var(--color-bg-secondary)",
-                    borderRadius: 10,
-                    border: "1px solid var(--color-border)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    color: "var(--color-text-primary)",
-                    width: "100%",
-                  }}
-                  disabled={addingLocal === v.id}
-                  onClick={() => {
-                    setVersionPicker(null);
-                    void enqueueLocal(v.id, v.title || "Unknown");
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>
-                      {v.disc_id || "Unknown disc"}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "var(--color-text-secondary)",
-                        marginTop: 2,
-                      }}
-                    >
-                      {formatTrackKind(v.kind)}
-                    </div>
-                  </div>
-                  {addingLocal === v.id ? (
-                    <span
-                      style={{
-                        color: "var(--color-text-secondary)",
-                        fontSize: 12,
-                      }}
-                    >
-                      Adding…
-                    </span>
-                  ) : (
-                    <span
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: "var(--color-accent)",
-                      }}
-                    >
-                      + Add
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
+      <VersionPickerDialog
+        versionPicker={versionPicker}
+        setVersionPicker={setVersionPicker}
+        addingLocal={addingLocal}
+        setLyricsPopupOpen={setLyricsPopupOpen}
+        lyricsData={lyricsData}
+        fetchLyrics={fetchLyrics}
+        enqueueLocal={enqueueLocal}
+      />
 
-      {/* KN Version Picker Modal */}
-      {knVersionPicker && (
-        <>
-          <div
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "var(--color-overlay)",
-              zIndex: 200,
-            }}
-            onClick={() => setKnVersionPicker(null)}
-          />
-          <div
-            style={{
-              position: "fixed",
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%,-50%)",
-              zIndex: 201,
-              background: "var(--color-bg-card)",
-              borderRadius: 16,
-              border: "1px solid var(--color-border)",
-              boxShadow: "0 16px 64px var(--color-shadow)",
-              width: "min(420px, 92vw)",
-              maxHeight: "80vh",
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <div
-              style={{
-                padding: "16px 20px",
-                borderBottom: "1px solid var(--color-border)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 16 }}>
-                  {knVersionPicker.title}
-                </div>
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: "var(--color-text-secondary)",
-                    marginTop: 2,
-                  }}
-                >
-                  {knVersionPicker.artist} — Pick a version
-                </div>
-              </div>
-              <div className="dialog-actions">
-                <button
-                  className="icon-action-button secondary"
-                  type="button"
-                  aria-label="View lyrics"
-                  title="View lyrics"
-                  onClick={() => {
-                    const firstVersion = knVersionPicker.versions[0];
-                    if (!firstVersion) return;
-                    const trackKey = `kn-${firstVersion.url}`;
-                    setKnVersionPicker(null);
-                    setLyricsPopupOpen(trackKey);
-                    if (!lyricsData[trackKey]) {
-                      fetchLyrics(
-                        trackKey,
-                        knVersionPicker.artist || "Unknown Artist",
-                        knVersionPicker.title || "Unknown Title",
-                      );
-                    }
-                  }}
-                >
-                  ♪
-                </button>
-                <button
-                  className="action-menu-close"
-                  type="button"
-                  onClick={() => setKnVersionPicker(null)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-            <div
-              style={{
-                overflowY: "auto",
-                padding: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              {knVersionPicker.versions.map((v) => (
-                <button
-                  key={v.url}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                    padding: "12px 14px",
-                    background: "var(--color-bg-secondary)",
-                    borderRadius: 10,
-                    border: "1px solid var(--color-border)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    color: "var(--color-text-primary)",
-                    width: "100%",
-                  }}
-                  disabled={addingKaraokeNerds === v.url}
-                  onClick={() => {
-                    setKnVersionPicker(null);
-                    void enqueueKaraokeNerds(v);
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>
-                      {v.brand || "Unknown brand"}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "var(--color-text-secondary)",
-                        marginTop: 2,
-                      }}
-                    >
-                      🌐 Online
-                    </div>
-                  </div>
-                  {addingKaraokeNerds === v.url ? (
-                    <span
-                      style={{
-                        color: "var(--color-text-secondary)",
-                        fontSize: 12,
-                      }}
-                    >
-                      Adding…
-                    </span>
-                  ) : (
-                    <span
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: "var(--color-accent)",
-                      }}
-                    >
-                      + Add
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
+      <KnVersionPickerDialog
+        knVersionPicker={knVersionPicker}
+        setKnVersionPicker={setKnVersionPicker}
+        addingKaraokeNerds={addingKaraokeNerds}
+        setLyricsPopupOpen={setLyricsPopupOpen}
+        lyricsData={lyricsData}
+        fetchLyrics={fetchLyrics}
+        enqueueKaraokeNerds={enqueueKaraokeNerds}
+      />
 
-      {/* Lyrics Popup Modal */}
-      {lyricsPopupOpen &&
-        (() => {
-          // Find the track data for the popup
-          let title = "Unknown Title";
-
-          if (lyricsPopupOpen.startsWith("local-")) {
-            const trackId = parseInt(lyricsPopupOpen.replace("local-", ""));
-            const track = localRows.find((r) => r.id === trackId);
-            if (track) {
-              title = track.title || "Unknown Title";
-            }
-          } else if (lyricsPopupOpen.startsWith("kn-")) {
-            const trackUrl = lyricsPopupOpen.replace("kn-", "");
-            const track = karaokeNerdsRows.find((t) => t.url === trackUrl);
-            if (track) {
-              title = track.title;
-            }
-          }
-
-          const data = lyricsData[lyricsPopupOpen];
-
-          return (
-            <div
-              className="lyrics-popup-overlay"
-              onClick={() => setLyricsPopupOpen(null)}
-            >
-              <div
-                className="lyrics-popup"
-                ref={lyricsPopupRef}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="lyrics-header">
-                  <h2 className="lyrics-popup-title">{title} Lyrics</h2>
-                  <button
-                    className="action-menu-close"
-                    type="button"
-                    onClick={() => setLyricsPopupOpen(null)}
-                  >
-                    Close
-                  </button>
-                </div>
-
-                {data?.loading ? (
-                  <pre className="lyrics-content">Loading...</pre>
-                ) : data?.error ? (
-                  <pre className="lyrics-content">{data.error}</pre>
-                ) : data?.lyrics ? (
-                  <pre className="lyrics-content">{data.lyrics}</pre>
-                ) : null}
-              </div>
-            </div>
-          );
-        })()}
+      <LyricsDialog
+        localRows={localRows}
+        karaokeNerdsRows={karaokeNerdsRows}
+        lyricsPopupOpen={lyricsPopupOpen}
+        setLyricsPopupOpen={setLyricsPopupOpen}
+        lyricsData={lyricsData}
+        lyricsPopupRef={lyricsPopupRef}
+      />
     </div>
   );
 }
