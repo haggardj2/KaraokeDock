@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import express from 'express';
 import type { Server } from 'node:http';
@@ -15,6 +14,7 @@ import { applyImportedSingerProfile, getUserSingerPresentation, setSingerProfile
 import { exchangeSocialProviderCode, socialAuthorizationUrl } from './socialAuth.js';
 import { defaultSocialConfig, SOCIAL_CONFIG_KEY } from './socialAuthConfig.js';
 import { getQueueState } from './queueState.js';
+import { runIntegrationTestMigrations } from './integrationTestMigrations.js';
 
 const { enabled, schema } = vi.hoisted(() => {
   const value = process.env.SINGER_MERGE_TEST_DATABASE_URL;
@@ -43,17 +43,12 @@ describe.runIf(enabled)('shared canonical singer merge against PostgreSQL and HT
   let adminToken: string;
   let trackId: number;
   const crop = { x: 10, y: 20, width: 70, height: 60 };
-  const migrations = ['init.sql', '018_singer_public_uuid.sql', '020_singer_profiles.sql',
-    '021_singer_identity_and_crop.sql', '022_queue_manual_order.sql', '023_singer_social_login.sql',
-    '024_shared_singer_identity.sql', '026_account_login_links.sql'];
 
   // Seed historical singer-only merges. The public merge API now forbids these operations.
   const legacyMerge = (target: unknown, source: unknown) =>
     withQueueTransaction((client) => mergeSingersWithClient(client, BigInt(String(target)), BigInt(String(source)), true));
 
-  async function migrate() {
-    for (const file of migrations) await query(await readFile(new URL(`../migrations/${file}`, import.meta.url), 'utf8'));
-  }
+  const migrate = () => runIntegrationTestMigrations();
   beforeAll(async () => {
     await query(`CREATE SCHEMA ${schema}`);
     await migrate();
@@ -263,7 +258,10 @@ describe.runIf(enabled)('shared canonical singer merge against PostgreSQL and HT
     expect(await validateSessionInfo(demoted.sessionToken)).toMatchObject({ valid: false });
     const validation = await request('/auth/validate', undefined, 'GET', demoted.sessionToken);
     expect(await validation.json()).toMatchObject({ valid: false, role: 'user' });
-    await expect(query('DELETE FROM users WHERE id = $1', [host.id])).rejects.toMatchObject({ code: '23503' });
+    // ON DELETE RESTRICT: restrict_violation (23001) on PostgreSQL 18+, foreign_key_violation (23503) before.
+    await expect(query('DELETE FROM users WHERE id = $1', [host.id])).rejects.toMatchObject({
+      code: expect.stringMatching(/^(23001|23503)$/), constraint: 'users_canonical_user_id_fkey',
+    });
   });
 
   it('does not trust source sessions, stored social admin roles, or credentials belonging to another canonical user', async () => {

@@ -390,7 +390,8 @@ export async function deleteUser(id: number): Promise<void> {
   try {
     await query('DELETE FROM users WHERE id = $1', [id]);
   } catch (error: any) {
-    if (error?.code === '23503' && error?.constraint === 'users_canonical_user_id_fkey') {
+    // ON DELETE RESTRICT: PostgreSQL 18+ reports restrict_violation (23001), older versions 23503.
+    if ((error?.code === '23001' || error?.code === '23503') && error?.constraint === 'users_canonical_user_id_fkey') {
       throw Object.assign(new Error('Account has linked logins; deactivate the account instead'), { status: 409 });
     }
     throw error;
