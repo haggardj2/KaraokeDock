@@ -296,3 +296,14 @@ export function renderTickerText(
   }
   return nodes.length > 0 ? nodes : renderHighlightedTickerText(text, highlightedText, "text");
 }
+
+// Song length (seconds) for timing reports. CDG and pitch-shifted streams are re-encoded into
+// fragmented MP4s with unreliable durations, so those prefer the database length; other files
+// use the video element's duration and fall back to the database.
+export function getSingerDurationSec(item: QItem, video: HTMLVideoElement): number {
+  const dbDuration = item.duration_ms && item.duration_ms > 0 ? item.duration_ms / 1000 : undefined;
+  const hasPitchAdjustment =
+    item.key_adjustment !== undefined && item.key_adjustment !== 0;
+  if ((item.kind === "cdgmp3" || hasPitchAdjustment) && dbDuration) return dbDuration;
+  return isValidDuration(video.duration) ? video.duration : dbDuration ?? video.duration;
+}

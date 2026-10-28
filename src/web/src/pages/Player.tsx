@@ -1,4 +1,4 @@
-import React, {
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -9,36 +9,28 @@ import React, {
 import { API_BASE, api, getWsUrl } from "../api";
 import type { OverlaySettings } from "../components/QueueOverlay";
 import { parseZipMediaRef } from "../zipMediaRef";
-import SingerAvatar, { type SingerProfile } from "../components/SingerAvatar";
 import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, playSingerMedia, prepareSingerIframe, canReportSingerTiming, restoreSingerPosition, type PlayerPlaybackState } from "../playerPlayback";
-import { createBreakMusicPlayback, shouldRunBreakMusic } from "../breakMusicPlayback";
 import { observePlayerViewport } from "../playerViewport";
 import "./Player.css";
 import {
-  BreakMusicState,
   DEFAULT_OVERLAY_SETTINGS,
   describeYouTubeIframeError,
   formatRequestsUrlForDisplay,
-  formatSingerName,
   getDefaultRequestsUrl,
-  getSingerTickerToken,
+  getSingerDurationSec,
   getYouTubeVideoId,
   isValidDuration,
   normalizeOverlaySettings,
-  parseBoolean,
   QItem,
-  renderHighlightedTickerText,
-  renderTickerText,
   RotationScrollerSinger,
 } from "./player/helpers";
-import PlayerBackgroundImage from "../components/PlayerBackgroundImage";
-import {
-  DEFAULT_PLAYER_BACKGROUND_SETTINGS,
-  getApiAssetUrl,
-  normalizePlayerBackgroundSettings,
-  type PlayerBackgroundSettings,
-} from "../playerBackground";
 import { keepPlayerScreenAwake } from "../playerWakeLock";
+import PlayerBackground from "./player/PlayerBackground";
+import PlayerOverlay from "./player/PlayerOverlay";
+import WaitingScreen from "./player/WaitingScreen";
+import { buildTickerText, getBreakMusicTrackText } from "./player/tickerText";
+import { useBreakMusicPlayer } from "./player/useBreakMusicPlayer";
+import { usePlayerBackground } from "./player/usePlayerBackground";
 
 
 export default function Player() {
@@ -60,13 +52,8 @@ export default function Player() {
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>(
     DEFAULT_OVERLAY_SETTINGS,
   );
-  const [playerBackgroundSettings, setPlayerBackgroundSettings] =
-    useState<PlayerBackgroundSettings>(DEFAULT_PLAYER_BACKGROUND_SETTINGS);
-  const [backgroundSettingsError, setBackgroundSettingsError] = useState(false);
   const [wakeLockMessage, setWakeLockMessage] = useState<string | null>(null);
   const wakeLockRef = useRef<ReturnType<typeof keepPlayerScreenAwake> | null>(null);
-  const [playerBackgroundSlideIndex, setPlayerBackgroundSlideIndex] =
-    useState(0);
   const [requestsUrl, setRequestsUrl] = useState(getDefaultRequestsUrl);
   const [rotationScrollerSingers, setRotationScrollerSingers] = useState<
     RotationScrollerSinger[]
@@ -75,18 +62,7 @@ export default function Player() {
   const [autoPlayDelay, setAutoPlayDelay] = useState(5);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [manualStop, setManualStop] = useState(false);
-  const [breakMusicState, setBreakMusicState] = useState<BreakMusicState>({
-    paused: false,
-    pauseDuringKaraoke: true,
-    mutedForKaraoke: false,
-    crossfadeSeconds: 3,
-    volumePercent: 100,
-    elapsedSec: 0,
-    currentStartedAt: null,
-    currentTrack: null,
-  });
   const videoRef = useRef<HTMLVideoElement>(null);
-  const breakAudioRef = useRef<HTMLAudioElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -98,8 +74,16 @@ export default function Player() {
   const youtubeFallbackAttemptedRef = useRef<Set<string>>(new Set());
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wsHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const breakTimingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const breakPlaybackRef = useRef<ReturnType<typeof createBreakMusicPlayback> | null>(null);
+  const {
+    playerBackgroundSettings,
+    backgroundSettingsError,
+    playerBackgroundSlideIndex,
+    isCustomPlayerBackground,
+    refreshPlayerBackground,
+    applyBackgroundSettings,
+  } = usePlayerBackground();
+  const { breakMusicState, breakAudioRef, breakPlaybackRef, refreshBreakMusicState } =
+    useBreakMusicPlayer({ now, playerState });
   const hideSingerQueueEnabled = overlaySettings.hideSingerQueue;
   const keepRotationScrollerSingersEnabled =
     hideSingerQueueEnabled && overlaySettings.keepRotationScrollerSingers;
@@ -107,11 +91,6 @@ export default function Player() {
     () => formatRequestsUrlForDisplay(requestsUrl),
     [requestsUrl],
   );
-  const isCustomPlayerBackground =
-    (playerBackgroundSettings.mode === "image" &&
-      !!playerBackgroundSettings.imageUrl) ||
-    (playerBackgroundSettings.mode === "slideshow" &&
-      playerBackgroundSettings.slideshowImages.length > 0);
 
   useLayoutEffect(() => {
     if (containerRef.current) return observePlayerViewport(containerRef.current);
@@ -125,34 +104,6 @@ export default function Player() {
       wakeLock.dispose();
     };
   }, []);
-
-  useEffect(() => {
-    setPlayerBackgroundSlideIndex(0);
-  }, [
-    playerBackgroundSettings.mode,
-    playerBackgroundSettings.slideshowImages,
-  ]);
-
-  useEffect(() => {
-    if (
-      playerBackgroundSettings.mode !== "slideshow" ||
-      playerBackgroundSettings.slideshowImages.length <= 1
-    ) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      setPlayerBackgroundSlideIndex((current) =>
-        (current + 1) % playerBackgroundSettings.slideshowImages.length,
-      );
-    }, playerBackgroundSettings.slideshowIntervalSeconds * 1000);
-
-    return () => window.clearInterval(timer);
-  }, [
-    playerBackgroundSettings.mode,
-    playerBackgroundSettings.slideshowImages.length,
-    playerBackgroundSettings.slideshowIntervalSeconds,
-  ]);
 
   // Force dark theme
   useEffect(() => {
@@ -203,11 +154,6 @@ export default function Player() {
       if (hideControlsTimer.current) {
         clearTimeout(hideControlsTimer.current);
       }
-      if (breakTimingRef.current) {
-        clearInterval(breakTimingRef.current);
-      }
-      breakPlaybackRef.current?.dispose();
-      breakPlaybackRef.current = null;
     };
   }, []);
 
@@ -241,75 +187,6 @@ export default function Player() {
   const handlePlayClick = async () => {
     if (isSingerPaused(playerStateRef.current, currentQueueIdRef.current)) return;
     await localPlayRef.current?.();
-  };
-
-  const renderPlayerBackground = () => {
-    const error = backgroundSettingsError ? <div role="alert" className="player-background-error">
-        Player background settings could not load.{' '}
-        <button type="button" onClick={() => void refreshPlayerBackground()}>Retry settings</button>
-      </div> : null;
-    if (playerBackgroundSettings.mode === "image") {
-      const imageUrl = getApiAssetUrl(playerBackgroundSettings.imageUrl);
-      return <>{error}{imageUrl && <PlayerBackgroundImage src={imageUrl} />}</>;
-    }
-    if (playerBackgroundSettings.mode !== "slideshow") {
-      return error;
-    }
-
-    const images = playerBackgroundSettings.slideshowImages;
-    if (images.length === 0) {
-      return error;
-    }
-
-    const transitionDurationMs = Math.round(
-      playerBackgroundSettings.slideshowTransitionDurationSeconds * 1000,
-    );
-    const transition = `opacity ${transitionDurationMs}ms ease-in-out, transform ${transitionDurationMs}ms ease-in-out`;
-    const getTransform = (active: boolean) => {
-      if (playerBackgroundSettings.slideshowTransitionStyle === "slide") {
-        return active ? "translateX(0)" : "translateX(4%)";
-      }
-      if (playerBackgroundSettings.slideshowTransitionStyle === "zoom") {
-        return active ? "scale(1)" : "scale(1.06)";
-      }
-      return "scale(1)";
-    };
-
-    return (
-      <>
-      {error}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          overflow: "hidden",
-          zIndex: 0,
-          background: "#000",
-        }}
-      >
-        {images.map((image, index) => {
-          const imageUrl = getApiAssetUrl(image.imageUrl);
-          if (!imageUrl) return null;
-          const active = index === playerBackgroundSlideIndex % images.length;
-          return (
-            <div
-              key={image.id}
-              style={{
-                position: "absolute",
-                inset: 0,
-                backgroundColor: "#000",
-                opacity: active ? 1 : 0,
-                transform: getTransform(active),
-                transition,
-              }}
-            >
-              <PlayerBackgroundImage src={imageUrl} active={active} />
-            </div>
-          );
-        })}
-      </div>
-      </>
-    );
   };
 
   const applyPlayerState = useCallback((value: Partial<PlayerPlaybackState>) => {
@@ -371,30 +248,6 @@ export default function Player() {
     });
   }, [applyPlayerState]);
 
-  const refreshBreakMusicState = useCallback(async () => {
-    try {
-      const state = await api("/api/break-music/state");
-      setBreakMusicState({
-        paused: !!state.paused,
-        pauseDuringKaraoke: state.pauseDuringKaraoke !== false,
-        mutedForKaraoke: !!state.mutedForKaraoke,
-        crossfadeSeconds:
-          typeof state.crossfadeSeconds === "number"
-            ? state.crossfadeSeconds
-            : 3,
-        volumePercent:
-          typeof state.volumePercent === "number"
-            ? Math.max(0, Math.min(100, Math.round(state.volumePercent)))
-            : 100,
-        elapsedSec: typeof state.elapsedSec === "number" ? state.elapsedSec : 0,
-        currentStartedAt: typeof state.currentStartedAt === "string" ? state.currentStartedAt : null,
-        currentTrack: state.currentTrack || null,
-      });
-    } catch {
-      // ignore
-    }
-  }, []);
-
   useEffect(() => {
     refresh();
     refreshBreakMusicState();
@@ -410,30 +263,6 @@ export default function Player() {
         // Use defaults on error
       });
   }, []);
-
-  const refreshPlayerBackground = useCallback(() =>
-    api("/api/player/background/settings", { cache: "no-store" })
-      .then((settings: PlayerBackgroundSettings) => {
-        setPlayerBackgroundSettings(normalizePlayerBackgroundSettings(settings));
-        setBackgroundSettingsError(false);
-      })
-      .catch((error: unknown) => {
-        console.error("Player background settings failed to load:", error);
-        setBackgroundSettingsError(true);
-      }), []);
-
-  useEffect(() => {
-    void refreshPlayerBackground();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refreshPlayerBackground();
-    };
-    window.addEventListener("online", refreshPlayerBackground);
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.removeEventListener("online", refreshPlayerBackground);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [refreshPlayerBackground]);
 
   useEffect(() => {
     api("/api/settings/public")
@@ -515,10 +344,7 @@ export default function Player() {
               }
             }
             if (msg.type === "player.background.settings") {
-              setBackgroundSettingsError(false);
-              setPlayerBackgroundSettings(
-                normalizePlayerBackgroundSettings(msg),
-              );
+              applyBackgroundSettings(msg);
             }
           } catch {
             /* ignore */
@@ -756,29 +582,7 @@ export default function Player() {
       if (isSingerPaused(playerStateRef.current, now.id)) return;
 
       // Send final timing update when video ends
-      // Prioritize database duration when:
-      // 1. It's a CDG file (fragmented MP4 streams may report incorrect durations), OR
-      // 2. Pitch adjustment is applied (re-encoding creates fragmented streams)
-      let duration: number | undefined;
-      const hasPitchAdjustment =
-        now.key_adjustment !== undefined && now.key_adjustment !== 0;
-
-      if (
-        (now.kind === "cdgmp3" || hasPitchAdjustment) &&
-        now.duration_ms &&
-        now.duration_ms > 0
-      ) {
-        // For CDG files or pitch-shifted tracks, always use database duration
-        duration = now.duration_ms / 1000;
-      } else {
-        // For regular MP4 files without pitch adjustment, try video element first
-        duration = v.duration;
-        if (!isValidDuration(duration)) {
-          if (now.duration_ms) {
-            duration = now.duration_ms / 1000;
-          }
-        }
-      }
+      const duration = getSingerDurationSec(now, v);
 
       // Send currentTime = duration to ensure Host detects song completion
       if (isValidDuration(duration)) {
@@ -819,32 +623,7 @@ export default function Player() {
       if (isSingerPaused(playerStateRef.current, now.id) || v.paused) return;
       const currentTime = v.currentTime || 0;
 
-      // Prioritize database duration over video element duration when:
-      // 1. It's a CDG file (fragmented MP4 streams may report incorrect durations), OR
-      // 2. Pitch adjustment is applied (re-encoding creates fragmented streams)
-      let duration: number | undefined;
-      const hasPitchAdjustment =
-        now.key_adjustment !== undefined && now.key_adjustment !== 0;
-
-      if (
-        (now.kind === "cdgmp3" || hasPitchAdjustment) &&
-        now.duration_ms &&
-        now.duration_ms > 0
-      ) {
-        // For CDG files or pitch-shifted tracks, always use database duration if available
-        // because re-encoded streams produce fragmented MP4s with unreliable duration
-        duration = now.duration_ms / 1000; // Convert ms to seconds
-      } else {
-        // For regular MP4 files without pitch adjustment, try video element first
-        duration = v.duration;
-
-        // Fall back to database duration if video element can't provide it
-        if (!isValidDuration(duration)) {
-          if (now.duration_ms && now.duration_ms > 0) {
-            duration = now.duration_ms / 1000; // Convert ms to seconds
-          }
-        }
-      }
+      const duration = getSingerDurationSec(now, v);
 
       // Send timing update - only if we have a valid duration
       if (isValidDuration(duration)) {
@@ -1000,63 +779,6 @@ export default function Player() {
     fallbackYouTubeToDownloadedTrack,
   ]);
 
-  useLayoutEffect(() => {
-    const audio = breakAudioRef.current;
-    if (!audio) return;
-    if (!breakPlaybackRef.current) {
-      breakPlaybackRef.current = createBreakMusicPlayback(audio);
-    }
-    const track = breakMusicState.currentTrack;
-    void breakPlaybackRef.current.update({
-      ...breakMusicState,
-      src: track?.file_path ? `${API_BASE}/media/file?path=${encodeURIComponent(track.file_path)}` : "",
-      karaokeActive: !!now,
-    });
-  }, [
-    now,
-    playerState,
-    breakMusicState.paused,
-    breakMusicState.pauseDuringKaraoke,
-    breakMusicState.mutedForKaraoke,
-    breakMusicState.crossfadeSeconds,
-    breakMusicState.volumePercent,
-    breakMusicState.elapsedSec,
-    breakMusicState.currentStartedAt,
-    breakMusicState.currentTrack?.id,
-    breakMusicState.currentTrack?.file_path,
-  ]);
-
-  useEffect(() => {
-    if (breakTimingRef.current) {
-      clearInterval(breakTimingRef.current);
-      breakTimingRef.current = null;
-    }
-    if (!shouldRunBreakMusic({
-      ...breakMusicState,
-      src: breakMusicState.currentTrack?.file_path || "",
-      karaokeActive: !!now,
-    }))
-      return;
-
-    breakTimingRef.current = setInterval(() => {
-      refreshBreakMusicState().catch(() => {});
-    }, 1000);
-
-    return () => {
-      if (breakTimingRef.current) {
-        clearInterval(breakTimingRef.current);
-        breakTimingRef.current = null;
-      }
-    };
-  }, [
-    breakMusicState.currentTrack?.id,
-    breakMusicState.paused,
-    breakMusicState.pauseDuringKaraoke,
-    breakMusicState.mutedForKaraoke,
-    now,
-    refreshBreakMusicState,
-  ]);
-
   // Get next up singers
   const upNext = queue
     .filter((q) => q.status === "queued")
@@ -1109,120 +831,38 @@ export default function Player() {
     // But this won't affect an already-running countdown since we capture the value in a local variable
   }, [now, autoPlay, queuedCount, autoPlayDelay, manualStop]);
 
-  const breakMusicTrackText =
-    overlaySettings.showBreakMusicTrack &&
-    !now &&
-    !breakMusicState.paused &&
-    breakMusicState.currentTrack
-      ? `${breakMusicState.currentTrack.artist || "Unknown Artist"} - ${breakMusicState.currentTrack.title}`
-      : "";
-  const breakMusicTickerText = breakMusicTrackText
-    ? `Now Playing: ${breakMusicTrackText}`
-    : "";
+  const breakMusicTrackText = getBreakMusicTrackText(overlaySettings, now, breakMusicState);
 
   // Build ticker text with current singer and queue
-  const tickerText = useMemo(() => {
-    const rotationText = rotationScrollerSingers
-      .slice(0, 8)
-      .map((singer, idx) =>
-        singer.hasQueuedSong
-          ? `${idx + 1}. ${getSingerTickerToken(singer.displayName)}`
-          : `${idx + 1}. ${getSingerTickerToken(singer.displayName)} (waiting)`,
-      )
-      .join(" • ");
-    // If nothing is playing
-    if (!now) {
-      if (upNext.length === 0 && !rotationText) {
-        if (breakMusicTickerText) {
-          const fullText = overlaySettings.customMessage
-            ? `${breakMusicTickerText} 📢 ${overlaySettings.customMessage}`
-            : breakMusicTickerText;
-          return `${fullText}     🎵     ${fullText}     🎵     `;
-        }
-        if (isCustomPlayerBackground) {
-          return overlaySettings.customMessage
-            ? `📢 ${overlaySettings.customMessage}     🎵     📢 ${overlaySettings.customMessage}     🎵     `
-            : "";
-        }
-        // Show custom message at end if set, otherwise waiting message
-        if (overlaySettings.customMessage) {
-          return `🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     🎵 Waiting for singers... Add your song from the request page! 📢 ${overlaySettings.customMessage}     🎵     `;
-        }
-        return "🎵 Waiting for singers... Add your song from the request page! 🎵     🎵 Waiting for singers... Add your song from the request page! 🎵     ";
-      }
-
-      // Show upcoming queue when nothing is playing
-      const queueText =
-        keepRotationScrollerSingersEnabled && rotationText
-          ? rotationText
-          : upNext
-              .slice(0, 5)
-              .map((item, idx) => {
-                const singer = getSingerTickerToken(item.requested_by, true);
-                return `${idx + 1}. ${singer}`;
-              })
-              .join(" • ");
-
-      // Add countdown info if autoplay is enabled and not manually stopped
-      const countdownInfo =
-        autoPlay && countdown !== null && !manualStop
-          ? `⏱️ Starting in ${countdown}s... `
-          : "";
-
-      // Add custom message at the end if set
-      const idleNowPlaying = breakMusicTickerText
-        ? `${breakMusicTickerText} • `
-        : "";
-      const fullText = overlaySettings.customMessage
-        ? `${countdownInfo}${idleNowPlaying}🎤 QUEUE: ${queueText} 📢 ${overlaySettings.customMessage}`
-        : `${countdownInfo}${idleNowPlaying}🎤 QUEUE: ${queueText}`;
-      return `${fullText}     🎵     ${fullText}     🎵     `;
-    }
-
-    // Current singer is playing - always show who is singing
-    const current = hideSingerQueueEnabled
-      ? now.requested_by
-        ? `🎤 NOW SINGING: ${getSingerTickerToken(now.requested_by)}`
-        : `🎤 NOW PLAYING`
-      : now.requested_by
-        ? `🎤 NOW SINGING: ${getSingerTickerToken(now.requested_by)}: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`
-        : `🎤 NOW PLAYING: ${now.artist || "Unknown"} — ${now.title || "Unknown"}`;
-
-    // Build queue list
-    const queueText =
-      keepRotationScrollerSingersEnabled && rotationText
-        ? rotationText
-        : upNext
-            .slice(0, 5)
-            .map((item, idx) => {
-              const singer = getSingerTickerToken(item.requested_by, true);
-              return `${idx + 1}. ${singer}`;
-            })
-            .join(" • ");
-
-    // Combine with proper spacing, adding custom message at the end if set
-    let fullText = queueText ? `${current} ⭐ UP NEXT: ${queueText}` : current;
-
-    // Add custom message at the end if set
-    if (overlaySettings.customMessage) {
-      fullText += ` 📢 ${overlaySettings.customMessage}`;
-    }
-
-    // Repeat for smooth scrolling with divider
-    return `${fullText}     🎵     ${fullText}     🎵     `;
-  }, [
-    now,
-    upNext,
-    overlaySettings.customMessage,
-    hideSingerQueueEnabled,
-    keepRotationScrollerSingersEnabled,
-    rotationScrollerSingers,
-    autoPlay,
-    countdown,
-    manualStop,
-    isCustomPlayerBackground,
-    breakMusicTickerText,
-  ]);
+  const tickerText = useMemo(
+    () =>
+      buildTickerText({
+        now,
+        upNext,
+        overlaySettings,
+        hideSingerQueueEnabled,
+        keepRotationScrollerSingersEnabled,
+        rotationScrollerSingers,
+        autoPlay,
+        countdown,
+        manualStop,
+        isCustomPlayerBackground,
+        breakMusicTrackText,
+      }),
+    [
+      now,
+      upNext,
+      overlaySettings,
+      hideSingerQueueEnabled,
+      keepRotationScrollerSingersEnabled,
+      rotationScrollerSingers,
+      autoPlay,
+      countdown,
+      manualStop,
+      isCustomPlayerBackground,
+      breakMusicTrackText,
+    ],
+  );
 
   // Render the overlay (shown always, unless visibility is false)
   const renderWakeLockNotice = () => wakeLockMessage && (
@@ -1232,155 +872,17 @@ export default function Player() {
     </div>
   );
 
-  const renderOverlay = () => {
-    if (!overlaySettings.visible) {
-      return null;
-    }
-
-    // Calculate scale factor based on height (default 90px = 1.0 scale)
-    const scaleFactor = overlaySettings.height / 90;
-    const tickerHeight = Math.round(40 * scaleFactor);
-    const tickerFontSize = Math.round(16 * scaleFactor);
-    const padding = Math.round(15 * scaleFactor);
-    const gap = Math.round(15 * scaleFactor);
-    const borderRadius = Math.round(8 * scaleFactor);
-
-    // QR size is controlled separately
-    const qrSizeValue = overlaySettings.qrSize;
-    const qrPadding = Math.max(4, Math.round(qrSizeValue / 12));
-    const qrBorderRadius = Math.max(8, Math.round(qrSizeValue / 8));
-    const qrBlockSize = qrSizeValue + qrPadding * 2;
-    const qrOffset = 15;
-    const leftInset = overlaySettings.showQrCode
-      ? Math.max(padding, qrOffset + qrBlockSize + gap)
-      : padding;
-
-    return (
-      <div
-        className="controls-overlay"
-        style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          background: "transparent",
-          zIndex: 10,
-          opacity: 1,
-        }}
-      >
-        {/* QR Code */}
-        {overlaySettings.showQrCode && (
-          <div
-            className="player-qr"
-            style={{
-              "--player-qr-size": `${qrSizeValue}px`,
-              position: "absolute",
-              left: `${qrOffset}px`,
-              bottom: `${qrOffset}px`,
-              width: `${qrSizeValue}px`,
-              height: `${qrSizeValue}px`,
-              background: "white",
-              borderRadius: `${qrBorderRadius}px`,
-              padding: `${qrPadding}px`,
-              boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-            } as React.CSSProperties}
-          >
-            <img
-              src={`${API_BASE}/api/qr`}
-              alt="QR"
-              style={{
-                width: "100%",
-                height: "100%",
-                imageRendering: "crisp-edges",
-              }}
-              onError={(e) => {
-                const target = e.currentTarget as HTMLImageElement;
-                target.style.display = "none";
-              }}
-            />
-          </div>
-        )}
-
-        <div
-          className="player-overlay-row"
-          style={{
-            height: `${overlaySettings.height}px`,
-            display: "flex",
-            alignItems: "flex-end",
-            padding: `${padding}px`,
-            paddingLeft: `${leftInset}px`,
-            gap: `${gap}px`,
-          }}
-        >
-          {/* Ticker container - takes full remaining width */}
-          {overlaySettings.showRoller && (
-            <div
-              className="player-ticker"
-              style={{
-                flex: 1,
-                height: `${tickerHeight}px`,
-                overflow: "hidden",
-                position: "relative",
-                backgroundColor: "transparent",
-                borderRadius: `${borderRadius}px`,
-                display: "flex",
-                alignItems: "center",
-                paddingLeft: `${padding}px`,
-                paddingRight: `${padding}px`,
-              }}
-            >
-              <div
-                className="ticker-text"
-                style={{
-                  fontSize: `${tickerFontSize}px`,
-                  fontWeight: 600,
-                  color: "#fff",
-                  textShadow: "2px 2px 4px rgba(0,0,0,0.9)",
-                  letterSpacing: "0.5px",
-                }}
-              >
-                {renderTickerText(tickerText, breakMusicTrackText, rotationScrollerSingers, overlaySettings.showProfilePictures)}
-              </div>
-            </div>
-          )}
-
-          {/* Fullscreen button - only rendered when controls are shown to avoid gap */}
-          {showControls && (document.fullscreenEnabled || isFullscreen) && (
-            <button
-              className="player-fullscreen"
-              aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-              onClick={toggleFullscreen}
-              style={{
-                flexShrink: 0,
-                padding: `${Math.round(10 * scaleFactor)}px ${Math.round(20 * scaleFactor)}px`,
-                background: "rgba(255,255,255,0.15)",
-                border: "1px solid rgba(255,255,255,0.3)",
-                borderRadius: `${borderRadius}px`,
-                color: "white",
-                cursor: "pointer",
-                fontSize: `${Math.round(14 * scaleFactor)}px`,
-                fontWeight: 500,
-                transition: "all 0.3s ease",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "rgba(255,255,255,0.25)";
-                e.currentTarget.style.transform = "scale(1.05)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "rgba(255,255,255,0.15)";
-                e.currentTarget.style.transform = "scale(1)";
-              }}
-            >
-              <span aria-hidden="true">{isFullscreen ? "⊗" : "⛶"}</span>
-              <span className="player-fullscreen-label">
-                {isFullscreen ? " Exit Fullscreen" : " Fullscreen"}
-              </span>
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const renderOverlay = () => (
+    <PlayerOverlay
+      overlaySettings={overlaySettings}
+      tickerText={tickerText}
+      breakMusicTrackText={breakMusicTrackText}
+      rotationScrollerSingers={rotationScrollerSingers}
+      showControls={showControls}
+      isFullscreen={isFullscreen}
+      onToggleFullscreen={toggleFullscreen}
+    />
+  );
 
   // When nothing is playing, show waiting screen with ticker
   if (!now) {
@@ -1423,147 +925,23 @@ export default function Player() {
             preload="auto"
             style={{ display: "none" }}
           />
-          {renderPlayerBackground()}
+          <PlayerBackground
+          settings={playerBackgroundSettings}
+          error={backgroundSettingsError}
+          slideIndex={playerBackgroundSlideIndex}
+          onRetry={() => void refreshPlayerBackground()}
+        />
           {renderWakeLockNotice()}
           {/* Show waiting screen - queue is displayed in the roller overlay */}
-          {upNext.length > 0 ? (
-            <div
-              className="player-waiting"
-              style={{
-                position: "relative",
-                zIndex: 1,
-                textAlign: "center",
-                padding: "20px",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "24px",
-                animation: "fadeInUp 0.6s ease",
-              }}
-            >
-              {/* Countdown timer when autoplay is enabled and not manually stopped */}
-              {autoPlay && countdown !== null && !manualStop && (
-                <div
-                  className="player-countdown"
-                  style={{
-                    fontSize: "clamp(24px, 4vw, 40px)",
-                    background: "linear-gradient(135deg, #10b981, #34d399)",
-                    WebkitBackgroundClip: "text",
-                    WebkitTextFillColor: "transparent",
-                    backgroundClip: "text",
-                    fontWeight: 700,
-                    animation: "pulse 2s ease infinite",
-                  }}
-                >
-                  ⏱️ Starting in {countdown}s...
-                </div>
-              )}
-
-              {/* Up next heading */}
-              <h2
-                style={{
-                  fontSize: "clamp(32px, 5vw, 56px)",
-                  margin: 0,
-                  fontWeight: 700,
-                  background: "linear-gradient(135deg, #6366f1, #a855f7)",
-                  WebkitBackgroundClip: "text",
-                  WebkitTextFillColor: "transparent",
-                  backgroundClip: "text",
-                  letterSpacing: "-0.02em",
-                }}
-              >
-                🎤 Up Next
-              </h2>
-
-              {/* Show only the first singer */}
-              <div style={{ textAlign: "center" }}>
-                {overlaySettings.showProfilePictures && upNext[0].profile?.imageUrl && (
-                  <div className="player-up-next-avatar">
-                    <SingerAvatar name={upNext[0].requested_by || "Anonymous"} profile={upNext[0].profile} size="100%" />
-                  </div>
-                )}
-                <div
-                  className="player-waiting-name"
-                  style={{
-                    fontSize: "clamp(24px, 4vw, 48px)",
-                    fontWeight: 700,
-                    color: "#ffffff",
-                    marginBottom: "8px",
-                  }}
-                >
-                  {formatSingerName(upNext[0].requested_by) || "Anonymous"}
-                </div>
-                {!hideSingerQueueEnabled && (
-                  <div
-                    style={{
-                      fontSize: "clamp(14px, 2vw, 20px)",
-                      color: "rgba(161, 161, 170, 1)",
-                    }}
-                  >
-                    {upNext[0].title || "Unknown"} •{" "}
-                    {upNext[0].artist || "Unknown"}
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : isCustomPlayerBackground ? null : (
-            <div
-              className="player-waiting"
-              style={{
-                position: "relative",
-                zIndex: 1,
-                textAlign: "center",
-                animation: "fadeInUp 0.6s ease",
-              }}
-            >
-              <h1
-                style={{
-                  fontSize: "clamp(32px, 6vw, 64px)",
-                  fontWeight: 700,
-                  margin: "0 0 16px 0",
-                  background: "linear-gradient(135deg, #6366f1, #a855f7)",
-                  WebkitBackgroundClip: "text",
-                  WebkitTextFillColor: "transparent",
-                  backgroundClip: "text",
-                  letterSpacing: "-0.02em",
-                }}
-              >
-                🎤 Waiting for singers...
-              </h1>
-              <p
-                style={{
-                  fontSize: "clamp(16px, 2. 5vw, 20px)",
-                  color: "rgba(161, 161, 170, 1)",
-                  margin: 0,
-                }}
-              >
-                Add your song from the request page!
-              </p>
-              {overlaySettings.showRequestsUrl && (
-                <p
-                  className="player-requests-url"
-                  style={{
-                    fontSize: "clamp(16px, 2.1vw, 24px)",
-                    color: "rgba(226, 232, 240, 0.95)",
-                    margin: "16px 0 0 0",
-                    fontFamily:
-                      '"Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif',
-                    fontWeight: 700,
-                    letterSpacing: "0.04em",
-                    textTransform: "lowercase",
-                    wordBreak: "break-word",
-                    padding: "12px 20px",
-                    borderRadius: 999,
-                    background: "rgba(15, 23, 42, 0.72)",
-                    border: "1px solid rgba(148, 163, 184, 0.28)",
-                    boxShadow: "0 10px 30px rgba(15, 23, 42, 0.25)",
-                  }}
-                >
-                  {splashRequestsUrl}
-                </p>
-              )}
-            </div>
-          )}
+          <WaitingScreen
+            upNext={upNext}
+            overlaySettings={overlaySettings}
+            hideSingerQueueEnabled={hideSingerQueueEnabled}
+            isCustomPlayerBackground={isCustomPlayerBackground}
+            showCountdown={autoPlay && countdown !== null && !manualStop}
+            countdown={countdown}
+            splashRequestsUrl={splashRequestsUrl}
+          />
 
           {/* Always show the overlay with ticker */}
           {renderOverlay()}
@@ -1659,7 +1037,12 @@ export default function Player() {
         }}
       >
         <audio ref={breakAudioRef} preload="auto" style={{ display: "none" }} />
-        {renderPlayerBackground()}
+        <PlayerBackground
+          settings={playerBackgroundSettings}
+          error={backgroundSettingsError}
+          slideIndex={playerBackgroundSlideIndex}
+          onRetry={() => void refreshPlayerBackground()}
+        />
         {renderWakeLockNotice()}
         {isYouTube && youtubeVideoId ? (
           <iframe
