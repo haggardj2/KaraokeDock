@@ -58,6 +58,7 @@ import { getOidcProfileClaims, getOidcGroupRole } from '../oidcProfile.js';
 import { hostGuard } from '../middleware/hostGuard.js';
 import { canAccessHost } from '../permissions.js';
 import { createSocialAuthRouter, socialAuthNoStore } from './socialAuth.js';
+import { createStationLocalLoginRouter } from '../stationLocalLogin.js';
 import { createBackupRouter } from './backup.js';
 import { createRequire } from 'node:module';
 import { maskSocialConfig, SOCIAL_CONFIG_KEY, type SocialConfig } from '../socialAuthConfig.js';
@@ -490,6 +491,7 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
 };
 
 apiRouter.use(createSocialAuthRouter(adminGuard, () => postQueueUpdate('queue.updated')));
+apiRouter.use(createStationLocalLoginRouter());
 apiRouter.use(createBackupRouter(adminGuard, {
   appVersion: (createRequire(import.meta.url)('../../package.json') as { version: string }).version,
   getImageUploadsDir: async () => path.resolve(await getImageUploadsDir()),

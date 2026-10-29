@@ -4,7 +4,8 @@ KaraokeDock Station is the desktop/AppImage wrapper for running the existing Kar
 
 ## What this first scaffold provides
 
-- Electron desktop shell for the existing Host/Admin/Requests UI.
+- Runs in the system tray. The tray menu opens Host, Admin and Requests in your default browser, which is signed in as admin automatically because it is on the Station machine (localhost).
+- Start at Login from the tray menu; started that way, Station stays in the tray without opening the browser (`--hidden`).
 - Managed Player window that can be moved to another display and toggled fullscreen.
 - AppImage packaging configuration through `electron-builder`.
 - Managed local PostgreSQL data, runtime config, and logs under the Electron user data directory.
@@ -42,7 +43,7 @@ npm run stage:postgres
 npm run dev
 ```
 
-`npm run dev` builds the React web app into `Station/.build/web-dist`, compiles the Electron main process, starts the managed local PostgreSQL database, starts the existing API server, and opens the Station Host window.
+`npm run dev` builds the React web app into `Station/.build/web-dist`, compiles the Electron main process, starts the managed local PostgreSQL database, starts the existing API server, and opens the Host page in your browser.
 
 The Station config file is created automatically at Electron's user data path. On Linux this is normally:
 

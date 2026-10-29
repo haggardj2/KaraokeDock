@@ -106,7 +106,8 @@ const corsOptions = {
   credentials: true,  // Allow cookies and authentication headers
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   // x-backup-passphrase: Admin › Backup & Restore sends the restore passphrase in a header.
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-session-token', 'x-backup-passphrase'],
+  // x-station-local: Station's automatic local admin sign-in (see stationLocalLogin.ts).
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-session-token', 'x-backup-passphrase', 'x-station-local'],
   // Content-Disposition carries the backup download's filename.
   exposedHeaders: ['Content-Range', 'X-Content-Range', 'Content-Disposition'],
   maxAge: 600  // Cache preflight requests for 10 minutes

@@ -9,6 +9,26 @@ type AuthProfile = {
 }
 
 const AUTH_PROFILE_STORAGE_KEY = 'authProfile'
+// Set on sign-out so a Station window is not signed straight back in; cleared when the tab closes.
+const STATION_LOCAL_LOGIN_SKIP_KEY = 'stationLocalLoginSkipped'
+const LOOPBACK_HOSTNAMES = ['localhost', '127.0.0.1', '[::1]']
+
+function canTryStationLocalLogin() {
+  if (typeof window === 'undefined' || !LOOPBACK_HOSTNAMES.includes(window.location.hostname)) return false
+  try {
+    return window.sessionStorage.getItem(STATION_LOCAL_LOGIN_SKIP_KEY) !== '1'
+  } catch {
+    return true
+  }
+}
+
+function skipStationLocalLogin() {
+  try {
+    window.sessionStorage.setItem(STATION_LOCAL_LOGIN_SKIP_KEY, '1')
+  } catch {
+    // Storage blocked: the next load may sign in again.
+  }
+}
 
 function emptyProfile(): AuthProfile {
   return { username: '', displayName: '', picture: '' }
@@ -117,6 +137,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [adoptSessionToken])
 
+  // On Station, a page opened on the Station machine itself (localhost) is signed in as admin
+  // without a password. The server refuses this anywhere else, so elsewhere it is a no-op.
+  useEffect(() => {
+    if (sessionTokenState || !canTryStationLocalLogin()) return
+
+    let cancelled = false
+    api('/api/auth/station-local', {
+      method: 'POST',
+      headers: { 'x-station-local': '1' }
+    })
+      .then((result) => {
+        if (cancelled || !result?.ok || !result.sessionToken || readStoredSessionToken()) return
+        setSessionToken(result.sessionToken)
+      })
+      .catch(() => {
+        // Not a Station, or no admin account: the normal sign-in form stays.
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionTokenState, setSessionToken])
+
   const setProfile = (nextProfile: Partial<AuthProfile>) => {
     setProfileState((current) => {
       const profile = { ...current, ...nextProfile }
@@ -180,6 +223,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.error('Logout error:', err)
     } finally {
+      skipStationLocalLogin()
       if (readStoredSessionToken() === sessionTokenState) setSessionToken('')
     }
   }

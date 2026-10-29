@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, session, shell, Tray } from 'electron';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -59,7 +59,8 @@ const DEFAULT_STATION_CONFIG: Required<StationConfig> = {
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.userAgentFallback = STATION_USER_AGENT;
 
-let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let stationStatus: 'starting' | 'running' | 'stopped' = 'starting';
 let playerWindow: BrowserWindow | null = null;
 let serverProcess: ChildProcess | null = null;
 let postgresProcess: ChildProcess | null = null;
@@ -68,6 +69,11 @@ let stationUrl = '';
 let isQuitting = false;
 let startupWarning: string | null = null;
 let youtubeEmbedHeadersConfigured = false;
+
+// Started by "Start at Login": stay in the tray instead of opening the browser.
+const LAUNCHED_HIDDEN_ARG = '--hidden';
+const launchedHidden = process.argv.includes(LAUNCHED_HIDDEN_ARG) ||
+  (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin);
 
 function resolveAppIconPath() {
   const candidate = app.isPackaged
@@ -680,6 +686,7 @@ async function startKaraokeDockServer(paths: RuntimePaths, config: StationConfig
   serverProcess = child;
   child.once('exit', (code, signal) => {
     if (!isQuitting) {
+      setStationStatus('stopped');
       dialog.showErrorBox(
         'KaraokeDock Station server stopped',
         `The local KaraokeDock server exited with code ${code ?? 'null'}${signal ? ` and signal ${signal}` : ''}.`,
@@ -744,7 +751,7 @@ function readBootstrapCredentials(paths: RuntimePaths): BootstrapCredentialsFile
 }
 
 function showStationMessageBox(options: Electron.MessageBoxOptions) {
-  return mainWindow ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options);
+  return playerWindow ? dialog.showMessageBox(playerWindow, options) : dialog.showMessageBox(options);
 }
 
 async function showBootstrapCredentials(options: { automatic?: boolean } = {}) {
@@ -785,45 +792,8 @@ async function showBootstrapCredentials(options: { automatic?: boolean } = {}) {
   }
 }
 
-function createMainWindow() {
-  if (mainWindow) return mainWindow;
-
-  mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    title: 'KaraokeDock Station',
-    icon: resolveAppIconPath(),
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  mainWindow.webContents.setUserAgent(STATION_USER_AGENT);
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    try {
-      const parsed = new URL(url);
-      if (parsed.origin === stationUrl && parsed.pathname === '/player') {
-        void openPlayerWindow();
-        return { action: 'deny' };
-      }
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        void shell.openExternal(url);
-        return { action: 'deny' };
-      }
-    } catch {}
-    return { action: 'allow' };
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  void mainWindow.loadURL(`${stationUrl}/host`);
-  return mainWindow;
-}
-
+// The Player stays a Station window: it may autoplay with sound and gets the YouTube embed
+// headers, which a regular browser tab does not.
 async function openPlayerWindow() {
   if (playerWindow) {
     playerWindow.show();
@@ -844,32 +814,127 @@ async function openPlayerWindow() {
     },
   });
   playerWindow.webContents.setUserAgent(STATION_USER_AGENT);
+  playerWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  app.dock?.show();
 
   playerWindow.on('closed', () => {
     playerWindow = null;
+    app.dock?.hide();
   });
 
   await playerWindow.loadURL(`${stationUrl}/player`);
 }
 
-function showAppPath(appPath: string) {
+// Host, Admin and Requests open in the default browser; on the Station machine the
+// browser is signed in as admin automatically (localhost sign-in).
+async function showAppPath(appPath: string) {
+  if (!stationUrl || stationStatus !== 'running') return;
   const normalizedPath = appPath.startsWith('/') ? appPath : `/${appPath}`;
-  const win = createMainWindow();
-  win.show();
-  win.focus();
-  return win.loadURL(`${stationUrl}${normalizedPath}`);
+  try {
+    await shell.openExternal(`${stationUrl}${normalizedPath}`);
+  } catch (error) {
+    dialog.showErrorBox('Unable to open the browser', `Open ${stationUrl}${normalizedPath} in your browser.\n\n${String(error)}`);
+  }
 }
 
+// ---- Start at login ----
+// Windows and macOS use the system login items; Linux uses an XDG autostart entry.
+
+function linuxAutostartPath() {
+  return path.join(app.getPath('appData'), 'autostart', 'karaokedock-station.desktop');
+}
+
+function quoteDesktopExecArg(value: string) {
+  return `"${value.replace(/(["`$\\])/g, '\\$1')}"`;
+}
+
+function isStartAtLoginEnabled() {
+  if (process.platform === 'linux') return fs.existsSync(linuxAutostartPath());
+  return app.getLoginItemSettings({ args: [LAUNCHED_HIDDEN_ARG] }).openAtLogin;
+}
+
+function setStartAtLogin(enabled: boolean) {
+  if (process.platform !== 'linux') {
+    app.setLoginItemSettings({ openAtLogin: enabled, args: [LAUNCHED_HIDDEN_ARG] });
+    return;
+  }
+
+  const autostartPath = linuxAutostartPath();
+  if (!enabled) {
+    fs.rmSync(autostartPath, { force: true });
+    return;
+  }
+  // An AppImage runs from a temporary mount; APPIMAGE is the path of the file itself.
+  const command = process.env.APPIMAGE
+    ? [process.env.APPIMAGE]
+    : app.isPackaged ? [process.execPath] : [process.execPath, app.getAppPath()];
+  fs.mkdirSync(path.dirname(autostartPath), { recursive: true });
+  fs.writeFileSync(autostartPath, [
+    '[Desktop Entry]',
+    'Type=Application',
+    'Name=KaraokeDock Station',
+    'Comment=Start KaraokeDock Station in the system tray',
+    `Exec=${[...command, LAUNCHED_HIDDEN_ARG].map(quoteDesktopExecArg).join(' ')}`,
+    ...(resolveAppIconPath() ? [`Icon=${resolveAppIconPath()}`] : []),
+    'Terminal=false',
+    'X-GNOME-Autostart-enabled=true',
+    '',
+  ].join('\n'));
+}
+
+// ---- Tray and menus ----
+
+function stationMenuItems(): Electron.MenuItemConstructorOptions[] {
+  const running = stationStatus === 'running';
+  const statusLabel = {
+    starting: 'Starting KaraokeDock…',
+    running: `Running at ${stationUrl}`,
+    stopped: 'KaraokeDock server stopped',
+  }[stationStatus];
+
+  return [
+    { label: statusLabel, enabled: false },
+    { type: 'separator' },
+    { label: 'Open Host', enabled: running, click: () => void showAppPath('/host') },
+    { label: 'Open Admin', enabled: running, click: () => void showAppPath('/admin') },
+    { label: 'Open Requests', enabled: running, click: () => void showAppPath('/requests') },
+    { label: 'Open Player Window', enabled: running, accelerator: 'CommandOrControl+P', click: () => void openPlayerWindow() },
+    { type: 'separator' },
+    {
+      label: 'Start at Login',
+      type: 'checkbox',
+      checked: isStartAtLoginEnabled(),
+      click: (item) => {
+        try {
+          setStartAtLogin(item.checked);
+        } catch (error) {
+          dialog.showErrorBox('Unable to change Start at Login', String(error));
+        }
+        refreshMenus();
+      },
+    },
+    {
+      label: 'Open Station Config',
+      click: () => {
+        if (runtimePaths) void shell.openPath(runtimePaths.configPath);
+      },
+    },
+    { label: 'Show Initial Admin Credentials', click: () => void showBootstrapCredentials() },
+    { type: 'separator' },
+    { label: 'Quit KaraokeDock Station', role: 'quit' },
+  ];
+}
+
+// The application menu only shows on the Player window (and the macOS menu bar).
 function createApplicationMenu() {
   const template: Electron.MenuItemConstructorOptions[] = [
+    { label: 'KaraokeDock', submenu: stationMenuItems() },
     {
-      label: 'KaraokeDock',
+      label: 'View',
       submenu: [
-        { label: 'Host', click: () => void showAppPath('/host') },
-        { label: 'Admin', click: () => void showAppPath('/admin') },
-        { label: 'Requests', click: () => void showAppPath('/requests') },
-        { type: 'separator' },
-        { label: 'Open Player Window', accelerator: 'CommandOrControl+P', click: () => void openPlayerWindow() },
         {
           label: 'Toggle Player Full Screen',
           accelerator: 'F11',
@@ -878,19 +943,6 @@ function createApplicationMenu() {
           },
         },
         { type: 'separator' },
-        {
-          label: 'Open Station Config',
-          click: () => {
-            if (runtimePaths) void shell.openPath(runtimePaths.configPath);
-          },
-        },
-        { label: 'Show Initial Admin Credentials', click: () => void showBootstrapCredentials() },
-        { label: 'Quit', role: 'quit' },
-      ],
-    },
-    {
-      label: 'View',
-      submenu: [
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
@@ -903,6 +955,31 @@ function createApplicationMenu() {
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function createTray() {
+  const iconPath = resolveAppIconPath();
+  let image = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+  if (!image.isEmpty()) {
+    const size = process.platform === 'win32' ? 16 : process.platform === 'darwin' ? 18 : 22;
+    image = image.resize({ width: size, height: size, quality: 'best' });
+  }
+  tray = new Tray(image);
+  tray.setToolTip('KaraokeDock Station');
+  // Windows shows the menu on right-click only; open it on left-click as well.
+  if (process.platform === 'win32') tray.on('click', () => tray?.popUpContextMenu());
+}
+
+function refreshMenus() {
+  createApplicationMenu();
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate(stationMenuItems()));
+  tray.setToolTip(stationStatus === 'running' ? `KaraokeDock Station\n${stationUrl}` : 'KaraokeDock Station');
+}
+
+function setStationStatus(status: typeof stationStatus) {
+  stationStatus = status;
+  refreshMenus();
 }
 
 function registerIpcHandlers() {
@@ -932,11 +1009,13 @@ function registerIpcHandlers() {
 
 async function bootstrap() {
   runtimePaths = resolveRuntimePaths();
+  app.dock?.hide();
+  createTray();
+  refreshMenus();
 
   try {
     require(path.join(runtimePaths.serverDir, 'scripts', 'check-runtime.cjs'));
     const config = readStationConfig(runtimePaths);
-    createApplicationMenu();
     registerIpcHandlers();
     await startKaraokeDockServer(runtimePaths, config);
   } catch (error) {
@@ -947,7 +1026,8 @@ async function bootstrap() {
   }
 
   configureYouTubeEmbedHeaders();
-  createMainWindow();
+  setStationStatus('running');
+  if (!launchedHidden) void showAppPath('/host');
   if (startupWarning) {
     setTimeout(() => {
       void showStationMessageBox({
@@ -963,13 +1043,9 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // Launching Station again while it runs opens the Host page.
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    } else if (stationUrl) {
-      createMainWindow();
-    }
+    void showAppPath('/host');
   });
 
   app.on('before-quit', () => {
@@ -982,13 +1058,16 @@ if (!gotLock) {
     void bootstrap();
   });
 
+  // macOS: clicking the app again (Dock, Finder) opens the Host page.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0 && stationUrl) {
-      createMainWindow();
-    }
+    void showAppPath('/host');
   });
 
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
-  });
+  // Station lives in the tray: closing the Player window does not quit it. Quit is in the tray menu.
+  app.on('window-all-closed', () => {});
+
+  // Logging out or shutting down signals the process; quit properly so Postgres and the server stop too.
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.on(signal, () => app.quit());
+  }
 }
