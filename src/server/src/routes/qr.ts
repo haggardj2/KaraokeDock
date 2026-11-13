@@ -1,7 +1,7 @@
 // server/src/routes/qr.ts
 import express from 'express';
 import QRCode from 'qrcode';
-import { getSetting } from '../db.js';
+import { getPublicRequestsUrl } from '../requestsUrl.js';
 
 export const qrRouter = express.Router();
 
@@ -23,25 +23,8 @@ qrRouter.options('/api/qr', (req, res) => {
 
 qrRouter.get('/api/qr', async (req, res) => {
   try {
-    const gatewayEnabled = await getSetting('remote_gateway.enabled');
-    const gatewayUrl = String(await getSetting('remote_gateway.url') ?? '').trim().replace(/\/+$/, '');
-    let requestsUrl = gatewayEnabled === true && gatewayUrl ? gatewayUrl : '';
+    const requestsUrl = await getPublicRequestsUrl(req);
 
-    if (!requestsUrl) {
-      // Get the web app URL from environment variable.
-      // Format should be like: http://192.168.1.100:5173 or http://hostname:5173.
-      // Falls back to using the API server's host with port 5173.
-      let webAppUrl = process.env.WEB_APP_URL;
-      
-      if (!webAppUrl) {
-        const host = req.get('host') || 'localhost:5174';
-        const hostWithoutPort = host.split(':')[0];
-        webAppUrl = `${req.protocol}://${hostWithoutPort}:5173`;
-      }
-      
-      requestsUrl = `${webAppUrl.replace(/\/+$/, '')}/request`;
-    }
-    
     console.log(`Generating QR code for: ${requestsUrl}`);
     
     const qrDataUrl = await QRCode.toDataURL(requestsUrl, {

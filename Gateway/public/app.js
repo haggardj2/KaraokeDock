@@ -10,8 +10,9 @@ const closeManageHistoryDialog = document.querySelector('#closeManageHistoryDial
 const manageHistoryStatus = document.querySelector('#manageHistoryStatus');
 const editNameButton = document.querySelector('#editNameButton');
 const logoutButton = document.querySelector('#logoutButton');
+const themeChoiceButtons = [...document.querySelectorAll('[data-theme-choice]')];
+const venueThemeSwatch = document.querySelector('#venueThemeSwatch');
 const searchInput = document.querySelector('#searchInput');
-const searchButton = document.querySelector('#searchButton');
 const clearSearchButton = document.querySelector('#clearSearchButton');
 const resultsEl = document.querySelector('#results');
 const pageTabs = [...document.querySelectorAll('.page-tab')];
@@ -29,6 +30,10 @@ const queueEl = document.querySelector('#queue');
 const messageEl = document.querySelector('#message');
 const queueFooter = document.querySelector('#queueFooter');
 const queueFooterSummary = document.querySelector('#queueFooterSummary');
+const queueFooterLabel = document.querySelector('#queueFooterLabel');
+const queueFooterBadge = document.querySelector('#queueFooterBadge');
+const singingAs = document.querySelector('#singingAs');
+const singingAsName = document.querySelector('#singingAsName');
 const queueDialog = document.querySelector('#queueDialog');
 const closeQueueDialog = document.querySelector('#closeQueueDialog');
 const openHistoryDialogButton = document.querySelector('#openHistoryDialog');
@@ -182,6 +187,8 @@ function saveSingerName(name) {
 
 function updateProfileButton() {
   profileButton.setAttribute('aria-label', `${singerName() || 'Singer'}: profile menu`);
+  singingAs.hidden = !singerName();
+  singingAsName.textContent = singerName();
   renderSingerProfile();
 }
 
@@ -517,7 +524,21 @@ function initialOptions() {
   return ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
 }
 
-function renderInitialSelector(target, activeValue, onSelect) {
+// Letters with songs, from the Gateway; until they load every letter is offered.
+async function loadBrowseLetters(mode) {
+  const response = await fetch(`/api/browse/letters?mode=${mode}`);
+  if (!response.ok) return null;
+  const body = await response.json().catch(() => null);
+  return Array.isArray(body?.letters) ? body.letters : null;
+}
+
+// Keep the current letter if it has songs; otherwise prefer '#', then the first letter that does.
+function pickInitial(letters, current) {
+  if (!letters?.length || letters.includes(current)) return current;
+  return letters.includes('#') ? '#' : letters[0];
+}
+
+function renderInitialSelector(target, activeValue, onSelect, available = null) {
   target.replaceChildren();
   if (target.tagName === 'SELECT') {
     target.className = 'initial-selector browse-letter-select';
@@ -525,6 +546,7 @@ function renderInitialSelector(target, activeValue, onSelect) {
       const option = document.createElement('option');
       option.value = value;
       option.textContent = value;
+      option.disabled = Boolean(available) && !available.includes(value);
       target.append(option);
     }
     target.value = activeValue;
@@ -537,6 +559,7 @@ function renderInitialSelector(target, activeValue, onSelect) {
     button.className = `initial-button ${value === activeValue ? 'active' : ''}`;
     button.textContent = value;
     button.setAttribute('aria-pressed', String(value === activeValue));
+    button.disabled = Boolean(available) && !available.includes(value);
     button.addEventListener('click', () => onSelect(value));
     target.append(button);
   }
@@ -567,9 +590,27 @@ function setPage(page, options = {}) {
     panel.hidden = panel.id !== `${nextPage === 'search' ? 'search' : nextPage === 'artists' ? 'artist' : 'song'}Page`;
   });
   setMessage('');
+  updateSearchPlaceholder(nextPage);
   if (reload && nextPage === 'artists') loadArtists(currentArtistPrefix).catch((err) => setMessage(err.message, true));
   if (reload && nextPage === 'songs') loadSongs(currentSongPrefix).catch((err) => setMessage(err.message, true));
+  if (reload && nextPage === 'search' && searchInput.value.trim()) search().catch((err) => setMessage(err.message, true));
 }
+
+// The shared search box searches on Search and filters the Artists / Songs lists.
+function updateSearchPlaceholder(page) {
+  const label = page === 'artists' ? 'Filter artists…' : page === 'songs' ? 'Filter song titles…' : 'Search local library & Online…';
+  searchInput.placeholder = label;
+  searchInput.setAttribute('aria-label', page === 'search' ? 'Search songs' : label.replace('…', ''));
+}
+
+function runActiveQuery() {
+  const page = getActivePage();
+  const task = page === 'artists' ? loadArtists() : page === 'songs' ? loadSongs() : search();
+  task.catch((err) => setMessage(err.message, true));
+}
+
+// Browse loads can overlap while the singer types; only the newest may render.
+let browseRequest = 0;
 
 function getActivePage() {
   return pageTabs.find((tab) => tab.classList.contains('active'))?.dataset.page || 'search';
@@ -695,7 +736,17 @@ async function loadPublicConfig() {
   if (!response.ok) return;
   const config = await response.json();
   if (config.settings) publicSettings = normalizePublicSettings(config.settings);
+  window.KaraokeTheme.setVenue(config.settings?.theme);
+  renderThemePicker();
   updateRequestPageVisibility();
+}
+
+function renderThemePicker() {
+  const choice = window.KaraokeTheme.choice();
+  venueThemeSwatch.dataset.themeScope = window.KaraokeTheme.venue();
+  for (const button of themeChoiceButtons) {
+    button.setAttribute('aria-checked', String(button.dataset.themeChoice === choice));
+  }
 }
 
 async function applyRequestClosedResponse(response) {
@@ -756,6 +807,10 @@ function updateRequestPageVisibility() {
   setPage(showBrowse ? getActivePage() : 'search', { reload: false });
 }
 
+// Search runs as the singer types; only the newest request may render its results.
+let searchRequest = 0;
+let searchTimer = null;
+
 async function search() {
   if (requestsAreClosed()) {
     setPage('search');
@@ -766,8 +821,10 @@ async function search() {
     renderEmpty(resultsEl, 'Enter a search term.');
     return;
   }
+  const request = ++searchRequest;
   setMessage('Searching...');
   const response = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  if (request !== searchRequest) return;
   if (await applyRequestClosedResponse(response)) return;
   if (!response.ok) throw new Error(await response.text());
   const tracks = dedupeTracks(await response.json()).sort(compareTracks);
@@ -813,14 +870,30 @@ async function loadArtists(prefix = currentArtistPrefix) {
     setPage('search');
     return;
   }
-  currentArtistPrefix = prefix;
-  renderInitialSelector(artistInitials, currentArtistPrefix, (next) => loadArtists(next).catch((err) => setMessage(err.message, true)));
+  const request = ++browseRequest;
+  const filter = searchInput.value.trim();
+  artistInitials.hidden = Boolean(filter);
   artistSongsHeader.hidden = true;
   artistSongs.hidden = true;
   artistSongs.replaceChildren();
   artistList.hidden = false;
+  if (filter) {
+    renderEmpty(artistList, 'Searching artists…');
+    const response = await fetch(`/api/browse/songs?field=artist&q=${encodeURIComponent(filter)}`);
+    if (request !== browseRequest) return;
+    if (await applyRequestClosedResponse(response)) return;
+    if (!response.ok) throw new Error(await response.text());
+    renderTrackGroups(artistList, await response.json(), `No artists match "${filter}".`);
+    return;
+  }
+  const letters = await loadBrowseLetters('artists').catch(() => null);
+  if (request !== browseRequest) return;
+  currentArtistPrefix = pickInitial(letters, prefix);
+  prefix = currentArtistPrefix;
+  renderInitialSelector(artistInitials, currentArtistPrefix, (next) => loadArtists(next).catch((err) => setMessage(err.message, true)), letters);
   renderEmpty(artistList, 'Loading artists…');
   const response = await fetch(`/api/browse/artists?prefix=${encodeURIComponent(prefix)}`);
+  if (request !== browseRequest) return;
   if (await applyRequestClosedResponse(response)) return;
   if (!response.ok) throw new Error(await response.text());
   const artists = await response.json();
@@ -884,10 +957,26 @@ async function loadSongs(prefix = currentSongPrefix) {
     setPage('search');
     return;
   }
-  currentSongPrefix = prefix;
-  renderInitialSelector(songInitials, currentSongPrefix, (next) => loadSongs(next).catch((err) => setMessage(err.message, true)));
+  const request = ++browseRequest;
+  const filter = searchInput.value.trim();
+  songInitials.hidden = Boolean(filter);
+  if (filter) {
+    renderEmpty(songResults, 'Searching songs…');
+    const response = await fetch(`/api/browse/songs?field=title&q=${encodeURIComponent(filter)}`);
+    if (request !== browseRequest) return;
+    if (await applyRequestClosedResponse(response)) return;
+    if (!response.ok) throw new Error(await response.text());
+    renderTrackGroups(songResults, await response.json(), `No song titles match "${filter}".`);
+    return;
+  }
+  const letters = await loadBrowseLetters('songs').catch(() => null);
+  if (request !== browseRequest) return;
+  currentSongPrefix = pickInitial(letters, prefix);
+  prefix = currentSongPrefix;
+  renderInitialSelector(songInitials, currentSongPrefix, (next) => loadSongs(next).catch((err) => setMessage(err.message, true)), letters);
   renderEmpty(songResults, 'Loading songs…');
   const response = await fetch(`/api/browse/songs?prefix=${encodeURIComponent(prefix)}`);
+  if (request !== browseRequest) return;
   if (await applyRequestClosedResponse(response)) return;
   if (!response.ok) throw new Error(await response.text());
   const tracks = await response.json();
@@ -929,11 +1018,11 @@ function renderResultGroup(group) {
   info.append(title, artist, meta);
 
   const button = document.createElement('button');
-  button.className = 'icon-action-button';
+  button.className = 'icon-action-button result-add-button';
   button.type = 'button';
-  button.textContent = group.length > 1 ? '☰' : '⋯';
-  button.title = group.length > 1 ? 'Choose version' : 'Options';
-  button.setAttribute('aria-label', group.length > 1 ? 'Choose version' : 'Options');
+  button.textContent = '+';
+  button.title = group.length > 1 ? 'Choose a version to add' : 'Add or see options';
+  button.setAttribute('aria-label', `${group.length > 1 ? 'Choose a version of' : 'Add'} ${title.textContent}`);
   button.addEventListener('click', () => {
     if (group.length > 1) {
       openVersionDialog(group);
@@ -1037,11 +1126,11 @@ function openVersionDialog(group) {
     info.append(title, meta);
 
     const optionsButton = document.createElement('button');
-    optionsButton.className = 'icon-action-button';
+    optionsButton.className = 'icon-action-button result-add-button';
     optionsButton.type = 'button';
-    optionsButton.textContent = '⋯';
-    optionsButton.title = 'Options';
-    optionsButton.setAttribute('aria-label', 'Options');
+    optionsButton.textContent = '+';
+    optionsButton.title = 'Add or see options';
+    optionsButton.setAttribute('aria-label', `Add ${versionLabel(track) || title.textContent}`);
     optionsButton.addEventListener('click', () => openOptionsDialog(track));
 
     row.append(info, optionsButton);
@@ -1142,9 +1231,14 @@ async function refreshQueue() {
 
 function updateQueueFooter() {
   const nextSong = lastQueueItems.find((item) => item.status === 'playing') || lastQueueItems.find((item) => item.status === 'queued');
-  queueFooterSummary.textContent = nextSong
-    ? `${nextSong.status === 'playing' ? '▶ Now Playing' : '⏳ Up Next'}: ${trackLabel(nextSong)}`
-    : 'No songs in queue yet — tap to view';
+  const activeCount = lastQueueItems.filter((item) => item.status === 'playing' || item.status === 'queued').length;
+  queueFooterLabel.hidden = !nextSong;
+  queueFooterLabel.textContent = nextSong?.status === 'playing' ? 'Now singing' : 'Up next';
+  queueFooterSummary.textContent = nextSong ? trackLabel(nextSong) : 'Your queue is empty';
+  queueFooterSummary.classList.toggle('is-empty', !nextSong);
+  queueFooterBadge.hidden = activeCount === 0;
+  queueFooterBadge.textContent = String(activeCount);
+  queueFooter.setAttribute('aria-label', `My queue, ${activeCount} active ${activeCount === 1 ? 'song' : 'songs'}`);
 }
 
 function renderQueue() {
@@ -1410,23 +1504,34 @@ async function importHistory(file) {
   }
 }
 
-searchButton.addEventListener('click', () => {
-  searchInput.blur();
-  search().catch((err) => setMessage(err.message, true));
-});
 searchInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
+    clearTimeout(searchTimer);
     searchInput.blur();
-    search().catch((err) => setMessage(err.message, true));
+    runActiveQuery();
   }
 });
-searchInput.addEventListener('input', updateClearSearchVisibility);
+searchInput.addEventListener('input', () => {
+  updateClearSearchVisibility();
+  clearTimeout(searchTimer);
+  if (!searchInput.value.trim() && getActivePage() === 'search') {
+    searchRequest++;
+    renderEmpty(resultsEl, 'Search for a song to get started.');
+    setMessage('');
+    return;
+  }
+  // An empty filter on Artists / Songs goes straight back to the letter list.
+  searchTimer = setTimeout(runActiveQuery, searchInput.value.trim() ? 350 : 0);
+});
 clearSearchButton.addEventListener('click', () => {
+  clearTimeout(searchTimer);
+  searchRequest++;
   searchInput.value = '';
   updateClearSearchVisibility();
   renderEmpty(resultsEl, 'Search for a song to get started.');
   setMessage('');
+  if (getActivePage() !== 'search') runActiveQuery();
   searchInput.focus();
 });
 pageTabs.forEach((tab) => {
@@ -1480,6 +1585,12 @@ logoutButton.addEventListener('click', () => {
   setProfileMenu(false);
   logoutProfile();
 });
+for (const button of themeChoiceButtons) {
+  button.addEventListener('click', () => {
+    window.KaraokeTheme.setChoice(button.dataset.themeChoice);
+    renderThemePicker();
+  });
+}
 document.addEventListener('click', (event) => {
   if (!profileMenu.hidden && !profileMenu.contains(event.target) && !profileButton.contains(event.target)) {
     setProfileMenu(false);
@@ -1545,6 +1656,7 @@ importHistoryButton.addEventListener('click', () => {
 historyImportInput.addEventListener('change', () => importHistory(historyImportInput.files?.[0]));
 
 singerNameInput.value = localStorage.getItem(singerNameKey) || '';
+renderThemePicker();
 updateProfileButton();
 await loadSingerProfile().catch(() => {});
 updateClearSearchVisibility();

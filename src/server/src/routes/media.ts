@@ -113,13 +113,20 @@ mediaRouter.options('/{*path}', (req, res) => {
   res.status(204).end();
 });
 
-function getResolvedMediaRoot() {
-  const configuredRoot = process.env.MEDIA_ROOT || '/media';
-  try {
-    return fs.realpathSync.native(configuredRoot);
-  } catch {
-    return path.resolve(configuredRoot);
-  }
+// MEDIA_ROOT may list several folders, separated like PATH (';' on Windows, ':' elsewhere).
+export function getMediaRoots(): string[] {
+  const configured = (process.env.MEDIA_ROOT || '/media')
+    .split(path.delimiter)
+    .map((root) => root.trim())
+    .filter(Boolean);
+  const roots = (configured.length > 0 ? configured : ['/media']).map((root) => {
+    try {
+      return fs.realpathSync.native(root);
+    } catch {
+      return path.resolve(root);
+    }
+  });
+  return [...new Set(roots)];
 }
 
 function isPathWithinRoot(rootPath: string, candidatePath: string) {
@@ -168,14 +175,13 @@ export function remapMediaPathCandidate(candidatePath: string, mediaRoots: strin
 
 export function resolveExistingMediaPath(candidatePath: string): string | null {
   if (!candidatePath) return null;
-  const resolvedRoot = getResolvedMediaRoot();
-  const mediaRoots = getSearchableMediaRoots(resolvedRoot);
+  const roots = getMediaRoots();
 
   try {
     const resolvedPath = fs.realpathSync.native(candidatePath);
-    return isPathWithinRoot(resolvedRoot, resolvedPath) ? resolvedPath : null;
+    return roots.some((root) => isPathWithinRoot(root, resolvedPath)) ? resolvedPath : null;
   } catch {
-    return remapMediaPathCandidate(candidatePath, mediaRoots);
+    return remapMediaPathCandidate(candidatePath, [...new Set(roots.flatMap(getSearchableMediaRoots))]);
   }
 }
 

@@ -13,6 +13,8 @@ dev
 **/.build
 **/release
 **/*.tsbuildinfo
+# Development snapshots hold a database copy and its key; never bake them into an image.
+src/server/snapshots
 
 # Generated web JavaScript must not shadow the TypeScript source in Vite.
 src/web/src/**/*.js

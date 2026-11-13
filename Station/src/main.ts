@@ -1,5 +1,6 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, session, shell, Tray } from 'electron';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -13,6 +14,7 @@ type StationConfig = {
   databaseName?: string;
   databaseUser?: string;
   mediaRoot?: string;
+  mediaFolders?: string[];
   allowedOrigins?: string[] | string;
   allowedNetworks?: string[] | string;
   runMigrations?: boolean;
@@ -27,13 +29,17 @@ type RuntimePaths = {
   webDistDir: string;
   ffmpegDir: string;
   postgresDir: string;
+  ytdlpDir: string;
+  toolsDir: string;
   postgresDataDir: string;
   postgresRunDir: string;
   downloadsDir: string;
   playlistsDir: string;
+  snapshotsDir: string;
   bootstrapCredentialsPath: string;
 };
 
+const IS_WINDOWS = process.platform === 'win32';
 const DEFAULT_PORT = 5174;
 const DEFAULT_POSTGRES_PORT = 55432;
 const DEFAULT_DATABASE_NAME = 'karaokedock';
@@ -49,7 +55,8 @@ const DEFAULT_STATION_CONFIG: Required<StationConfig> = {
   databaseName: DEFAULT_DATABASE_NAME,
   databaseUser: DEFAULT_DATABASE_USER,
   databaseUrl: '',
-  mediaRoot: '/',
+  mediaRoot: '',
+  mediaFolders: [],
   allowedOrigins: [],
   allowedNetworks: [],
   runMigrations: false,
@@ -58,15 +65,25 @@ const DEFAULT_STATION_CONFIG: Required<StationConfig> = {
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.userAgentFallback = STATION_USER_AGENT;
 
-let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let stationStatus: 'starting' | 'running' | 'stopped' = 'starting';
 let playerWindow: BrowserWindow | null = null;
 let serverProcess: ChildProcess | null = null;
+let serverEnv: NodeJS.ProcessEnv | null = null;
 let postgresProcess: ChildProcess | null = null;
 let runtimePaths: RuntimePaths | null = null;
+// Pages open at localhost: YouTube refuses embeds on a page served from 127.0.0.1 (error 150).
 let stationUrl = '';
+// Station itself checks the server over IPv4 loopback, where it listens.
+let stationHealthUrl = '';
 let isQuitting = false;
 let startupWarning: string | null = null;
 let youtubeEmbedHeadersConfigured = false;
+
+// Started by "Start at Login": stay in the tray instead of opening the browser.
+const LAUNCHED_HIDDEN_ARG = '--hidden';
+const launchedHidden = process.argv.includes(LAUNCHED_HIDDEN_ARG) ||
+  (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin);
 
 function resolveAppIconPath() {
   const candidate = app.isPackaged
@@ -92,10 +109,13 @@ function resolveRuntimePaths(): RuntimePaths {
       webDistDir: path.join(process.resourcesPath, 'web-dist'),
       ffmpegDir: path.join(process.resourcesPath, 'ffmpeg'),
       postgresDir: path.join(process.resourcesPath, 'postgres'),
+      ytdlpDir: path.join(process.resourcesPath, 'yt-dlp'),
+      toolsDir: path.join(dataDir, 'bin'),
       postgresDataDir: path.join(dataDir, 'postgres-data'),
       postgresRunDir: path.join(dataDir, 'postgres-run'),
       downloadsDir: path.join(dataDir, 'downloads'),
       playlistsDir: path.join(dataDir, 'playlists'),
+      snapshotsDir: path.join(dataDir, 'snapshots'),
       bootstrapCredentialsPath: path.join(dataDir, 'bootstrap-admin.json'),
     };
   }
@@ -115,10 +135,13 @@ function resolveRuntimePaths(): RuntimePaths {
       : path.join(repoRoot, 'src', 'web', 'dist'),
     ffmpegDir: process.env.KARAOKEDOCK_FFMPEG_DIR || stationFfmpegDir,
     postgresDir: process.env.KARAOKEDOCK_POSTGRES_DIR || stationPostgresDir,
+    ytdlpDir: path.join(repoRoot, 'Station', '.build', 'yt-dlp'),
+    toolsDir: path.join(dataDir, 'bin'),
     postgresDataDir: path.join(dataDir, 'postgres-data'),
     postgresRunDir: path.join(dataDir, 'postgres-run'),
     downloadsDir: path.join(dataDir, 'downloads'),
     playlistsDir: path.join(dataDir, 'playlists'),
+    snapshotsDir: path.join(dataDir, 'snapshots'),
     bootstrapCredentialsPath: path.join(dataDir, 'bootstrap-admin.json'),
   };
 }
@@ -230,37 +253,110 @@ function normalizeBindHost(value: unknown) {
   return host || DEFAULT_STATION_CONFIG.bindHost;
 }
 
+// The folders KaraokeDock may play media from. mediaRoot is the older single-folder setting.
+function getMediaFolders(config: StationConfig): string[] {
+  const folders = parseStringList(config.mediaFolders);
+  if (folders.length > 0) return folders;
+  const legacy = String(config.mediaRoot || '').trim();
+  // '/' on Windows (all of C:\) was only ever the old default, not a choice.
+  return legacy && !(IS_WINDOWS && legacy === '/') ? [legacy] : [];
+}
+
+function saveStationConfig(paths: RuntimePaths, changes: StationConfig) {
+  let current: StationConfig = {};
+  try {
+    current = JSON.parse(fs.readFileSync(paths.configPath, 'utf8')) as StationConfig;
+  } catch {}
+  fs.writeFileSync(paths.configPath, `${JSON.stringify({ ...current, ...changes }, null, 2)}\n`, 'utf8');
+}
+
+async function chooseMediaFolders(current: string[]) {
+  const result = await dialog.showOpenDialog({
+    title: 'Choose your karaoke media folders',
+    buttonLabel: 'Use These Folders',
+    defaultPath: current[0] || app.getPath('home'),
+    properties: ['openDirectory', 'multiSelections', 'createDirectory'],
+  });
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths;
+}
+
+// First start: ask which folders hold the karaoke files. Cancelling uses the home folder.
+async function ensureMediaFolders(paths: RuntimePaths, config: StationConfig): Promise<StationConfig> {
+  if (getMediaFolders(config).length > 0) return config;
+  await dialog.showMessageBox({
+    type: 'info',
+    message: 'Choose your karaoke media folders',
+    detail:
+      'Pick the folder or folders that hold your karaoke files. They can be on different drives. ' +
+      'KaraokeDock only plays media from these folders.\n\n' +
+      'You can change them later from the tray menu: Media Folders…',
+    buttons: ['Choose Folders…'],
+  });
+  const folders = await chooseMediaFolders([]) ?? [app.getPath('home')];
+  saveStationConfig(paths, { mediaFolders: folders });
+  return { ...config, mediaFolders: folders };
+}
+
 function buildServerEnv(paths: RuntimePaths, config: StationConfig, port: number): NodeJS.ProcessEnv {
   const allowedOrigins = getAllowedOrigins(config, port);
-  const mediaRoot = String(config.mediaRoot || '').trim() || '/';
+  const mediaFolders = getMediaFolders(config);
 
-  fs.mkdirSync(mediaRoot, { recursive: true });
   fs.mkdirSync(paths.downloadsDir, { recursive: true });
   fs.mkdirSync(paths.playlistsDir, { recursive: true });
   const ffmpegBinDir = path.join(paths.ffmpegDir, 'bin');
   const ffmpegLibDir = path.join(paths.ffmpegDir, 'lib');
 
-  return {
+  installBundledYtDlp(paths);
+  return withPathPrepended({
     ...process.env,
     PORT: String(port),
     WEB_DIST_DIR: paths.webDistDir,
-    WEB_APP_URL: `http://127.0.0.1:${port}`,
+    WEB_APP_URL: `http://localhost:${port}`,
     WEB_RUNTIME_API_BASE: '',
     STATION_MODE: 'true',
     BIND_HOST: normalizeBindHost(config.bindHost),
-    MEDIA_ROOT: mediaRoot,
+    MEDIA_ROOT: (mediaFolders.length > 0 ? mediaFolders : [app.getPath('home')]).join(path.delimiter),
     YTDLP_DOWNLOAD_LOCATION: paths.downloadsDir,
     BREAK_MUSIC_PLAYLISTS_FOLDER: paths.playlistsDir,
+    SNAPSHOTS_DIR: paths.snapshotsDir,
     ORIGIN: allowedOrigins.join(','),
     TRUST_PROXY: process.env.TRUST_PROXY || 'false',
     BOOTSTRAP_CREDENTIALS_FILE: paths.bootstrapCredentialsPath,
-    PATH: `${ffmpegBinDir}${path.delimiter}${process.env.PATH || ''}`,
+    STATION_CONTROL_URL: stationControl?.url ?? '',
+    STATION_CONTROL_TOKEN: stationControl?.token ?? '',
     LD_LIBRARY_PATH: [ffmpegLibDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter),
-  };
+  }, [paths.toolsDir, ffmpegBinDir]);
+}
+
+function executableName(binary: string) {
+  return IS_WINDOWS ? `${binary}.exe` : binary;
+}
+
+// Windows keeps PATH as "Path"; replace whichever spelling is present so the child sees one PATH.
+function withPathPrepended(env: NodeJS.ProcessEnv, dirs: string[]): NodeJS.ProcessEnv {
+  const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
+  const next = { ...env };
+  const current = next[pathKey] || '';
+  for (const key of Object.keys(next)) {
+    if (key.toUpperCase() === 'PATH') delete next[key];
+  }
+  next.PATH = [...dirs, current].filter(Boolean).join(path.delimiter);
+  return next;
+}
+
+// The bundled yt-dlp is copied to a writable folder so "Update yt-dlp" (yt-dlp -U) can replace it.
+function installBundledYtDlp(paths: RuntimePaths) {
+  const binary = executableName('yt-dlp');
+  const bundled = path.join(paths.ytdlpDir, binary);
+  const installed = path.join(paths.toolsDir, binary);
+  if (!fs.existsSync(bundled) || fs.existsSync(installed)) return;
+  fs.mkdirSync(paths.toolsDir, { recursive: true });
+  fs.copyFileSync(bundled, installed);
+  if (!IS_WINDOWS) fs.chmodSync(installed, 0o755);
 }
 
 function getFfmpegBinary(paths: RuntimePaths, binary: string) {
-  return path.join(paths.ffmpegDir, 'bin', binary);
+  return path.join(paths.ffmpegDir, 'bin', executableName(binary));
 }
 
 function validateFfmpegRuntime(paths: RuntimePaths, env: NodeJS.ProcessEnv) {
@@ -291,7 +387,18 @@ function validateFfmpegRuntime(paths: RuntimePaths, env: NodeJS.ProcessEnv) {
 }
 
 function getPostgresBinary(paths: RuntimePaths, binary: string) {
-  return path.join(paths.postgresDir, 'bin', binary);
+  return path.join(paths.postgresDir, 'bin', executableName(binary));
+}
+
+// The Linux bundle uses Fedora's share/pgsql and lib/pgsql; the Windows (EDB) bundle uses share and lib.
+function getPostgresShareDir(paths: RuntimePaths) {
+  const fedoraLayout = path.join(paths.postgresDir, 'share', 'pgsql');
+  return fs.existsSync(fedoraLayout) ? fedoraLayout : path.join(paths.postgresDir, 'share');
+}
+
+function getPostgresLibDir(paths: RuntimePaths) {
+  const fedoraLayout = path.join(paths.postgresDir, 'lib', 'pgsql');
+  return fs.existsSync(fedoraLayout) ? fedoraLayout : path.join(paths.postgresDir, 'lib');
 }
 
 function getPostgresEnv(paths: RuntimePaths, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -303,11 +410,10 @@ function getPostgresEnv(paths: RuntimePaths, env: NodeJS.ProcessEnv): NodeJS.Pro
     env.LD_LIBRARY_PATH,
   ].filter(Boolean);
 
-  return {
+  return withPathPrepended({
     ...env,
-    PATH: `${path.join(paths.postgresDir, 'bin')}${path.delimiter}${env.PATH || ''}`,
     LD_LIBRARY_PATH: libPaths.join(path.delimiter),
-  };
+  }, [path.join(paths.postgresDir, 'bin')]);
 }
 
 function validatePostgresRuntime(paths: RuntimePaths) {
@@ -401,8 +507,8 @@ async function initializeManagedPostgres(paths: RuntimePaths, env: NodeJS.Proces
       '-A', 'trust',
       '--encoding=UTF8',
       '--locale=C',
-      '-L', path.join(paths.postgresDir, 'share', 'pgsql'),
-      '-c', `dynamic_library_path=${path.join(paths.postgresDir, 'lib', 'pgsql')}`,
+      '-L', getPostgresShareDir(paths),
+      '-c', `dynamic_library_path=${getPostgresLibDir(paths)}`,
     ],
     { cwd: paths.dataDir, env, label: 'postgres-initdb' },
   );
@@ -418,9 +524,10 @@ function startManagedPostgres(paths: RuntimePaths, env: NodeJS.ProcessEnv, port:
       '-D', paths.postgresDataDir,
       '-h', '127.0.0.1',
       '-p', String(port),
-      '-k', paths.postgresRunDir,
+      // Everything connects over TCP; Windows gets no Unix socket at all.
+      ...(IS_WINDOWS ? ['-c', 'unix_socket_directories='] : ['-k', paths.postgresRunDir]),
       '-c', 'listen_addresses=127.0.0.1',
-      '-c', `dynamic_library_path=${path.join(paths.postgresDir, 'lib', 'pgsql')}`,
+      '-c', `dynamic_library_path=${getPostgresLibDir(paths)}`,
     ],
     { cwd: paths.dataDir, env, label: 'postgres' },
   );
@@ -556,6 +663,8 @@ function spawnProcess(
     cwd: options.cwd,
     env: options.env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Windows only runs .cmd files (npm.cmd in development) through a shell.
+    shell: IS_WINDOWS && command.endsWith('.cmd'),
   });
 
   child.stdout.on('data', (chunk) => {
@@ -585,24 +694,32 @@ function waitForExit(child: ChildProcess, label: string) {
   });
 }
 
-async function runMigrations(paths: RuntimePaths, env: NodeJS.ProcessEnv) {
-  if (app.isPackaged) {
-    const child = spawnProcess(paths, 'sh', [path.join(paths.serverDir, 'scripts', 'migrate.sh')], {
-      cwd: paths.serverDir,
-      env,
-      label: 'migrate',
-    });
-    await waitForExit(child, 'migrations');
-    return;
-  }
+// Runs the psql steps listed in the server's scripts/migrate.sh (the single list of migrations)
+// directly, so no shell is needed. A step ending in "|| true" may fail.
+function readMigrationSteps(serverDir: string) {
+  const script = fs.readFileSync(path.join(serverDir, 'scripts', 'migrate.sh'), 'utf8');
+  return script.split(/\r?\n/)
+    .map((line) => /^\s*psql\b.*\s-f\s+(\S+\.sql)(\s*\|\|\s*true)?\s*$/.exec(line))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) => ({ file: match[1], optional: Boolean(match[2]) }));
+}
 
-  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const child = spawnProcess(paths, npmCommand, ['run', 'migrate'], {
-    cwd: paths.serverDir,
-    env,
-    label: 'migrate',
-  });
-  await waitForExit(child, 'migrations');
+async function runMigrations(paths: RuntimePaths, env: NodeJS.ProcessEnv) {
+  const steps = readMigrationSteps(paths.serverDir);
+  if (steps.length === 0) throw new Error('No migrations found in scripts/migrate.sh');
+
+  for (const step of steps) {
+    try {
+      await runCommand(
+        paths,
+        getPostgresBinary(paths, 'psql'),
+        ['-v', 'ON_ERROR_STOP=1', env.DATABASE_URL || '', '-f', step.file],
+        { cwd: paths.serverDir, env, label: `migrate ${step.file}` },
+      );
+    } catch (error) {
+      if (!step.optional) throw error;
+    }
+  }
 }
 
 function startServerProcess(paths: RuntimePaths, env: NodeJS.ProcessEnv) {
@@ -658,9 +775,87 @@ function waitForHealth(url: string, timeoutMs: number) {
   });
 }
 
+// ---- Station control ----
+// A loopback-only endpoint the server calls for things only the desktop app can do, like the
+// native folder picker behind Admin's Browse buttons. Each launch gets a new random token.
+
+let stationControl: { url: string; token: string } | null = null;
+let folderPickerOpen = false;
+
+async function pickFolderOnTop(options: { title?: unknown; defaultPath?: unknown }) {
+  // An invisible always-on-top owner window keeps the dialog in front of the browser.
+  const owner = new BrowserWindow({
+    width: 1, height: 1, show: false, frame: false, transparent: true,
+    skipTaskbar: true, alwaysOnTop: true, resizable: false,
+  });
+  try {
+    owner.setAlwaysOnTop(true, 'screen-saver');
+    owner.center();
+    owner.show();
+    owner.focus();
+    const defaultPath = typeof options.defaultPath === 'string' && fs.existsSync(options.defaultPath)
+      ? options.defaultPath : undefined;
+    const result = await dialog.showOpenDialog(owner, {
+      title: typeof options.title === 'string' && options.title.trim() ? options.title.slice(0, 200) : 'Choose a folder',
+      defaultPath,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  } finally {
+    owner.destroy();
+  }
+}
+
+function startStationControl() {
+  const token = crypto.randomBytes(32).toString('hex');
+  const server = http.createServer((req, res) => {
+    const send = (status: number, body: unknown) => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method !== 'POST' || req.url !== '/pick-folder' || req.headers.authorization !== `Bearer ${token}`) {
+      send(404, { error: 'Not found' });
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 10_000) req.destroy();
+    });
+    req.on('end', async () => {
+      if (folderPickerOpen) {
+        send(409, { error: 'A folder picker is already open on the Station' });
+        return;
+      }
+      folderPickerOpen = true;
+      try {
+        send(200, { path: await pickFolderOnTop(body ? JSON.parse(body) : {}) });
+      } catch (error) {
+        send(500, { error: String(error) });
+      } finally {
+        folderPickerOpen = false;
+      }
+    });
+  });
+  return new Promise<{ url: string; token: string }>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Station control did not start'));
+        return;
+      }
+      server.unref();
+      resolve({ url: `http://127.0.0.1:${address.port}`, token });
+    });
+  });
+}
+
 async function startKaraokeDockServer(paths: RuntimePaths, config: StationConfig) {
+  stationControl = await startStationControl();
   const port = normalizePort(process.env.PORT || config.port);
-  stationUrl = `http://127.0.0.1:${port}`;
+  stationUrl = `http://localhost:${port}`;
+  stationHealthUrl = `http://127.0.0.1:${port}`;
   const baseEnv = buildServerEnv(paths, config, port);
   validateFfmpegRuntime(paths, baseEnv);
   const database = await prepareDatabase(paths, config, baseEnv);
@@ -672,18 +867,57 @@ async function startKaraokeDockServer(paths: RuntimePaths, config: StationConfig
 
   await applyStationDatabaseDefaults(paths, env);
 
+  serverEnv = env;
+  await launchServer(paths, env);
+}
+
+function launchServer(paths: RuntimePaths, env: NodeJS.ProcessEnv) {
   const child = startServerProcess(paths, env);
   serverProcess = child;
   child.once('exit', (code, signal) => {
-    if (!isQuitting) {
-      dialog.showErrorBox(
-        'KaraokeDock Station server stopped',
-        `The local KaraokeDock server exited with code ${code ?? 'null'}${signal ? ` and signal ${signal}` : ''}.`,
-      );
-    }
+    // A server replaced by a restart (serverProcess moved on) is expected to exit.
+    if (isQuitting || serverProcess !== child) return;
+    setStationStatus('stopped');
+    dialog.showErrorBox(
+      'KaraokeDock Station server stopped',
+      `The local KaraokeDock server exited with code ${code ?? 'null'}${signal ? ` and signal ${signal}` : ''}.`,
+    );
   });
+  return waitForHealth(stationHealthUrl, HEALTH_TIMEOUT_MS);
+}
 
-  await waitForHealth(stationUrl, HEALTH_TIMEOUT_MS);
+// Tray › Media Folders…: choose new folders and restart the server (Postgres keeps running).
+async function changeMediaFolders() {
+  if (!runtimePaths || !serverEnv || stationStatus !== 'running') return;
+  const current = getMediaFolders(readStationConfig(runtimePaths));
+  const response = await showStationMessageBox({
+    type: 'info',
+    message: 'Media folders',
+    detail: `KaraokeDock plays media from:\n\n${current.join('\n') || '(none chosen)'}`,
+    buttons: ['Choose Folders…', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response.response !== 0) return;
+  const folders = await chooseMediaFolders(current);
+  if (!folders) return;
+
+  saveStationConfig(runtimePaths, { mediaFolders: folders });
+  setStationStatus('starting');
+  const previous = serverProcess;
+  serverProcess = null;
+  if (previous && previous.exitCode === null) {
+    previous.kill();
+    await waitForProcessExit(previous, 5_000);
+  }
+  serverEnv = { ...serverEnv, MEDIA_ROOT: folders.join(path.delimiter) };
+  try {
+    await launchServer(runtimePaths, serverEnv);
+    setStationStatus('running');
+  } catch (error) {
+    setStationStatus('stopped');
+    dialog.showErrorBox('KaraokeDock Station server did not restart', String(error));
+  }
 }
 
 function configureYouTubeEmbedHeaders() {
@@ -740,7 +974,7 @@ function readBootstrapCredentials(paths: RuntimePaths): BootstrapCredentialsFile
 }
 
 function showStationMessageBox(options: Electron.MessageBoxOptions) {
-  return mainWindow ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options);
+  return playerWindow ? dialog.showMessageBox(playerWindow, options) : dialog.showMessageBox(options);
 }
 
 async function showBootstrapCredentials(options: { automatic?: boolean } = {}) {
@@ -781,45 +1015,8 @@ async function showBootstrapCredentials(options: { automatic?: boolean } = {}) {
   }
 }
 
-function createMainWindow() {
-  if (mainWindow) return mainWindow;
-
-  mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    title: 'KaraokeDock Station',
-    icon: resolveAppIconPath(),
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  mainWindow.webContents.setUserAgent(STATION_USER_AGENT);
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    try {
-      const parsed = new URL(url);
-      if (parsed.origin === stationUrl && parsed.pathname === '/player') {
-        void openPlayerWindow();
-        return { action: 'deny' };
-      }
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        void shell.openExternal(url);
-        return { action: 'deny' };
-      }
-    } catch {}
-    return { action: 'allow' };
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  void mainWindow.loadURL(`${stationUrl}/host`);
-  return mainWindow;
-}
-
+// The Player stays a Station window: it may autoplay with sound and gets the YouTube embed
+// headers, which a regular browser tab does not.
 async function openPlayerWindow() {
   if (playerWindow) {
     playerWindow.show();
@@ -840,32 +1037,128 @@ async function openPlayerWindow() {
     },
   });
   playerWindow.webContents.setUserAgent(STATION_USER_AGENT);
+  playerWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  app.dock?.show();
 
   playerWindow.on('closed', () => {
     playerWindow = null;
+    app.dock?.hide();
   });
 
   await playerWindow.loadURL(`${stationUrl}/player`);
 }
 
-function showAppPath(appPath: string) {
+// Host, Admin and Requests open in the default browser; on the Station machine the
+// browser is signed in as admin automatically (localhost sign-in).
+async function showAppPath(appPath: string) {
+  if (!stationUrl || stationStatus !== 'running') return;
   const normalizedPath = appPath.startsWith('/') ? appPath : `/${appPath}`;
-  const win = createMainWindow();
-  win.show();
-  win.focus();
-  return win.loadURL(`${stationUrl}${normalizedPath}`);
+  try {
+    await shell.openExternal(`${stationUrl}${normalizedPath}`);
+  } catch (error) {
+    dialog.showErrorBox('Unable to open the browser', `Open ${stationUrl}${normalizedPath} in your browser.\n\n${String(error)}`);
+  }
 }
 
+// ---- Start at login ----
+// Windows and macOS use the system login items; Linux uses an XDG autostart entry.
+
+function linuxAutostartPath() {
+  return path.join(app.getPath('appData'), 'autostart', 'karaokedock-station.desktop');
+}
+
+function quoteDesktopExecArg(value: string) {
+  return `"${value.replace(/(["`$\\])/g, '\\$1')}"`;
+}
+
+function isStartAtLoginEnabled() {
+  if (process.platform === 'linux') return fs.existsSync(linuxAutostartPath());
+  return app.getLoginItemSettings({ args: [LAUNCHED_HIDDEN_ARG] }).openAtLogin;
+}
+
+function setStartAtLogin(enabled: boolean) {
+  if (process.platform !== 'linux') {
+    app.setLoginItemSettings({ openAtLogin: enabled, args: [LAUNCHED_HIDDEN_ARG] });
+    return;
+  }
+
+  const autostartPath = linuxAutostartPath();
+  if (!enabled) {
+    fs.rmSync(autostartPath, { force: true });
+    return;
+  }
+  // An AppImage runs from a temporary mount; APPIMAGE is the path of the file itself.
+  const command = process.env.APPIMAGE
+    ? [process.env.APPIMAGE]
+    : app.isPackaged ? [process.execPath] : [process.execPath, app.getAppPath()];
+  fs.mkdirSync(path.dirname(autostartPath), { recursive: true });
+  fs.writeFileSync(autostartPath, [
+    '[Desktop Entry]',
+    'Type=Application',
+    'Name=KaraokeDock Station',
+    'Comment=Start KaraokeDock Station in the system tray',
+    `Exec=${[...command, LAUNCHED_HIDDEN_ARG].map(quoteDesktopExecArg).join(' ')}`,
+    ...(resolveAppIconPath() ? [`Icon=${resolveAppIconPath()}`] : []),
+    'Terminal=false',
+    'X-GNOME-Autostart-enabled=true',
+    '',
+  ].join('\n'));
+}
+
+// ---- Tray and menus ----
+
+function stationMenuItems(): Electron.MenuItemConstructorOptions[] {
+  const running = stationStatus === 'running';
+  const statusLabel = {
+    starting: 'Starting KaraokeDock…',
+    running: `Running at ${stationUrl}`,
+    stopped: 'KaraokeDock server stopped',
+  }[stationStatus];
+
+  return [
+    { label: statusLabel, enabled: false },
+    { type: 'separator' },
+    { label: 'Open Host', enabled: running, click: () => void showAppPath('/host') },
+    { label: 'Open Admin', enabled: running, click: () => void showAppPath('/admin') },
+    { label: 'Open Requests', enabled: running, click: () => void showAppPath('/requests') },
+    { label: 'Open Player Window', enabled: running, accelerator: 'CommandOrControl+P', click: () => void openPlayerWindow() },
+    { type: 'separator' },
+    { label: 'Media Folders…', enabled: running, click: () => void changeMediaFolders() },
+    {
+      label: 'Start at Login',
+      type: 'checkbox',
+      checked: isStartAtLoginEnabled(),
+      click: (item) => {
+        try {
+          setStartAtLogin(item.checked);
+        } catch (error) {
+          dialog.showErrorBox('Unable to change Start at Login', String(error));
+        }
+        refreshMenus();
+      },
+    },
+    {
+      label: 'Open Station Config',
+      click: () => {
+        if (runtimePaths) void shell.openPath(runtimePaths.configPath);
+      },
+    },
+    { label: 'Show Initial Admin Credentials', click: () => void showBootstrapCredentials() },
+    { type: 'separator' },
+    { label: 'Quit KaraokeDock Station', role: 'quit' },
+  ];
+}
+
+// The application menu only shows on the Player window (and the macOS menu bar).
 function createApplicationMenu() {
   const template: Electron.MenuItemConstructorOptions[] = [
+    { label: 'KaraokeDock', submenu: stationMenuItems() },
     {
-      label: 'KaraokeDock',
+      label: 'View',
       submenu: [
-        { label: 'Host', click: () => void showAppPath('/host') },
-        { label: 'Admin', click: () => void showAppPath('/admin') },
-        { label: 'Requests', click: () => void showAppPath('/requests') },
-        { type: 'separator' },
-        { label: 'Open Player Window', accelerator: 'CommandOrControl+P', click: () => void openPlayerWindow() },
         {
           label: 'Toggle Player Full Screen',
           accelerator: 'F11',
@@ -874,19 +1167,6 @@ function createApplicationMenu() {
           },
         },
         { type: 'separator' },
-        {
-          label: 'Open Station Config',
-          click: () => {
-            if (runtimePaths) void shell.openPath(runtimePaths.configPath);
-          },
-        },
-        { label: 'Show Initial Admin Credentials', click: () => void showBootstrapCredentials() },
-        { label: 'Quit', role: 'quit' },
-      ],
-    },
-    {
-      label: 'View',
-      submenu: [
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
@@ -899,6 +1179,31 @@ function createApplicationMenu() {
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function createTray() {
+  const iconPath = resolveAppIconPath();
+  let image = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+  if (!image.isEmpty()) {
+    const size = process.platform === 'win32' ? 16 : process.platform === 'darwin' ? 18 : 22;
+    image = image.resize({ width: size, height: size, quality: 'best' });
+  }
+  tray = new Tray(image);
+  tray.setToolTip('KaraokeDock Station');
+  // Windows shows the menu on right-click only; open it on left-click as well.
+  if (process.platform === 'win32') tray.on('click', () => tray?.popUpContextMenu());
+}
+
+function refreshMenus() {
+  createApplicationMenu();
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate(stationMenuItems()));
+  tray.setToolTip(stationStatus === 'running' ? `KaraokeDock Station\n${stationUrl}` : 'KaraokeDock Station');
+}
+
+function setStationStatus(status: typeof stationStatus) {
+  stationStatus = status;
+  refreshMenus();
 }
 
 function registerIpcHandlers() {
@@ -928,22 +1233,27 @@ function registerIpcHandlers() {
 
 async function bootstrap() {
   runtimePaths = resolveRuntimePaths();
+  app.dock?.hide();
+  createTray();
+  refreshMenus();
 
   try {
     require(path.join(runtimePaths.serverDir, 'scripts', 'check-runtime.cjs'));
-    const config = readStationConfig(runtimePaths);
-    createApplicationMenu();
+    const config = await ensureMediaFolders(runtimePaths, readStationConfig(runtimePaths));
     registerIpcHandlers();
     await startKaraokeDockServer(runtimePaths, config);
   } catch (error) {
     console.error(error);
     dialog.showErrorBox('Unable to start KaraokeDock Station', String(error));
+    isQuitting = true;
+    await stopServices();
     app.exit(1);
     return;
   }
 
   configureYouTubeEmbedHeaders();
-  createMainWindow();
+  setStationStatus('running');
+  if (!launchedHidden) void showAppPath('/host');
   if (startupWarning) {
     setTimeout(() => {
       void showStationMessageBox({
@@ -955,36 +1265,77 @@ async function bootstrap() {
   }
 }
 
+function waitForProcessExit(child: ChildProcess | null, timeoutMs: number) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+async function stopServices() {
+  if (serverProcess && serverProcess.exitCode === null) {
+    serverProcess.kill();
+    await waitForProcessExit(serverProcess, 5_000);
+  }
+
+  if (!postgresProcess || postgresProcess.exitCode !== null || !runtimePaths) return;
+  // A fast shutdown, so the next start needs no crash recovery. On Windows kill() would be a hard kill.
+  try {
+    await runCommand(
+      runtimePaths,
+      getPostgresBinary(runtimePaths, 'pg_ctl'),
+      ['stop', '-D', runtimePaths.postgresDataDir, '-m', 'fast', '-w', '-t', '20'],
+      { cwd: runtimePaths.dataDir, env: getPostgresEnv(runtimePaths, process.env), label: 'postgres-stop' },
+    );
+  } catch {
+    postgresProcess.kill();
+  }
+  if (!await waitForProcessExit(postgresProcess, 10_000)) postgresProcess.kill('SIGKILL');
+}
+
+// A separate data folder is a separate Station, with its own single-instance lock.
+if (process.env.KARAOKEDOCK_STATION_DATA_DIR) app.setPath('userData', process.env.KARAOKEDOCK_STATION_DATA_DIR);
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // Launching Station again while it runs opens the Host page.
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    } else if (stationUrl) {
-      createMainWindow();
-    }
+    void showAppPath('/host');
   });
 
-  app.on('before-quit', () => {
+  // Quitting waits for the server and Postgres to stop, then quits for real.
+  let servicesStopped = false;
+  app.on('before-quit', (event) => {
+    if (servicesStopped) return;
+    event.preventDefault();
+    if (isQuitting) return;
     isQuitting = true;
-    if (serverProcess && !serverProcess.killed) serverProcess.kill();
-    if (postgresProcess && !postgresProcess.killed) postgresProcess.kill();
+    void stopServices().finally(() => {
+      servicesStopped = true;
+      app.quit();
+    });
   });
 
   app.whenReady().then(() => {
     void bootstrap();
   });
 
+  // macOS: clicking the app again (Dock, Finder) opens the Host page.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0 && stationUrl) {
-      createMainWindow();
-    }
+    void showAppPath('/host');
   });
 
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
-  });
+  // Station lives in the tray: closing the Player window does not quit it. Quit is in the tray menu.
+  app.on('window-all-closed', () => {});
+
+  // Logging out or shutting down signals the process; quit properly so Postgres and the server stop too.
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.on(signal, () => app.quit());
+  }
 }

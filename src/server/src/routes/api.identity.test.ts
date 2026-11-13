@@ -415,6 +415,36 @@ describe('Host User permissions', () => {
   });
 });
 
+describe('Requests page venue theme', () => {
+  it('publishes the saved theme and falls back to Midnight for missing or unknown values', async () => {
+    queryMock.mockImplementation(async (sql) => sql.includes('WHERE key = ANY')
+      ? { rows: [{ key: 'requests.theme', value: 'stage' }] } as any
+      : { rows: [] } as any);
+    expect(await (await request('/settings/public', undefined, 'GET', null)).json()).toMatchObject({ 'requests.theme': 'stage' });
+
+    queryMock.mockImplementation(async (sql) => sql.includes('WHERE key = ANY')
+      ? { rows: [{ key: 'requests.theme', value: '<script>' }] } as any
+      : { rows: [] } as any);
+    expect(await (await request('/settings/public', undefined, 'GET', null)).json()).toMatchObject({ 'requests.theme': 'midnight' });
+  });
+
+  it('lets hosts save a known theme and rejects anything else', async () => {
+    const saved = await request('/host/settings/request-theme', { theme: 'daylight' }, 'PUT');
+    expect(saved.status).toBe(200);
+    expect(setSetting).toHaveBeenCalledWith('requests.theme', 'daylight');
+
+    vi.mocked(setSetting).mockClear();
+    expect((await request('/host/settings/request-theme', { theme: 'neon' }, 'PUT')).status).toBe(400);
+    expect((await request('/host/settings/request-theme', {}, 'PUT')).status).toBe(400);
+    expect(setSetting).not.toHaveBeenCalled();
+  });
+
+  it('requires a host session to change the theme', async () => {
+    expect((await request('/host/settings/request-theme', { theme: 'stage' }, 'PUT', null)).status).toBe(403);
+    expect(setSetting).not.toHaveBeenCalled();
+  });
+});
+
 describe('OIDC client secret boundaries', () => {
   it('masks the legacy secret in generic settings and prevents response caching', async () => {
     queryMock.mockResolvedValue({

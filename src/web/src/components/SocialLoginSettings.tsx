@@ -3,10 +3,8 @@ import { api, API_BASE } from '../api'
 import { SOCIAL_PROVIDERS, SOCIAL_PROVIDER_NAMES, type SocialProvider, type SocialSettings } from '../social-login'
 import SocialProviderIcon from './SocialProviderIcon'
 
-export default function SocialLoginSettings({ sessionToken, expanded, onToggle }: {
+export default function SocialLoginSettings({ sessionToken }: {
   sessionToken: string
-  expanded: boolean
-  onToggle: () => void
 }) {
   const [settings, setSettings] = useState<SocialSettings | null>(null)
   const [secretChanged, setSecretChanged] = useState({ google: false, facebook: false })
@@ -70,13 +68,10 @@ export default function SocialLoginSettings({ sessionToken, expanded, onToggle }
 
   return (
     <div className="card">
-      <div className="card-header" onClick={onToggle}>
+      <div className="card-header">
         <h2><span className="material-symbols-rounded" aria-hidden="true" style={{ verticalAlign: 'text-bottom', marginRight: 8 }}>account_circle</span>Singer Social Login</h2>
-        <button className="card-toggle" type="button" aria-expanded={expanded} aria-controls="social-login-settings">
-          {expanded ? 'Collapse' : 'Expand'}
-        </button>
       </div>
-      <div id="social-login-settings" className={`card-content ${expanded ? 'expanded' : 'collapsed'}`}>
+      <div id="social-login-settings" className="card-content">
         {error && <div className="error-msg" role="alert">{error}</div>}
         {saved && <div className="banner success" role="status">Social login settings saved.</div>}
         {!settings ? error ? (

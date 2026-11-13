@@ -47,6 +47,9 @@ Keep downloads, uploaded images, exported playlists, and PostgreSQL data on pers
   <Config Name="Uploaded Images" Target="/media/images" Default="/mnt/user/appdata/karaokedock/images" Mode="rw"
     Description="Persistent writable storage for uploaded player background images. Keep this mapping when recreating or upgrading the container."
     Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Database Snapshots" Target="/app/snapshots" Default="/mnt/user/appdata/karaokedock/snapshots" Mode="rw"
+    Description="Persistent writable storage for automatic database snapshots and their encryption key (Admin, Backup and Restore). Keep this mapping when recreating or upgrading the container, or the snapshots are lost."
+    Type="Path" Display="always" Required="true" Mask="false" />
   <Config Name="Exported Playlists" Target="/media/playlists" Default="/mnt/user/appdata/karaokedock/playlists" Mode="rw"
     Description="Persistent writable storage for break-music M3U exports. Saved playlist definitions and ordering remain in PostgreSQL."
     Type="Path" Display="always" Required="true" Mask="false" />

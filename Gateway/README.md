@@ -12,9 +12,9 @@ Startup refuses runtimes without a recognized fix for CVE-2026-111497,
 before loading the database or accepting requests. Official Node.js backports
 are accepted even when the Brotli version string remains 1.1.0 or 1.2.0.
 
-Local installs need Python 3, make, and a C++ compiler to build `better-sqlite3`.
-After switching Node.js major versions, rerun `npm ci` to rebuild native
-dependencies for the new runtime.
+`better-sqlite3` ships prebuilt binaries for Linux (glibc and musl), macOS and
+Windows on x64 and arm64, so local installs need no compiler. After switching
+Node.js major versions, rerun `npm ci` so native dependencies match the runtime.
 
 ```bash
 npm ci
@@ -26,10 +26,10 @@ The requests page is served at `http://localhost:5180`.
 
 ## Docker
 
-The image pins patched Node.js 26.12.1. Rebuild and replace existing containers;
-changing the Dockerfile does not update already-running images.
-Native SQLite dependencies are compiled in the build stage; the runtime image
-contains only production dependencies, without the compiler toolchain.
+The image uses the same Alpine base as the main KaraokeDock image and pins
+patched Node.js 26.12.1. Rebuild and replace existing containers; changing the
+Dockerfile does not update already-running images. The runtime image contains
+only production dependencies; SQLite uses `better-sqlite3`'s musl prebuilds.
 
 ```bash
 docker build -t karaokedock-gateway ./Gateway

@@ -1,0 +1,51 @@
+.scrolling-text {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.scrolling-text-content {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+@keyframes scrolling-text-scroll {
+  0%, 15% { transform: translateX(0); }
+  85%, 100% { transform: translateX(var(--scroll-distance)); }
+}
+
+/* Fade the clipped edge so it's clear there is more text. */
+.scrolling-text.overflows {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent);
+}
+
+.scrolling-text.overflows:not(.scrolling-text-hover) .scrolling-text-content,
+.scrolling-text-hover.overflows:hover .scrolling-text-content {
+  animation: scrolling-text-scroll var(--scroll-duration) linear infinite alternate;
+}
+
+/* Keyboard focus pauses the animation and allows manual scrolling instead. */
+.scrolling-text.overflows:focus-visible {
+  overflow-x: auto;
+  outline: 2px solid var(--color-accent, currentColor);
+  outline-offset: 2px;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.scrolling-text.overflows:focus-visible .scrolling-text-content {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrolling-text.overflows {
+    overflow-x: auto;
+  }
+
+  .scrolling-text.overflows .scrolling-text-content,
+  .scrolling-text-hover.overflows:hover .scrolling-text-content {
+    animation: none;
+  }
+}

@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express';
 import { getRequestIdentity } from '../authenticatedSinger.js';
 import { canAccessHost } from '../permissions.js';
+import { logRequestFailure } from '../logger.js';
 
 export const hostGuard: RequestHandler = async (req, res, next) => {
   try {
@@ -13,7 +14,7 @@ export const hostGuard: RequestHandler = async (req, res, next) => {
     res.locals.user = { userId: identity.user?.id, role };
     next();
   } catch (error) {
-    console.error('hostGuard error:', error);
+    logRequestFailure(`hostGuard ${req.method} ${req.path}`, error);
     res.status(403).json({ error: 'Forbidden: Invalid or expired session' });
   }
 };

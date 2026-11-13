@@ -371,12 +371,16 @@ export async function updateUser(id: number, updates: {
 
   if (fields.length === 1) return getUserById(id); // nothing to update
 
+  // SSO sign-in re-syncs the role on every login, so only an actual change should revoke sessions;
+  // otherwise signing in on one device would sign the user out everywhere else.
+  const previousRole = updates.role !== undefined ? (await getUserById(id))?.role : undefined;
+
   values.push(id);
   const res = await query<User>(
     `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
     values
   );
-  if (res.rows[0] && (updates.is_active === false || updates.role !== undefined)) {
+  if (res.rows[0] && (updates.is_active === false || (updates.role !== undefined && updates.role !== previousRole))) {
     await query('DELETE FROM sessions WHERE user_id = $1 OR login_user_id = $1', [id]);
   }
   return res.rows[0] || null;
@@ -386,7 +390,8 @@ export async function deleteUser(id: number): Promise<void> {
   try {
     await query('DELETE FROM users WHERE id = $1', [id]);
   } catch (error: any) {
-    if (error?.code === '23503' && error?.constraint === 'users_canonical_user_id_fkey') {
+    // ON DELETE RESTRICT: PostgreSQL 18+ reports restrict_violation (23001), older versions 23503.
+    if ((error?.code === '23001' || error?.code === '23503') && error?.constraint === 'users_canonical_user_id_fkey') {
       throw Object.assign(new Error('Account has linked logins; deactivate the account instead'), { status: 409 });
     }
     throw error;

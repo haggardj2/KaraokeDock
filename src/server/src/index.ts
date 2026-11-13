@@ -1,4 +1,5 @@
 import '../scripts/check-runtime.cjs';
+import './consoleTimestamps';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -11,18 +12,16 @@ import { apiRouter, setPostQueueUpdate, syncRemoteGatewayTaskState } from './rou
 import { socialAuthNoStore } from './routes/socialAuth.js';
 import { publicLegalRouter } from './routes/publicLegal.js';
 import { mediaRouter } from './routes/media';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, type WebSocket } from 'ws';
+import { isSameOriginRequest } from './sameOrigin.js';
 import { qrRouter } from './routes/qr';
 import { rotationRouter } from './routes/rotation';
 import { logger, setLogLevel, type LogLevel } from './logger';
 import { ensureAdminUser, getSetting, validateSessionInfo } from './db';
 import { syncBackgroundTaskState } from './backgroundTasks';
+import { syncSnapshotSchedule } from './snapshots';
 import { createWebAppRouter } from './webApp';
 
-// Helper to add timestamps to console logs
-function timestamp() {
-  return new Date().toISOString();
-}
 
 
 const app = express();
@@ -62,13 +61,19 @@ async function writeBootstrapCredentialsFile(bootstrapAdmin: { username: string;
 // This allows Express to properly identify client IPs from X-Forwarded-For headers
 // Default: trust the first proxy (loopback, private networks)
 // Can be configured via TRUST_PROXY env variable:
-// - 'true' = trust all proxies
+// - 'true' = treated as 1 (trusting every proxy would let clients fake their IP)
 // - 'false' = trust no proxies  
 // - number = trust first N hops
 // - string = trust specific IP/CIDR ranges (comma-separated)
 const trustProxyValue = process.env.TRUST_PROXY || '1';
 if (trustProxyValue === 'true') {
-  app.set('trust proxy', true);
+  // Trusting every proxy lets any client fake X-Forwarded-For and so pick its own IP, which
+  // defeats rate limiting (express-rate-limit refuses it). Treat it as one proxy hop instead.
+  logger.warn(
+    "TRUST_PROXY=true would let clients fake their IP address; using 1 (one reverse proxy) instead. " +
+    'Set TRUST_PROXY to the number of proxies in front of KaraokeDock, or their IPs/CIDRs.',
+  );
+  app.set('trust proxy', 1);
 } else if (trustProxyValue === 'false') {
   app.set('trust proxy', false);
 } else if (!isNaN(Number(trustProxyValue))) {
@@ -101,17 +106,20 @@ const corsOptions = {
     : allowedOrigins,  // Only allow specified origins
   credentials: true,  // Allow cookies and authentication headers
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-session-token'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  // x-backup-passphrase: Admin › Backup & Restore sends the restore passphrase in a header.
+  // x-station-local: Station's automatic local admin sign-in (see stationLocalLogin.ts).
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-session-token', 'x-backup-passphrase', 'x-station-local'],
+  // Content-Disposition carries the backup download's filename.
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'Content-Disposition'],
   maxAge: 600  // Cache preflight requests for 10 minutes
 };
 
 const wildcardOriginAllowed = allowedOrigins.length === 1 && allowedOrigins[0] === '*';
 
-function isOriginAllowed(origin: string | undefined) {
+function isOriginAllowed(origin: string | undefined, host?: string) {
   if (wildcardOriginAllowed) return true;
   if (!origin) return false;
-  return allowedOrigins.includes(origin.trim());
+  return allowedOrigins.includes(origin.trim()) || isSameOriginRequest(origin, host);
 }
 
 function rejectUpgrade(socket: Duplex, statusCode: number, message: string) {
@@ -119,7 +127,7 @@ function rejectUpgrade(socket: Duplex, statusCode: number, message: string) {
   socket.destroy();
 }
 
-console.log(`[${timestamp()}] CORS configured for origins:`, allowedOrigins);
+console.log('CORS configured for origins:', allowedOrigins);
 
 // Apply CORS middleware to all routes (including error responses)
 app.use(cors(corsOptions));
@@ -157,9 +165,9 @@ app.use((req, _res, next) => {
     ? (Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor.split(',')[0].trim())
     : req.socket.remoteAddress || 'unknown';
   if (req.method === 'GET' || req.path === '/api/player/timing' || req.path === '/api/break-music/timing' || req.path === '/api/break-music/auto-next') {
-    logger.verbose(`[${timestamp()}] Request from IP: ${ip} - ${req.method} ${req.path}`);
+    logger.verbose(`Request from IP: ${ip} - ${req.method} ${req.path}`);
   } else {
-    logger.info(`[${timestamp()}] Request from IP: ${ip} - ${req.method} ${req.path}`);
+    logger.info(`Request from IP: ${ip} - ${req.method} ${req.path}`);
   }
   next();
 });
@@ -181,14 +189,33 @@ if (webDistDir) {
 // websockets: broadcast exact message types Player expects
 const wss = new WebSocketServer({ noServer: true });
 
-// Keep WebSocket connections alive with ping/pong
-setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.readyState === 1) {
-      ws.ping();
+// Keep WebSocket connections alive with ping/pong, and drop a client that missed the last
+// pong: its connection died without closing, and holding it only wastes broadcasts.
+const aliveClients = new WeakSet<WebSocket>();
+wss.on('connection', (ws) => {
+  aliveClients.add(ws);
+  ws.on('pong', () => aliveClients.add(ws));
+  // Answer client heartbeats so a client can tell a live connection from a silently dead one.
+  ws.on('message', (data) => {
+    try {
+      if (JSON.parse(String(data))?.type === 'heartbeat' && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'heartbeat' }));
+      }
+    } catch {
+      // Not JSON: ignore.
     }
   });
-}, 30000); // Send ping every 30 seconds
+});
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!aliveClients.has(ws)) {
+      ws.terminate();
+      return;
+    }
+    aliveClients.delete(ws);
+    if (ws.readyState === 1) ws.ping();
+  });
+}, 30000); // Ping every 30 seconds
 
 setPostQueueUpdate((type = 'queue.updated', data?: any) => {
   const msg = JSON.stringify({ type, ...(data || {}) });
@@ -223,7 +250,7 @@ const server = bindHost
 
 server.on('upgrade', (req, socket, head) => {
   const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
-  if (!isOriginAllowed(origin)) {
+  if (!isOriginAllowed(origin, req.headers.host)) {
     rejectUpgrade(socket, 403, 'Forbidden');
     return;
   }
@@ -269,6 +296,7 @@ setTimeout(async () => {
 
     await syncBackgroundTaskState({ runDurationImmediately: true });
     await syncRemoteGatewayTaskState({ runImmediately: true });
+    await syncSnapshotSchedule();
   } catch (err) {
     console.error('Failed to start background task:', err);
   }

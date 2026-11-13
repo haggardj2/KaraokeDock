@@ -195,20 +195,25 @@ export default function ProfileImageEditor({ name, profile, canUpload = true, on
 
   return (
     <div className="profile-image-editor">
-      {canUpload ? (
-        <label className="profile-file-picker">Choose image
+      {!url && <SingerAvatar name={name} size={96} />}
+      <div ref={mount} className={`profile-crop-mount${url ? '' : ' profile-crop-empty'}`} />
+      {url
+        ? <p className="profile-help">Drag the image and adjust zoom to fit your face in the circle.</p>
+        : !canUpload && <p className="profile-help">Your sign-in provider supplies this image. Drag and zoom to frame your face.</p>}
+      {canUpload && (
+        // The native input stays focusable but is visually replaced by the label styled as a button.
+        <label className={`profile-file-picker${busy ? ' is-disabled' : ''}`}>
           <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={busy}
             onChange={(event) => { void chooseImage(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} />
+          <span className="material-symbols-rounded" aria-hidden="true">add_photo_alternate</span>
+          {url ? 'Choose a different image' : 'Choose image'}
         </label>
-      ) : <p className="profile-help">Your sign-in provider supplies this image. Drag and zoom to frame your face.</p>}
-      {!url && <SingerAvatar name={name} size={80} />}
-      <div ref={mount} className={`profile-crop-mount${url ? '' : ' profile-crop-empty'}`} />
-      {url && <p className="profile-help">Drag the image and adjust zoom to fit your face in the circle.</p>}
+      )}
       {error && <p className="profile-error" role="alert">{error}</p>}
       <div className="profile-editor-actions">
-        <button type="button" disabled={busy || !ready} onClick={() => void save()}>{busy ? 'Saving...' : 'Save Crop'}</button>
+        <button className="profile-editor-save" type="button" disabled={busy || !ready} onClick={() => void save()}>{busy ? 'Saving...' : 'Save Crop'}</button>
         <button type="button" disabled={busy} onClick={onCancel}>Cancel</button>
-        {canUpload && profile?.imageUrl && <button type="button" disabled={busy} onClick={() => void remove()}>Remove Image</button>}
+        {canUpload && profile?.imageUrl && <button className="profile-editor-remove" type="button" disabled={busy} onClick={() => void remove()}>Remove Image</button>}
       </div>
     </div>
   )

@@ -43,7 +43,11 @@ type GatewaySettings = {
   requestAcceptance: 'local' | 'external' | 'disabled';
   localBrowseEnabled: boolean;
   stationConnected: boolean;
+  // Venue's Request Page Theme from Station; singers can still pick their own.
+  theme: 'midnight' | 'stage' | 'daylight';
 };
+
+const REQUEST_THEMES = ['midnight', 'stage', 'daylight'] as const;
 
 const PROFILE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_IMAGE_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
@@ -206,8 +210,8 @@ function getStationConnected() {
 }
 
 function getGatewaySettings(): GatewaySettings {
-  const rows = db.prepare('SELECT key, value FROM gateway_meta WHERE key IN (?, ?, ?, ?)')
-    .all('libraries.local_enabled', 'libraries.external_enabled', 'requests.acceptance', 'requests.local_browse_enabled') as { key: string; value: string }[];
+  const rows = db.prepare('SELECT key, value FROM gateway_meta WHERE key IN (?, ?, ?, ?, ?)')
+    .all('libraries.local_enabled', 'libraries.external_enabled', 'requests.acceptance', 'requests.local_browse_enabled', 'requests.theme') as { key: string; value: string }[];
   const values = new Map(rows.map((row) => [row.key, row.value]));
   const boolValue = (key: string, fallback: boolean) => {
     const raw = values.get(key);
@@ -221,6 +225,7 @@ function getGatewaySettings(): GatewaySettings {
     requestAcceptance: requestAcceptance === 'external' || requestAcceptance === 'disabled' ? requestAcceptance : 'local',
     localBrowseEnabled: boolValue('requests.local_browse_enabled', true),
     stationConnected: getStationConnected(),
+    theme: REQUEST_THEMES.find((theme) => theme === values.get('requests.theme')) ?? 'midnight',
   };
 }
 
@@ -254,6 +259,12 @@ function catalogAvailabilityClause(settings: GatewaySettings, alias = 't', brows
   if (localEnabled) return `AND ${localExpr}`;
   if (settings.externalEnabled) return `AND ${externalExpr}`;
   return 'AND 1 = 0';
+}
+
+// Browse filter typed by the singer: matches anywhere in the field, across every letter.
+function containsFilterClause(expression: string, term: string) {
+  const escaped = term.toLowerCase().replace(/[\\%_]/g, (char) => `\\${char}`);
+  return { clause: `AND LOWER(${expression}) LIKE ? ESCAPE '\\'`, params: [`%${escaped}%`] as unknown[] };
 }
 
 function initialFilterClause(expression: string, prefix: string) {
@@ -538,6 +549,34 @@ app.get('/api/search', asyncHandler(async (req, res) => {
   res.json(dedupeSearchRows(combinedRows).slice(0, limit));
 }));
 
+// Initials that have songs, so browse can open on (and only offer) letters with results.
+app.get('/api/browse/letters', (req, res) => {
+  const mode = req.query.mode === 'songs' ? 'songs' : 'artists';
+  const settings = getGatewaySettings();
+  if (!settings.stationConnected) {
+    respondStationUnavailable(res, settings);
+    return;
+  }
+  if (requestsAreClosed(settings)) {
+    respondRequestsDisabled(res, settings);
+    return;
+  }
+  if (!settings.localEnabled || !settings.localBrowseEnabled) {
+    res.json({ letters: [] });
+    return;
+  }
+  // Same first-character rule as initialFilterClause, so every listed letter has results.
+  const expression = mode === 'songs' ? 't.title' : "COALESCE(t.artist, '')";
+  const rows = db.prepare(`
+    SELECT DISTINCT UPPER(SUBSTR(TRIM(${expression}), 1, 1)) AS initial
+      FROM tracks t
+     WHERE COALESCE(t.title, '') <> ''
+       ${catalogAvailabilityClause(settings, 't', true)}
+  `).all() as { initial: string | null }[];
+  const present = new Set(rows.map((row) => (/^[A-Z]$/.test(row.initial ?? '') ? row.initial : '#')));
+  res.json({ letters: ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].filter((letter) => present.has(letter)) });
+});
+
 app.get('/api/browse/artists', (req, res) => {
   const prefix = normalizeString(req.query.prefix || 'A', 10);
   const settings = getGatewaySettings();
@@ -601,6 +640,9 @@ app.get('/api/browse/artist-songs', (req, res) => {
 
 app.get('/api/browse/songs', (req, res) => {
   const prefix = normalizeString(req.query.prefix || 'A', 10);
+  // With q, list songs whose title (or artist, for the Artists tab) contains it, ignoring the letter.
+  const term = normalizeString(req.query.q, 100);
+  const field = req.query.field === 'artist' ? "COALESCE(t.artist, '')" : 't.title';
   const settings = getGatewaySettings();
   if (!settings.stationConnected) {
     respondStationUnavailable(res, settings);
@@ -614,7 +656,7 @@ app.get('/api/browse/songs', (req, res) => {
     res.json([]);
     return;
   }
-  const initial = initialFilterClause('t.title', prefix);
+  const initial = term ? containsFilterClause(field, term) : initialFilterClause('t.title', prefix);
   const rows = db.prepare(`
     SELECT ${trackSelectSql()}
       FROM tracks t
@@ -622,6 +664,7 @@ app.get('/api/browse/songs', (req, res) => {
        ${catalogAvailabilityClause(settings, 't', true)}
        ${initial.clause}
      ORDER BY LOWER(t.title), LOWER(COALESCE(t.artist, '')), LOWER(COALESCE(t.disc_id, '')), t.station_track_id
+     ${term ? 'LIMIT 1000' : ''}
   `).all(...initial.params);
   res.json(dedupeSearchRows(rows));
 });
@@ -1122,6 +1165,7 @@ app.put('/api/station/settings', requireStationToken, (req, res) => {
     'libraries.external_enabled',
     'requests.acceptance',
     'requests.local_browse_enabled',
+    'requests.theme',
   ]);
   const upsert = db.prepare(`
     INSERT INTO gateway_meta(key, value)

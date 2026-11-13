@@ -112,7 +112,7 @@ function createScheduledTask(config: ScheduledTaskConfig) {
 
     if (state.inFlight) {
       state.rerunRequested = true;
-      logger.info(`[backgroundTasks] ${config.label} already running; queued another pass (${reason}).`);
+      logger.info(`${config.label} already running; queued another pass (${reason}).`);
       return state.inFlight;
     }
 
@@ -121,14 +121,14 @@ function createScheduledTask(config: ScheduledTaskConfig) {
       const result = await config.run(reason);
       const status = result.started ? 'pass complete' : 'pass skipped';
       logger.info(
-        `[backgroundTasks] ${config.label} ${status} (${reason}) in ${Date.now() - startedAt}ms. ${result.summary}`
+        `${config.label} ${status} (${reason}) in ${Date.now() - startedAt}ms. ${result.summary}`
       );
     })();
 
     try {
       await state.inFlight;
     } catch (error) {
-      logger.error(`[backgroundTasks] ${config.label} pass failed:`, error);
+      logger.error(`${config.label} pass failed:`, error);
     } finally {
       state.inFlight = null;
 
@@ -152,12 +152,12 @@ function createScheduledTask(config: ScheduledTaskConfig) {
     if (!state.enabled) {
       clearScheduledRun();
       state.rerunRequested = false;
-      logger.info(`[backgroundTasks] ${config.label} task disabled.`);
+      logger.info(`${config.label} task disabled.`);
       return;
     }
 
     logger.info(
-      `[backgroundTasks] ${config.label} task enabled; polling every ${config.intervalMs}ms.`
+      `${config.label} task enabled; polling every ${config.intervalMs}ms.`
     );
 
     if (options.runImmediately) {
@@ -260,7 +260,7 @@ async function runWhenFingerprintsChange(
 ): Promise<TaskRunResult> {
   if (reason !== 'scheduled') {
     const beforeScan = await options.takeSnapshot();
-    logger.info(`[backgroundTasks] Starting ${options.describeRoots} pass (${reason}).`);
+    logger.info(`Starting ${options.describeRoots} pass (${reason}).`);
     const result = await options.runScan();
     if (result.started) {
       await persistFingerprints(options.settingKey, beforeScan);
@@ -277,7 +277,7 @@ async function runWhenFingerprintsChange(
     return { started: false, summary: `No watched directory changes detected for ${options.describeRoots}.` };
   }
 
-  logger.info(`[backgroundTasks] Starting ${options.describeRoots} pass (${reason}) after detecting directory changes.`);
+  logger.info(`Starting ${options.describeRoots} pass (${reason}) after detecting directory changes.`);
   const result = await options.runScan();
   if (result.started) {
     await persistFingerprints(options.settingKey, current);
@@ -337,7 +337,7 @@ async function runMediaLibraryScanForChanges(reason: TaskReason): Promise<TaskRu
   }
 
   logger.info(
-    `[backgroundTasks] Starting Media library scan pass (${reason}) for ${scanRequests.length} changed folder${scanRequests.length === 1 ? '' : 's'}.`
+    `Starting Media library scan pass (${reason}) for ${scanRequests.length} changed folder${scanRequests.length === 1 ? '' : 's'}.`
   );
 
   try {
@@ -372,7 +372,7 @@ const durationProcessingTask = createScheduledTask({
   defaultEnabled: true,
   intervalMs: BACKGROUND_DURATION_INTERVAL_MS,
   run: async () => {
-    logger.info('[backgroundTasks] Starting Duration processing pass.');
+    logger.info('Starting Duration processing pass.');
     let totalProcessed = 0;
     let passes = 0;
 

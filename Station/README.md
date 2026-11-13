@@ -4,7 +4,8 @@ KaraokeDock Station is the desktop/AppImage wrapper for running the existing Kar
 
 ## What this first scaffold provides
 
-- Electron desktop shell for the existing Host/Admin/Requests UI.
+- Runs in the system tray. The tray menu opens Host, Admin and Requests in your default browser, which is signed in as admin automatically because it is on the Station machine (localhost).
+- Start at Login from the tray menu; started that way, Station stays in the tray without opening the browser (`--hidden`).
 - Managed Player window that can be moved to another display and toggled fullscreen.
 - AppImage packaging configuration through `electron-builder`.
 - Managed local PostgreSQL data, runtime config, and logs under the Electron user data directory.
@@ -16,16 +17,14 @@ This is still an early Station build. It now manages a local PostgreSQL data dir
 
 ### Brotli security requirement
 
-As checked on 2026-10-24, the latest stable Electron is 45.0.0, which embeds
-Node.js 24.22.0 and affected Brotli 1.2.0. No patched stable Electron release
-was available. **Station development, AppImage packaging, and application
-startup are blocked on this runtime** to prevent CVE-2026-111497 exposure.
-Use the Docker or standalone Node.js deployment with a patched runtime in the
-meantime. Existing AppImages must be retired; they do not gain these checks.
+Station requires Electron 45.1.0 or later. Electron 45.0.0 embedded Node.js
+24.22.0 with affected Brotli 1.2.0 (CVE-2026-111497), so Station development,
+packaging and startup were blocked until 45.1.0, which embeds Node.js 24.22.1
+with the fix backported (verified 2026-10-28). AppImages built on 45.0.0 must
+be retired; they do not gain these checks.
 
-When a patched stable Electron release is available, update the Electron
-dependency and lockfile, then run `npm run check:runtime` before rebuilding.
-This preflight executes the actual Electron binary, not system Node.js.
+`npm run check:runtime` runs before `dev` and `dist:appimage`; run it after any
+Electron update. This preflight executes the actual Electron binary, not system Node.js.
 The check accepts Brotli 1.0.10+, 1.1.1+, or 1.2.1+ within their respective
 minor lines (and later minor/major releases), or the backported fix exposing
 `BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH` with value `-17`. Updating system
@@ -44,7 +43,7 @@ npm run stage:postgres
 npm run dev
 ```
 
-`npm run dev` builds the React web app into `Station/.build/web-dist`, compiles the Electron main process, starts the managed local PostgreSQL database, starts the existing API server, and opens the Station Host window.
+`npm run dev` builds the React web app into `Station/.build/web-dist`, compiles the Electron main process, starts the managed local PostgreSQL database, starts the existing API server, and opens the Host page in your browser.
 
 The Station config file is created automatically at Electron's user data path. On Linux this is normally:
 

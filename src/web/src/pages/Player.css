@@ -17,9 +17,21 @@
   right: 12px;
   z-index: 12;
   padding: 8px;
-  background: #341b1b;
-  color: white;
+  background: color-mix(in srgb, var(--color-danger) 28%, #000);
+  color: var(--color-text-primary);
   font: 14px system-ui;
+}
+
+/* Over a photo or slideshow, the next singer sits on a translucent panel so every line stays readable. */
+.player-screen .player-waiting-panel {
+  padding: 28px 40px !important;
+  max-width: min(90vw, 1100px);
+  box-sizing: border-box;
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--color-bg-primary) 62%, transparent);
+  border: 1px solid var(--color-border-strong);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
 
 .player-up-next-avatar {
@@ -36,8 +48,8 @@
   box-sizing: border-box;
   padding: 8px;
   border-radius: 8px;
-  background: #352a11;
-  color: white;
+  background: color-mix(in srgb, var(--color-warning) 22%, #000);
+  color: var(--color-text-primary);
   font: 14px system-ui;
   z-index: 15;
 }
@@ -113,6 +125,13 @@
     gap: 8px !important;
   }
 
+  /* The panel keeps clear of the ticker with a margin instead of empty padding inside it. */
+  .player-screen .player-waiting.player-waiting-panel {
+    padding: 16px !important;
+    margin-bottom: 96px;
+    max-height: calc(100% - 96px);
+  }
+
   .player-screen .player-waiting h1,
   .player-screen .player-waiting h2 {
     font-size: clamp(22px, 7cqh, 32px) !important;
@@ -135,4 +154,16 @@
     padding: 6px 12px !important;
     font-size: 16px !important;
   }
+}
+
+/* Shown while a YouTube song is downloaded for a Player opened by IP address. */
+.player-youtube-preparing {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: clamp(20px, 3vw, 40px);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
 }

@@ -5,8 +5,8 @@ import assert from 'node:assert/strict'
 import { transpile } from './transpile.mjs'
 
 const require = createRequire(import.meta.url)
-const source = readFileSync(new URL('../src/components/QueueSongText.tsx', import.meta.url), 'utf8')
-const css = readFileSync(new URL('../src/components/QueueSongText.css', import.meta.url), 'utf8')
+const source = readFileSync(new URL('../src/components/ScrollingText.tsx', import.meta.url), 'utf8')
+const css = readFileSync(new URL('../src/components/ScrollingText.css', import.meta.url), 'utf8')
 const compiled = transpile(source)
 
 function mount(viewportWidth, textWidth) {
@@ -30,9 +30,9 @@ function mount(viewportWidth, textWidth) {
     if (name.endsWith('.css')) return {}
     return require(name)
   }, module, ResizeObserver)
-  function render(label = 'Next: Long Song - Artist') {
+  function render(label = 'Next: Long Song - Artist', props = {}) {
     refIndex = 0
-    return module.exports.default({ label, children: 'Long Song - Artist' })
+    return module.exports.default({ label, children: 'Long Song - Artist', ...props })
   }
   render()
   cleanup = effect()
@@ -43,11 +43,11 @@ function mount(viewportWidth, textWidth) {
   }
 }
 
-describe('overflowing queue song text', () => {
+describe('scrolling text', () => {
   it('keeps fitting titles static without adding a keyboard stop', () => {
     const app = mount(220, 100)
     const element = app.render()
-    assert.equal(element.props.className, 'queue-song-text')
+    assert.equal(element.props.className, 'scrolling-text')
     assert.equal(element.props.tabIndex, undefined)
     assert.equal(app.observed.length, 2)
     assert.equal(app.unmount(), true)
@@ -60,8 +60,8 @@ describe('overflowing queue song text', () => {
     assert.equal(element.props.tabIndex, 0)
     assert.equal(element.props['aria-label'], 'Next: Long Song - Artist')
     assert.equal(element.props.title, 'Next: Long Song - Artist')
-    assert.equal(element.props.style['--song-scroll-distance'], '-320px')
-    assert.equal(element.props.style['--song-scroll-duration'], '16.8s')
+    assert.equal(element.props.style['--scroll-distance'], '-320px')
+    assert.equal(element.props.style['--scroll-duration'], '16.8s')
     app.unmount()
   })
 
@@ -69,17 +69,25 @@ describe('overflowing queue song text', () => {
     const app = mount(180, 500)
     app.viewport.clientWidth = 600
     app.resize()
-    assert.equal(app.render().props.className, 'queue-song-text')
+    assert.equal(app.render().props.className, 'scrolling-text')
     app.content.scrollWidth = 800
     app.resize()
-    assert.equal(app.render('Next: Replacement Song').props.style['--song-scroll-distance'], '-200px')
+    assert.equal(app.render('Next: Replacement Song').props.style['--scroll-distance'], '-200px')
     assert.equal(app.render('Next: Replacement Song').props.children.key, 'Next: Replacement Song')
     app.unmount()
   })
 
-  it('limits automatic movement to mobile and provides reduced-motion/manual-scrolling fallbacks', () => {
-    assert.match(css, /@media \(max-width: 640px\)/)
+  it('adds the hover-only modifier and any extra class names', () => {
+    const app = mount(180, 500)
+    assert.equal(app.render(undefined, { mode: 'hover', className: 'extra' }).props.className, 'scrolling-text scrolling-text-hover overflows extra')
+    app.unmount()
+  })
+
+  it('scrolls at every width, starts hover-mode rows only on hover, and keeps reduced-motion/manual-scrolling fallbacks', () => {
+    assert.doesNotMatch(css, /@media \(max-width/)
+    assert.match(css, /\.scrolling-text\.overflows:not\(\.scrolling-text-hover\) \.scrolling-text-content/)
+    assert.match(css, /\.scrolling-text-hover\.overflows:hover \.scrolling-text-content/)
     assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*overflow-x: auto;[\s\S]*animation: none;/)
-    assert.match(css, /\.queue-song-text:focus/)
+    assert.match(css, /\.scrolling-text\.overflows:focus-visible/)
   })
 })

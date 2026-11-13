@@ -3,6 +3,7 @@
 // and handle operations that span the flat queue and the rotation tables.
 
 import { query } from './db.js';
+import { normalizeSingerName } from './queueIdentity.js';
 import { singerProfileFromRow, type SingerProfileResponse } from './singerProfile.js';
 import { setLiveQueueStatus, writeQueueOrder } from './rotation/liveQueue.js';
 import { withQueueTransaction } from './rotation/queueTransaction.js';
@@ -28,7 +29,9 @@ export interface QueueSong {
 }
 
 export interface QueueSinger {
-  singerId: string; // bigint serialised as string
+  singerId: string; // bigint serialised as string; 'anonymous:<queueId>' for a song without a singer
+  /** A song requested without any name: one entry per song, gone once it is done. */
+  anonymous?: boolean;
   publicUuid?: string | null;
   displayName: string;
   status: string;
@@ -239,6 +242,29 @@ export async function getQueueState(): Promise<QueueState> {
       completedSongsCount: completed.length,
       queuedSongsCount: queued.filter((s) => s.status === 'queued').length,
       profile: singerProfileFromRow(sRow),
+    });
+  }
+
+  // Songs added without any singer name (e.g. from the Host page) show as "Anonymous"
+  // until they are done.
+  for (const r of allRows) {
+    if (r.singer_id != null || normalizeSingerName(r.requested_by ?? '')) continue;
+    if (r.status !== 'queued' && r.status !== 'playing') continue;
+    const song = ROW_TO_QUEUE_SONG(r);
+    queueOrder.push({
+      singerId: `anonymous:${song.queueId}`,
+      anonymous: true,
+      displayName: 'Anonymous',
+      status: 'active',
+      rotationPosition: null,
+      lastSangAt: null,
+      totalSongsSung: 0,
+      nextSong: song.status === 'queued' ? song : null,
+      queuedSongs: [song],
+      completedSongs: [],
+      completedSongsCount: 0,
+      queuedSongsCount: song.status === 'queued' ? 1 : 0,
+      profile: singerProfileFromRow({ id: song.queueId }),
     });
   }
 

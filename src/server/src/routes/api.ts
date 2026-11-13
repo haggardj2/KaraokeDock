@@ -32,7 +32,7 @@ import {
   extractTrackDuration,
   extractAudioMetadata
 } from '../scanner';
-import { resolveExistingMediaPath } from './media';
+import { getMediaRoots, resolveExistingMediaPath } from './media';
 import {
   DEFAULT_LIBRARY_PARSE_MODE,
   isLibraryParseMode,
@@ -43,7 +43,7 @@ import { searchKaraokeNerds } from '../karaoke-nerds';
 import crypto from 'crypto';
 import * as oidc from 'openid-client';
 import { authLimiter, searchLimiter, queueLimiter } from '../middleware/rateLimiters';
-import { setLogLevel, logger, type LogLevel } from '../logger';
+import { setLogLevel, logger, logRequestFailure, type LogLevel } from '../logger';
 import {
   syncBackgroundTaskState,
   syncDurationProcessingTaskState,
@@ -58,6 +58,10 @@ import { getOidcProfileClaims, getOidcGroupRole } from '../oidcProfile.js';
 import { hostGuard } from '../middleware/hostGuard.js';
 import { canAccessHost } from '../permissions.js';
 import { createSocialAuthRouter, socialAuthNoStore } from './socialAuth.js';
+import { createStationLocalLoginRouter, hasStationControl } from '../stationLocalLogin.js';
+import { getAutomaticRequestsUrl, getPublicRequestsUrl } from '../requestsUrl.js';
+import { createBackupRouter } from './backup.js';
+import { createRequire } from 'node:module';
 import { maskSocialConfig, SOCIAL_CONFIG_KEY, type SocialConfig } from '../socialAuthConfig.js';
 import {
   getQueueState,
@@ -114,6 +118,15 @@ interface PublicSettings {
   'requests.acceptance': 'local' | 'external' | 'disabled';
   'requests.local_browse_enabled': boolean;
   'requests.url': string;
+  'requests.theme': RequestTheme;
+}
+
+// Mirrors THEMES in src/web/src/theme.ts.
+const REQUEST_THEMES = ['midnight', 'stage', 'daylight'] as const;
+type RequestTheme = typeof REQUEST_THEMES[number];
+
+function normalizeRequestTheme(value: unknown): RequestTheme {
+  return REQUEST_THEMES.includes(value as RequestTheme) ? value as RequestTheme : 'midnight';
 }
 
 const DEFAULT_BREAK_PLAYLISTS_FOLDER = process.env.BREAK_MUSIC_PLAYLISTS_FOLDER || '/media/playlists';
@@ -259,7 +272,8 @@ async function deleteStoredPlayerBackgroundImageFile(image: StoredPlayerBackgrou
   await fs.unlink(filePath).catch(() => undefined);
 }
 
-async function writePlayerBackgroundImageFile(buffer: Buffer, mime: string, id: string = crypto.randomUUID()): Promise<StoredPlayerBackgroundImage> {
+async function writePlayerBackgroundImageFile(buffer: Buffer, mime: string): Promise<StoredPlayerBackgroundImage> {
+  const id = crypto.randomUUID();
   const updatedAt = new Date().toISOString();
   const filename = `player-background-${id}${getPlayerBackgroundImageExtension(mime)}`;
   const uploadDir = await ensureImageUploadsDir();
@@ -472,12 +486,22 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
     (req as any).user = { userId: identity.user?.id, role: 'admin' };
     next();
   } catch (err) {
-    console.error('adminGuard error:', err);
+    logRequestFailure(`adminGuard ${req.method} ${req.path}`, err);
     res.status(403).json({ error: 'Forbidden: Authentication error' });
   }
 };
 
 apiRouter.use(createSocialAuthRouter(adminGuard, () => postQueueUpdate('queue.updated')));
+apiRouter.use(createStationLocalLoginRouter(adminGuard));
+apiRouter.use(createBackupRouter(adminGuard, {
+  appVersion: (createRequire(import.meta.url)('../../package.json') as { version: string }).version,
+  getImageUploadsDir: async () => path.resolve(await getImageUploadsDir()),
+  // Clients reload queue, settings and overlays after any restore.
+  onRestored: () => {
+    postQueueUpdate('queue.updated');
+    void broadcastPlayerBackgroundSettings();
+  },
+}));
 
 const toInt = (v: any): number | null => {
   const n = Number(v);
@@ -625,6 +649,7 @@ async function getRemoteGatewaySettingsPayload() {
     'libraries.external_enabled': await getSetting('libraries.external_enabled') !== false,
     'requests.acceptance': await getSetting('requests.acceptance') || 'local',
     'requests.local_browse_enabled': await getSetting('requests.local_browse_enabled') !== false,
+    'requests.theme': await getSetting('requests.theme') || 'midnight',
   };
 }
 
@@ -1065,7 +1090,9 @@ async function runRemoteGatewayPollCycle() {
         `[remoteGateway] poll complete: queued ${result.pulledRequests.queued}, rejected ${result.pulledRequests.rejected}, gateway pending ${result.status?.pendingRequests ?? 0}.`
       );
     } catch (err: any) {
-      if (!String(err?.message || '').includes('not configured')) {
+      // A disabled or unconfigured Gateway is normal, not a failure worth logging every poll.
+      const message = String(err?.message || '');
+      if (!message.includes('not configured') && !message.includes('not enabled')) {
         logger.warn('[remoteGateway] poll failed:', err);
       }
     } finally {
@@ -2513,30 +2540,6 @@ async function getOidcFrontendUrl(req: express.Request): Promise<string> {
   return `${proto}://${host}`;
 }
 
-function getPublicWebAppUrl(req: express.Request): string {
-  const webAppUrl = process.env.WEB_APP_URL?.trim();
-  if (webAppUrl) return webAppUrl.replace(/\/$/, '');
-
-  const origins = process.env.ORIGIN?.split(',').map((o: string) => o.trim()).filter(Boolean);
-  if (origins?.length) return origins[0].replace(/\/$/, '');
-
-  const host = req.headers.host || 'localhost:5173';
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  return `${proto}://${host}`.replace(/\/$/, '');
-}
-
-async function getPublicRequestsUrl(req: express.Request): Promise<string> {
-  const [gatewayEnabled, gatewayUrl] = await Promise.all([
-    getSetting('remote_gateway.enabled'),
-    getSetting('remote_gateway.url'),
-  ]);
-  const normalizedGatewayUrl = String(gatewayUrl ?? '').trim().replace(/\/+$/, '');
-  if (gatewayEnabled === true && normalizedGatewayUrl) {
-    return normalizedGatewayUrl;
-  }
-  return `${getPublicWebAppUrl(req)}/request`;
-}
-
 function sseSend(res: express.Response, event: string, data: any) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -2664,7 +2667,8 @@ apiRouter.get(
       getLibraryScanStatus(),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM tracks`),
-      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue`),
+      // Songs still waiting to be sung; done, skipped and removed rows stay in the table as history.
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue WHERE status = 'queued'`),
     ]);
     res.json({
       artists: Number(artists.rows[0].c),
@@ -3384,8 +3388,12 @@ apiRouter.get(
   '/browse',
   adminGuard,
   ah(async (req, res) => {
-    const requestPath = String(req.query.path || '/media')
-    
+    // Without a path, list the media folders themselves as the starting point.
+    if (!req.query.path) {
+      return res.json(getMediaRoots().map(root => ({ name: root, path: root, isDirectory: true })))
+    }
+    const requestPath = String(req.query.path)
+
     try {
       // Try to access the directory
       const entries = await fs.readdir(requestPath, { withFileTypes: true })
@@ -3393,8 +3401,10 @@ apiRouter.get(
       const items = entries
         .filter(entry => {
           // Filter out hidden and system directories
-          return !entry.name.startsWith('.') && 
-                 entry.name !== 'lost+found'
+          return !entry.name.startsWith('.') &&
+                 !entry.name.startsWith('$') &&
+                 entry.name !== 'lost+found' &&
+                 entry.name !== 'System Volume Information'
         })
         .map(entry => ({
           name: entry.name,
@@ -4999,7 +5009,8 @@ apiRouter.post(
       return res.status(400).json({ error: 'Supported background formats are PNG, JPEG, WebP, and GIF' });
     }
 
-    const image = await writePlayerBackgroundImageFile(req.body, mime, 'static');
+    // A unique name per upload: earlier uploads stay in the image library instead of being overwritten.
+    const image = await writePlayerBackgroundImageFile(req.body, mime);
     await setSetting('player.backgroundImageMime', image.mime);
     await setSetting('player.backgroundImageFilename', image.filename);
     await setSetting('player.backgroundImageData', '');
@@ -5919,7 +5930,8 @@ apiRouter.get(
       'libraries.local_enabled',
       'libraries.external_enabled',
       'requests.acceptance',
-      'requests.local_browse_enabled'
+      'requests.local_browse_enabled',
+      'requests.theme'
     ];
     
     const result = await query('SELECT key, value FROM settings WHERE key = ANY($1)', [publicKeys]);
@@ -5935,6 +5947,7 @@ apiRouter.get(
       'requests.acceptance': settings['requests.acceptance'] ?? 'local',
       'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true,
       'requests.url': await getPublicRequestsUrl(req),
+      'requests.theme': normalizeRequestTheme(settings['requests.theme']),
     };
     
     res.json(completeSettings);
@@ -5949,6 +5962,21 @@ apiRouter.get(
     const keys = ['libraries.local_enabled', 'libraries.external_enabled', 'ytdlp.allow_downloads'];
     const values = await Promise.all(keys.map(key => getSetting(key)));
     res.json(Object.fromEntries(keys.map((key, index) => [key, values[index] ?? true])));
+  }),
+);
+
+// Venue-wide theme for the singer Requests page; singers can still override it on their own device.
+apiRouter.put(
+  '/host/settings/request-theme',
+  hostGuard,
+  ah(async (req, res) => {
+    const { theme } = req.body ?? {};
+    if (!REQUEST_THEMES.includes(theme)) {
+      return res.status(400).json({ error: `theme must be one of: ${REQUEST_THEMES.join(', ')}` });
+    }
+    await setSetting('requests.theme', theme);
+    postQueueUpdate('requests.theme', { theme });
+    res.json({ ok: true, theme });
   }),
 );
 
@@ -5969,7 +5997,10 @@ apiRouter.get(
       }
     }
     settings['station.mode'] = process.env.STATION_MODE === 'true';
+    settings['station.folder_picker'] = hasStationControl();
     settings['images.upload_dir'] = settings['images.upload_dir'] || DEFAULT_IMAGE_UPLOADS_DIR;
+    // Shown in Admin › System as the address used when no override is set.
+    settings['requests.url_automatic'] = getAutomaticRequestsUrl(req);
     res.json(settings);
   })
 );
@@ -6036,6 +6067,11 @@ apiRouter.put(
 
     if (key === 'admin.background_break_music_scan_enabled') {
       await syncBreakMusicScanTaskState({ runImmediately: value !== false });
+    }
+
+    // The Player re-reads the Requests link (and its QR code) when it may have changed.
+    if (key === 'requests.url_override' || key === 'remote_gateway.url' || key === 'remote_gateway.enabled') {
+      postQueueUpdate('requests.url.updated');
     }
 
     if (
@@ -6179,6 +6215,54 @@ apiRouter.get(
           ORDER BY artist NULLS LAST, title`
       );
     res.json(r.rows);
+  })
+);
+
+// The break-music manager's library: one page at a time (or every match with all=1, for
+// "Add all"), sorted and searched on the server so large libraries open quickly.
+const BREAK_LIBRARY_SORTS: Record<string, string> = {
+  song: 'LOWER(title)',
+  artist: 'LOWER(artist)',
+  genre: 'LOWER(genre)',
+  length: 'duration_ms',
+  path: 'file_path',
+};
+const BREAK_LIBRARY_PAGE_SIZE = 100;
+const BREAK_LIBRARY_MAX_PAGE_SIZE = 500;
+
+apiRouter.get(
+  '/break-music/library',
+  hostGuard,
+  searchLimiter,
+  ah(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const sortExpression = BREAK_LIBRARY_SORTS[String(req.query.sort)] ?? BREAK_LIBRARY_SORTS.artist;
+    const direction = req.query.dir === 'desc' ? 'DESC' : 'ASC';
+    const all = req.query.all === '1';
+    const offset = all ? 0 : Math.max(0, Math.trunc(Number(req.query.offset) || 0));
+    const limit = all ? null : Math.min(BREAK_LIBRARY_MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(req.query.limit) || BREAK_LIBRARY_PAGE_SIZE)));
+    const params: unknown[] = [];
+    let where = '';
+    if (q) {
+      params.push(q.replace(/[\\%_]/g, '\\$&'));
+      where = `WHERE title ILIKE '%' || $1 || '%'
+                  OR artist ILIKE '%' || $1 || '%'
+                  OR genre ILIKE '%' || $1 || '%'
+                  OR file_path ILIKE '%' || $1 || '%'`;
+    }
+    const page = limit === null ? '' : `LIMIT ${limit} OFFSET ${offset}`;
+    const [rows, count] = await Promise.all([
+      query(
+        `SELECT id, title, artist, genre, duration_ms, file_path
+           FROM break_music_tracks
+           ${where}
+          ORDER BY ${sortExpression} ${direction} NULLS LAST, LOWER(title), id
+          ${page}`,
+        params,
+      ),
+      query<{ total: number }>(`SELECT COUNT(*)::int AS total FROM break_music_tracks ${where}`, params),
+    ]);
+    res.json({ tracks: rows.rows, total: count.rows[0].total, offset });
   })
 );
 
@@ -6361,6 +6445,22 @@ apiRouter.get(
   })
 );
 
+apiRouter.delete(
+  '/break-music/playlists/:id',
+  hostGuard,
+  ah(async (req, res) => {
+    const playlistId = Number(req.params.id);
+    if (!isPositiveTrackId(playlistId)) return res.status(400).json({ error: 'Invalid playlist id' });
+    const deleted = await query('DELETE FROM break_music_playlists WHERE id = $1', [playlistId]);
+    if (!deleted.rowCount) return res.status(404).json({ error: 'Playlist not found' });
+    // The running tracks keep playing; they just stop being "the loaded playlist".
+    const state = await getBreakMusicState();
+    if (state.activePlaylistId === playlistId) await setBreakMusicState({ activePlaylistId: null });
+    postQueueUpdate('break_music.updated');
+    res.json({ ok: true });
+  })
+);
+
 apiRouter.post(
   '/break-music/playlists',
   hostGuard,
@@ -6496,8 +6596,8 @@ apiRouter.post(
 );
 
 // JSON error handler
-apiRouter.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error('API error:', err);
+apiRouter.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logRequestFailure(`API ${req.method} ${req.path}`, err);
   if (err?.code === '23503' && [
     'queue_singer_id_fkey', 'rotation_singers_singer_id_fkey', 'song_requests_singer_id_fkey',
   ].includes(err.constraint)) {

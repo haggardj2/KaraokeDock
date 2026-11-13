@@ -27,7 +27,8 @@ describe('break music identity and folder search', () => {
   })
 })
 
-const host = readFileSync(new URL('../src/pages/Host.tsx', import.meta.url), 'utf8')
+// The break-music workflow lives in the useBreakMusic hook that Host and its dialogs share.
+const host = readFileSync(new URL('../src/pages/host/useBreakMusic.tsx', import.meta.url), 'utf8')
 function functionSource(name) {
   const start = host.indexOf(`  async function ${name}(`) >= 0
     ? host.indexOf(`  async function ${name}(`) : host.indexOf(`  function ${name}(`)
