@@ -1,6 +1,7 @@
 // web/src/pages/Host.tsx
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, getWsUrl } from '../api'
+import { connectLiveSocket } from '../liveSocket'
 import { useAuth } from '../auth-context'
 import { parseBooleanSetting } from '../utils/settings'
 import { applyTheme, clearTheme } from '../theme'
@@ -67,8 +68,6 @@ export default function Host() {
   const [singerModalLoading, setSingerModalLoading] = useState(false)
   const [historyManagerOpen, setHistoryManagerOpen] = useState(false)
 
-  const wsRef = useRef<WebSocket | null>(null)
-  const wsHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const durationSetForSongRef = useRef<boolean>(false)
 
   const headers = useMemo(() => ({ 'x-session-token': auth.sessionToken, 'Content-Type': 'application/json' }), [auth.sessionToken])
@@ -231,129 +230,91 @@ export default function Host() {
       .catch(() => {})
   }, [])
 
-  // WebSocket for real-time updates - FIXED to auto-refresh queue
+  // WebSocket for real-time updates. connectLiveSocket reconnects after a close and replaces a
+  // connection that has silently died (a phone that slept); each (re)connect reloads the queue.
   useEffect(() => {
-    function connectWs() {
-      try {
-        wsRef.current = new WebSocket(getWsUrl(auth.sessionToken || undefined))
-
-        wsRef.current.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data)
-            if (msg.type === 'queue.updated' ||
-                msg.type === 'player.updated' ||
-                msg.type === 'player.play' ||
-                msg.type === 'player.next' ||
-                msg.type === 'player.pause' ||
-                msg.type === 'player.resume' ||
-                msg.type === 'player.stop') {
-              if (msg.type === 'player.pause' || msg.type === 'player.resume') {
-                applyPlayerState(msg)
-              }
-              refreshQueue() // Auto-refresh queue on updates
-              refreshQueueState()
-            } else if (msg.type === 'break_music.updated') {
-              loadBreakMusicState()
-            } else if (msg.type === 'player.youtube_fallback') {
-              const fallbackMessage =
-                typeof msg.message === 'string' && msg.message.trim()
-                  ? msg.message
-                  : 'YouTube fallback status updated.'
-              setBanner(fallbackMessage)
-              if (msg.status !== 'downloading') {
-                setTimeout(() => setBanner(''), 5000)
-              }
-            } else if (msg.type === 'player.timing') {
-              if (playerStateRef.current.paused ||
-                  (msg.queueId != null && String(msg.queueId) !== String(playerStateRef.current.queueId))) return
-              if (typeof msg.currentTime === 'number') {
-                setCurrentTime(msg.currentTime)
-              }
-              // Handle duration updates - allow updating if:
-              // 1. Duration hasn't been set yet, OR
-              // 2. New duration is significantly different (>10% change)
-              // This allows correcting initial incorrect durations (e.g., fragmented CDG streams)
-              // while preventing small fluctuations from causing updates
-              if (typeof msg.duration === 'number' &&
-                  !isNaN(msg.duration) && isFinite(msg.duration) && msg.duration > 0) {
-
-                if (!durationSetForSongRef.current) {
-                  // First duration update for this song
-                  durationSetForSongRef.current = true
-                  setActualDuration(msg.duration)
-                } else {
-                  // Duration already set - only update if significantly different
-                  setActualDuration((prevDuration) => {
-                    if (prevDuration === null || prevDuration === 0) {
-                      return msg.duration
-                    }
-
-                    // Calculate percentage difference
-                    const percentDiff = Math.abs(msg.duration - prevDuration) / prevDuration
-
-                    // Update if difference is > 10% (allows correcting wrong initial durations)
-                    if (percentDiff > 0.1) {
-                      console.log(`Duration updated from ${prevDuration}s to ${msg.duration}s (${(percentDiff * 100).toFixed(1)}% change)`)
-                      return msg.duration
-                    }
-
-                    return prevDuration
-                  })
-                }
-              }
-            } else if (msg.type === 'autoplay.settings') {
-              if (typeof msg.enabled === 'boolean') {
-                setAutoPlay(msg.enabled)
-              }
-              if (typeof msg.delay === 'number') {
-                setAutoPlayDelay(msg.delay)
-              }
-            } else if (msg.type === 'player.background.settings') {
-              applyPlayerBackgroundSettings(msg)
-            }
-          } catch {}
-        }
-
-        wsRef.current.onclose = () => {
-          console.log('WebSocket closed, reconnecting...')
-          wsRef.current = null
-          // Clear heartbeat timer
-          if (wsHeartbeatRef.current) {
-            clearInterval(wsHeartbeatRef.current)
-            wsHeartbeatRef.current = null
+    return connectLiveSocket({
+      url: () => getWsUrl(auth.sessionToken || undefined),
+      onOpen: () => {
+        console.log('WebSocket connected')
+        refreshQueue()
+        refreshQueueState()
+        loadBreakMusicState()
+      },
+      onMessage: (msg) => {
+        if (msg.type === 'queue.updated' ||
+            msg.type === 'player.updated' ||
+            msg.type === 'player.play' ||
+            msg.type === 'player.next' ||
+            msg.type === 'player.pause' ||
+            msg.type === 'player.resume' ||
+            msg.type === 'player.stop') {
+          if (msg.type === 'player.pause' || msg.type === 'player.resume') {
+            applyPlayerState(msg)
           }
-          setTimeout(connectWs, 1000)
-        }
-
-        wsRef.current.onerror = (err) => {
-          console.error('WebSocket error:', err)
-        }
-
-        wsRef.current.onopen = () => {
-          console.log('WebSocket connected')
-          refreshQueue()
+          refreshQueue() // Auto-refresh queue on updates
+          refreshQueueState()
+        } else if (msg.type === 'break_music.updated') {
           loadBreakMusicState()
-          // Start heartbeat - send a message every 45 seconds to keep connection alive
-          // This is in addition to server's ping/pong mechanism
-          wsHeartbeatRef.current = setInterval(() => {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              // Send a lightweight heartbeat message
-              wsRef.current.send(JSON.stringify({ type: 'heartbeat' }))
-            }
-          }, 45000)
-        }
-      } catch {
-        setTimeout(connectWs, 1500)
-      }
-    }
+        } else if (msg.type === 'player.youtube_fallback') {
+          const fallbackMessage =
+            typeof msg.message === 'string' && msg.message.trim()
+              ? msg.message
+              : 'YouTube fallback status updated.'
+          setBanner(fallbackMessage)
+          if (msg.status !== 'downloading') {
+            setTimeout(() => setBanner(''), 5000)
+          }
+        } else if (msg.type === 'player.timing') {
+          if (playerStateRef.current.paused ||
+              (msg.queueId != null && String(msg.queueId) !== String(playerStateRef.current.queueId))) return
+          if (typeof msg.currentTime === 'number') {
+            setCurrentTime(msg.currentTime)
+          }
+          // Handle duration updates - allow updating if:
+          // 1. Duration hasn't been set yet, OR
+          // 2. New duration is significantly different (>10% change)
+          // This allows correcting initial incorrect durations (e.g., fragmented CDG streams)
+          // while preventing small fluctuations from causing updates
+          if (typeof msg.duration === 'number' &&
+              !isNaN(msg.duration) && isFinite(msg.duration) && msg.duration > 0) {
 
-    connectWs()
-    return () => {
-      if (wsHeartbeatRef.current) {
-        clearInterval(wsHeartbeatRef.current)
-      }
-      wsRef.current?.close()
-    }
+            if (!durationSetForSongRef.current) {
+              // First duration update for this song
+              durationSetForSongRef.current = true
+              setActualDuration(msg.duration)
+            } else {
+              // Duration already set - only update if significantly different
+              setActualDuration((prevDuration) => {
+                if (prevDuration === null || prevDuration === 0) {
+                  return msg.duration
+                }
+
+                // Calculate percentage difference
+                const percentDiff = Math.abs(msg.duration - prevDuration) / prevDuration
+
+                // Update if difference is > 10% (allows correcting wrong initial durations)
+                if (percentDiff > 0.1) {
+                  console.log(`Duration updated from ${prevDuration}s to ${msg.duration}s (${(percentDiff * 100).toFixed(1)}% change)`)
+                  return msg.duration
+                }
+
+                return prevDuration
+              })
+            }
+          }
+        } else if (msg.type === 'autoplay.settings') {
+          if (typeof msg.enabled === 'boolean') {
+            setAutoPlay(msg.enabled)
+          }
+          if (typeof msg.delay === 'number') {
+            setAutoPlayDelay(msg.delay)
+          }
+        } else if (msg.type === 'player.background.settings') {
+          applyPlayerBackgroundSettings(msg)
+        }
+      },
+    })
   }, [auth.sessionToken])
 
   const currentPlaying = useMemo(() => {

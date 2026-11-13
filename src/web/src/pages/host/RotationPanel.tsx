@@ -79,7 +79,7 @@ export default function RotationPanel({
               key={singer.singerId}
               className={entryClass}
               data-singer-drag-id={singer.singerId}
-              draggable={!savingQueueOrder}
+              draggable={!savingQueueOrder && !singer.anonymous}
               onDragStart={() => handleSingerDragStart(singer.singerId)}
               onDragEnd={handleSingerDragEnd}
               onDragOver={e => handleSingerDragOver(e, singer.singerId)}
@@ -90,7 +90,7 @@ export default function RotationPanel({
                 {/* Avatar doubles as the drag handle */}
                 <QueueDragHandle id={singer.singerId} attribute="data-singer-drag-id"
                   label={`Reorder ${singer.displayName}, position ${idx + 1}`}
-                  disabled={busy || savingQueueOrder || !queueState.activeRotation}
+                  disabled={busy || savingQueueOrder || !queueState.activeRotation || singer.anonymous}
                   onStart={() => handleSingerDragStart(singer.singerId)}
                   onTarget={setSingerDragOverId} onEnd={handleSingerDragEnd}
                   onDrop={(sourceId, targetId) => void reorderSingers(sourceId, targetId)}>
@@ -120,24 +120,24 @@ export default function RotationPanel({
                   <div className="singer-queue-stats">
                     <span title="Queued songs" aria-label={`${singer.queuedSongsCount} queued songs`}><MaterialIcon name="music_note" />{singer.queuedSongsCount}</span>
                     <span title="Songs sung" aria-label={`${singer.totalSongsSung} songs sung`}><MaterialIcon name="check_circle" />{singer.totalSongsSung}</span>
-                    {singer.lastSangAt && <span className="singer-queue-last-sang" title="Last sang"><MaterialIcon name="schedule" />{formatTimeAgo(singer.lastSangAt)}</span>}
+                    {!singer.anonymous && singer.lastSangAt && <span className="singer-queue-last-sang" title="Last sang"><MaterialIcon name="schedule" />{formatTimeAgo(singer.lastSangAt)}</span>}
                   </div>
                 </div>
 
                 {/* Actions */}
                 <div className="singer-queue-actions">
-                  <button
+                  {!singer.anonymous && <button
                     className="control-btn ghost"
                     title="View singer queue and history"
                     aria-label={`View ${singer.displayName}'s queue and history`}
                     onClick={() => openSingerModal(singer.singerId)}
                   >
                     <MaterialIcon name="visibility" />
-                  </button>
+                  </button>}
                   <button
                     className="control-btn ghost danger-text"
-                    title="Remove singer from rotation"
-                    aria-label={`Remove ${singer.displayName} from rotation`}
+                    title={singer.anonymous ? 'Remove song from queue' : 'Remove singer from rotation'}
+                    aria-label={singer.anonymous ? `Remove ${singer.queuedSongs[0]?.title || 'song'} from queue` : `Remove ${singer.displayName} from rotation`}
                     disabled={busy}
                     onClick={() => removeSingerFromRotation(singer.singerId)}
                   >

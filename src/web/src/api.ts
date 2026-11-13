@@ -2,9 +2,10 @@
 const runtimeConfig = (window as any).__ENV__;
 const envBase = runtimeConfig?.API_BASE?.trim() || (import.meta as any).env?.VITE_API_BASE?.trim();
 const devDefault = 'http://localhost:5174';
+// The Vite dev server (port 5173) talks to the API on 5174; anything else is served by the API itself.
 const inferredBase =
   typeof window !== 'undefined' && window.location?.origin
-    ? ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname)
+    ? ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname) && window.location.port === '5173'
       ? devDefault
       : window.location.origin
     : undefined;

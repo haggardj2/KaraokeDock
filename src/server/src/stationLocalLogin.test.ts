@@ -17,7 +17,11 @@ let port: number;
 
 beforeAll(async () => {
   const app = express();
-  app.use('/api', createStationLocalLoginRouter());
+  const adminGuard: express.RequestHandler = (req, res, next) => {
+    if (req.get('x-session-token') === 'admin-token') next();
+    else res.status(403).json({ error: 'Admin role required' });
+  };
+  app.use('/api', createStationLocalLoginRouter(adminGuard));
   server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   port = (server.address() as AddressInfo).port;
@@ -35,20 +39,22 @@ beforeEach(() => {
 });
 
 // http.request rather than fetch so the Host and Origin headers can be set freely.
-function signIn(headers: Record<string, string> = {}) {
+function post(path: string, headers: Record<string, string> = {}, body = '') {
   return new Promise<{ status: number; body: any }>((resolve, reject) => {
     const req = http.request({
-      host: '127.0.0.1', port, path: '/api/auth/station-local', method: 'POST',
-      headers: { 'x-station-local': '1', host: `127.0.0.1:${port}`, ...headers },
+      host: '127.0.0.1', port, path, method: 'POST',
+      headers: { 'x-station-local': '1', host: `127.0.0.1:${port}`, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
     }, res => {
       let text = '';
       res.on('data', chunk => { text += chunk; });
       res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(text) }));
     });
     req.on('error', reject);
-    req.end();
+    req.end(body);
   });
 }
+
+const signIn = (headers: Record<string, string> = {}) => post('/api/auth/station-local', headers);
 
 describe('Station local sign-in', () => {
   it('signs a local Station request in as the admin', async () => {
@@ -103,5 +109,64 @@ describe('isStationLocalRequest', () => {
     expect(isStationLocalRequest(request('192.168.1.20'))).toBe(false);
     expect(isStationLocalRequest(request('::ffff:192.168.1.20'))).toBe(false);
     expect(isStationLocalRequest(request('fe80::1'))).toBe(false);
+  });
+});
+
+describe('Station folder picker', () => {
+  let control: http.Server;
+  let controlCalls: { authorization?: string; body: any }[];
+  let controlReply: { status: number; body: unknown };
+
+  beforeAll(async () => {
+    control = http.createServer((req, res) => {
+      let text = '';
+      req.on('data', chunk => { text += chunk; });
+      req.on('end', () => {
+        controlCalls.push({ authorization: req.headers.authorization, body: JSON.parse(text) });
+        res.writeHead(controlReply.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(controlReply.body));
+      });
+    });
+    control.listen(0, '127.0.0.1');
+    await new Promise(resolve => control.once('listening', resolve));
+  });
+  afterAll(async () => {
+    control.closeAllConnections();
+    await new Promise(resolve => control.close(resolve));
+  });
+  beforeEach(() => {
+    controlCalls = [];
+    controlReply = { status: 200, body: { path: 'D:\\Karaoke' } };
+    vi.stubEnv('STATION_CONTROL_URL', `http://127.0.0.1:${(control.address() as AddressInfo).port}`);
+    vi.stubEnv('STATION_CONTROL_TOKEN', 'secret');
+  });
+
+  const pick = (headers: Record<string, string> = {}) => post('/api/station/pick-folder',
+    { 'x-session-token': 'admin-token', ...headers }, JSON.stringify({ title: 'Choose library folder', defaultPath: 'C:\\' }));
+
+  it('opens the picker on the Station and returns the chosen folder', async () => {
+    expect(await pick()).toEqual({ status: 200, body: { path: 'D:\\Karaoke' } });
+    expect(controlCalls).toEqual([{ authorization: 'Bearer secret', body: { title: 'Choose library folder', defaultPath: 'C:\\' } }]);
+  });
+
+  it('returns null when the picker is cancelled and 409 while one is open', async () => {
+    controlReply = { status: 200, body: { path: null } };
+    expect((await pick()).body).toEqual({ path: null });
+    controlReply = { status: 409, body: { error: 'busy' } };
+    expect((await pick()).status).toBe(409);
+  });
+
+  it.each([
+    ['for a non-admin', { 'x-session-token': 'user-token' }, 403],
+    ['from another device', { 'x-station-local': '' }, 404],
+    ['for a LAN host name', { host: '192.168.1.20:5174' }, 404],
+  ])('is refused %s', async (_name, headers, status) => {
+    expect((await pick(headers)).status).toBe(status);
+    expect(controlCalls).toEqual([]);
+  });
+
+  it('is refused without Station control', async () => {
+    vi.stubEnv('STATION_CONTROL_URL', '');
+    expect((await pick()).status).toBe(404);
   });
 });

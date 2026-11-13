@@ -32,7 +32,7 @@ import {
   extractTrackDuration,
   extractAudioMetadata
 } from '../scanner';
-import { resolveExistingMediaPath } from './media';
+import { getMediaRoots, resolveExistingMediaPath } from './media';
 import {
   DEFAULT_LIBRARY_PARSE_MODE,
   isLibraryParseMode,
@@ -58,7 +58,8 @@ import { getOidcProfileClaims, getOidcGroupRole } from '../oidcProfile.js';
 import { hostGuard } from '../middleware/hostGuard.js';
 import { canAccessHost } from '../permissions.js';
 import { createSocialAuthRouter, socialAuthNoStore } from './socialAuth.js';
-import { createStationLocalLoginRouter } from '../stationLocalLogin.js';
+import { createStationLocalLoginRouter, hasStationControl } from '../stationLocalLogin.js';
+import { getAutomaticRequestsUrl, getPublicRequestsUrl } from '../requestsUrl.js';
 import { createBackupRouter } from './backup.js';
 import { createRequire } from 'node:module';
 import { maskSocialConfig, SOCIAL_CONFIG_KEY, type SocialConfig } from '../socialAuthConfig.js';
@@ -491,7 +492,7 @@ const adminGuard: express.RequestHandler = async (req, res, next) => {
 };
 
 apiRouter.use(createSocialAuthRouter(adminGuard, () => postQueueUpdate('queue.updated')));
-apiRouter.use(createStationLocalLoginRouter());
+apiRouter.use(createStationLocalLoginRouter(adminGuard));
 apiRouter.use(createBackupRouter(adminGuard, {
   appVersion: (createRequire(import.meta.url)('../../package.json') as { version: string }).version,
   getImageUploadsDir: async () => path.resolve(await getImageUploadsDir()),
@@ -1089,7 +1090,9 @@ async function runRemoteGatewayPollCycle() {
         `[remoteGateway] poll complete: queued ${result.pulledRequests.queued}, rejected ${result.pulledRequests.rejected}, gateway pending ${result.status?.pendingRequests ?? 0}.`
       );
     } catch (err: any) {
-      if (!String(err?.message || '').includes('not configured')) {
+      // A disabled or unconfigured Gateway is normal, not a failure worth logging every poll.
+      const message = String(err?.message || '');
+      if (!message.includes('not configured') && !message.includes('not enabled')) {
         logger.warn('[remoteGateway] poll failed:', err);
       }
     } finally {
@@ -2537,30 +2540,6 @@ async function getOidcFrontendUrl(req: express.Request): Promise<string> {
   return `${proto}://${host}`;
 }
 
-function getPublicWebAppUrl(req: express.Request): string {
-  const webAppUrl = process.env.WEB_APP_URL?.trim();
-  if (webAppUrl) return webAppUrl.replace(/\/$/, '');
-
-  const origins = process.env.ORIGIN?.split(',').map((o: string) => o.trim()).filter(Boolean);
-  if (origins?.length) return origins[0].replace(/\/$/, '');
-
-  const host = req.headers.host || 'localhost:5173';
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  return `${proto}://${host}`.replace(/\/$/, '');
-}
-
-async function getPublicRequestsUrl(req: express.Request): Promise<string> {
-  const [gatewayEnabled, gatewayUrl] = await Promise.all([
-    getSetting('remote_gateway.enabled'),
-    getSetting('remote_gateway.url'),
-  ]);
-  const normalizedGatewayUrl = String(gatewayUrl ?? '').trim().replace(/\/+$/, '');
-  if (gatewayEnabled === true && normalizedGatewayUrl) {
-    return normalizedGatewayUrl;
-  }
-  return `${getPublicWebAppUrl(req)}/request`;
-}
-
 function sseSend(res: express.Response, event: string, data: any) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -2688,7 +2667,8 @@ apiRouter.get(
       getLibraryScanStatus(),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM artists`),
       query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM tracks`),
-      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue`),
+      // Songs still waiting to be sung; done, skipped and removed rows stay in the table as history.
+      query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM queue WHERE status = 'queued'`),
     ]);
     res.json({
       artists: Number(artists.rows[0].c),
@@ -3408,8 +3388,12 @@ apiRouter.get(
   '/browse',
   adminGuard,
   ah(async (req, res) => {
-    const requestPath = String(req.query.path || '/media')
-    
+    // Without a path, list the media folders themselves as the starting point.
+    if (!req.query.path) {
+      return res.json(getMediaRoots().map(root => ({ name: root, path: root, isDirectory: true })))
+    }
+    const requestPath = String(req.query.path)
+
     try {
       // Try to access the directory
       const entries = await fs.readdir(requestPath, { withFileTypes: true })
@@ -3417,8 +3401,10 @@ apiRouter.get(
       const items = entries
         .filter(entry => {
           // Filter out hidden and system directories
-          return !entry.name.startsWith('.') && 
-                 entry.name !== 'lost+found'
+          return !entry.name.startsWith('.') &&
+                 !entry.name.startsWith('$') &&
+                 entry.name !== 'lost+found' &&
+                 entry.name !== 'System Volume Information'
         })
         .map(entry => ({
           name: entry.name,
@@ -6011,7 +5997,10 @@ apiRouter.get(
       }
     }
     settings['station.mode'] = process.env.STATION_MODE === 'true';
+    settings['station.folder_picker'] = hasStationControl();
     settings['images.upload_dir'] = settings['images.upload_dir'] || DEFAULT_IMAGE_UPLOADS_DIR;
+    // Shown in Admin › System as the address used when no override is set.
+    settings['requests.url_automatic'] = getAutomaticRequestsUrl(req);
     res.json(settings);
   })
 );
@@ -6078,6 +6067,11 @@ apiRouter.put(
 
     if (key === 'admin.background_break_music_scan_enabled') {
       await syncBreakMusicScanTaskState({ runImmediately: value !== false });
+    }
+
+    // The Player re-reads the Requests link (and its QR code) when it may have changed.
+    if (key === 'requests.url_override' || key === 'remote_gateway.url' || key === 'remote_gateway.enabled') {
+      postQueueUpdate('requests.url.updated');
     }
 
     if (

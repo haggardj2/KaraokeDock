@@ -12,7 +12,8 @@ import { apiRouter, setPostQueueUpdate, syncRemoteGatewayTaskState } from './rou
 import { socialAuthNoStore } from './routes/socialAuth.js';
 import { publicLegalRouter } from './routes/publicLegal.js';
 import { mediaRouter } from './routes/media';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, type WebSocket } from 'ws';
+import { isSameOriginRequest } from './sameOrigin.js';
 import { qrRouter } from './routes/qr';
 import { rotationRouter } from './routes/rotation';
 import { logger, setLogLevel, type LogLevel } from './logger';
@@ -115,10 +116,10 @@ const corsOptions = {
 
 const wildcardOriginAllowed = allowedOrigins.length === 1 && allowedOrigins[0] === '*';
 
-function isOriginAllowed(origin: string | undefined) {
+function isOriginAllowed(origin: string | undefined, host?: string) {
   if (wildcardOriginAllowed) return true;
   if (!origin) return false;
-  return allowedOrigins.includes(origin.trim());
+  return allowedOrigins.includes(origin.trim()) || isSameOriginRequest(origin, host);
 }
 
 function rejectUpgrade(socket: Duplex, statusCode: number, message: string) {
@@ -188,14 +189,33 @@ if (webDistDir) {
 // websockets: broadcast exact message types Player expects
 const wss = new WebSocketServer({ noServer: true });
 
-// Keep WebSocket connections alive with ping/pong
-setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.readyState === 1) {
-      ws.ping();
+// Keep WebSocket connections alive with ping/pong, and drop a client that missed the last
+// pong: its connection died without closing, and holding it only wastes broadcasts.
+const aliveClients = new WeakSet<WebSocket>();
+wss.on('connection', (ws) => {
+  aliveClients.add(ws);
+  ws.on('pong', () => aliveClients.add(ws));
+  // Answer client heartbeats so a client can tell a live connection from a silently dead one.
+  ws.on('message', (data) => {
+    try {
+      if (JSON.parse(String(data))?.type === 'heartbeat' && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'heartbeat' }));
+      }
+    } catch {
+      // Not JSON: ignore.
     }
   });
-}, 30000); // Send ping every 30 seconds
+});
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!aliveClients.has(ws)) {
+      ws.terminate();
+      return;
+    }
+    aliveClients.delete(ws);
+    if (ws.readyState === 1) ws.ping();
+  });
+}, 30000); // Ping every 30 seconds
 
 setPostQueueUpdate((type = 'queue.updated', data?: any) => {
   const msg = JSON.stringify({ type, ...(data || {}) });
@@ -230,7 +250,7 @@ const server = bindHost
 
 server.on('upgrade', (req, socket, head) => {
   const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
-  if (!isOriginAllowed(origin)) {
+  if (!isOriginAllowed(origin, req.headers.host)) {
     rejectUpgrade(socket, 403, 'Forbidden');
     return;
   }

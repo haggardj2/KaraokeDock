@@ -128,7 +128,7 @@ export function describeYouTubeIframeError(code: unknown): string {
       return "The YouTube video was not found or is private.";
     case 101:
     case 150:
-      return "The video owner does not allow embedded playback.";
+      return "The video owner does not allow embedded playback, or YouTube refused this page's address (it refuses pages served from 127.0.0.1; use localhost).";
     case 153:
       return "YouTube rejected the embedded player configuration, usually because the request did not include an acceptable HTTP Referer.";
     default:

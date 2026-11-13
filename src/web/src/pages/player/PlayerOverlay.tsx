@@ -6,6 +6,7 @@ import { renderTickerText, type RotationScrollerSinger } from "./helpers";
 // The bar along the bottom of the Player: request QR code, scrolling ticker and fullscreen button.
 export default function PlayerOverlay({
   overlaySettings,
+  requestsUrl,
   tickerText,
   breakMusicTrackText,
   rotationScrollerSingers,
@@ -14,6 +15,8 @@ export default function PlayerOverlay({
   onToggleFullscreen,
 }: {
   overlaySettings: OverlaySettings;
+  /** Changes the QR image URL when the Requests link changes, so a cached QR is not reused. */
+  requestsUrl: string;
   tickerText: string;
   breakMusicTrackText: string;
   rotationScrollerSingers: RotationScrollerSinger[];
@@ -74,7 +77,7 @@ export default function PlayerOverlay({
           } as CSSProperties}
         >
           <img
-            src={`${API_BASE}/api/qr`}
+            src={`${API_BASE}/api/qr?for=${encodeURIComponent(requestsUrl)}`}
             alt="QR"
             style={{
               width: "100%",

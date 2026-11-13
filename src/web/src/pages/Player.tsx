@@ -8,6 +8,8 @@ import {
   useState,
 } from "react";
 import { API_BASE, api, getWsUrl } from "../api";
+import { connectLiveSocket } from "../liveSocket";
+import { canEmbedYouTubeOn } from "./player/youtubeEmbed";
 import type { OverlaySettings } from "../components/QueueOverlay";
 import { parseZipMediaRef } from "../zipMediaRef";
 import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, playSingerMedia, prepareSingerIframe, canReportSingerTiming, restoreSingerPosition, type PlayerPlaybackState } from "../playerPlayback";
@@ -44,6 +46,8 @@ export default function Player() {
   const [isPlaying, setIsPlaying] = useState(false);
   const youtubeVideoId = now?.external_url ? getYouTubeVideoId(now.external_url) : null;
   const isYouTube = !!youtubeVideoId;
+  // Opened by IP address (a TV or another PC on the LAN), YouTube songs play from a download.
+  const youtubeEmbedAllowed = canEmbedYouTubeOn(window.location.hostname);
   const [playerState, setPlayerState] = useState(DEFAULT_PLAYER_PLAYBACK_STATE);
   const playerStateRef = useRef(DEFAULT_PLAYER_PLAYBACK_STATE);
   const currentQueueIdRef = useRef<QItem["id"] | null>(null);
@@ -70,7 +74,6 @@ export default function Player() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const youtubePlayerRef = useRef<YT.Player | null>(null);
   const youtubeReadyRef = useRef(false);
@@ -78,7 +81,6 @@ export default function Player() {
   const youtubeFallbackInFlightRef = useRef(false);
   const youtubeFallbackAttemptedRef = useRef<Set<string>>(new Set());
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const wsHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const {
     playerBackgroundSettings,
     backgroundSettingsError,
@@ -269,7 +271,7 @@ export default function Player() {
       });
   }, []);
 
-  useEffect(() => {
+  const loadPublicSettings = useCallback(() => {
     api("/api/settings/public")
       .then((settings: { "requests.url"?: string; "requests.theme"?: string }) => {
         setPlayerThemeId(resolvePlayerTheme(settings["requests.theme"]));
@@ -285,118 +287,90 @@ export default function Player() {
       });
   }, []);
 
-  // WebSocket live updates
   useEffect(() => {
-    function connect() {
-      try {
-        wsRef.current = new WebSocket(getWsUrl());
-        wsRef.current.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (
-              msg.type === "library.scanned" ||
-              msg.type === "queue.updated" ||
-              msg.type === "player.updated" ||
-              msg.type === "player.play" ||
-              msg.type === "player.next" ||
-              msg.type === "player.pause" ||
-              msg.type === "player.resume" ||
-              msg.type === "player.stop"
-            ) {
-              if (msg.type === "player.pause" || msg.type === "player.resume") {
-                applyPlayerState(msg);
-              }
-              if (msg.type === "player.play" || msg.type === "player.next") {
-                void breakPlaybackRef.current?.prepareForKaraoke();
-              }
-              refresh();
-              refreshBreakMusicState();
-              if (msg.type === "player.stop") {
-                currentQueueIdRef.current = null;
-                videoRef.current?.pause();
-                if (youtubeReadyRef.current) youtubePlayerRef.current?.pauseVideo();
-                setManualStop(true);
-              } else if (
-                msg.type === "player.play" ||
-                msg.type === "player.next"
-              ) {
-                setManualStop(false);
-              }
-            }
-            if (msg.type === "break_music.updated") {
-              refreshBreakMusicState();
-            }
-            // Handle overlay settings updates
-            if (msg.type === "overlay.settings") {
-              const settings = normalizeOverlaySettings(msg);
-              setOverlaySettings(settings);
-              if (settings.keepRotationScrollerSingers) {
-                refresh();
-              }
-            }
-            // Handle autoplay settings updates
-            if (msg.type === "autoplay.settings") {
-              if (typeof msg.enabled === "boolean") {
-                setAutoPlay(msg.enabled && msg.rotationAllowsAutoplay !== false);
-              }
-              if (typeof msg.delay === "number") {
-                // Only update delay if it actually changed to avoid resetting countdown
-                setAutoPlayDelay((prevDelay) => {
-                  if (prevDelay !== msg.delay) {
-                    return msg.delay;
-                  }
-                  return prevDelay;
-                });
-              }
-            }
-            if (msg.type === "requests.theme") {
-              setPlayerThemeId(resolvePlayerTheme(msg.theme));
-            }
-            if (msg.type === "player.background.settings") {
-              applyBackgroundSettings(msg);
-            }
-          } catch {
-            /* ignore */
+    loadPublicSettings();
+  }, [loadPublicSettings]);
+
+  // WebSocket live updates. connectLiveSocket reconnects after a close and also replaces a
+  // connection that has silently died (e.g. the TV's Wi-Fi dozed); every (re)connect reloads
+  // the queue and playback state, so nothing missed while disconnected is lost.
+  useEffect(() => {
+    return connectLiveSocket({
+      url: () => getWsUrl(),
+      onOpen: () => {
+        console.log("WebSocket connected");
+        refresh().catch(() => {});
+        refreshBreakMusicState();
+        void refreshPlayerBackground();
+      },
+      onMessage: (msg) => {
+        if (
+          msg.type === "library.scanned" ||
+          msg.type === "queue.updated" ||
+          msg.type === "player.updated" ||
+          msg.type === "player.play" ||
+          msg.type === "player.next" ||
+          msg.type === "player.pause" ||
+          msg.type === "player.resume" ||
+          msg.type === "player.stop"
+        ) {
+          if (msg.type === "player.pause" || msg.type === "player.resume") {
+            applyPlayerState(msg);
           }
-        };
-        wsRef.current.onclose = () => {
-          console.log("WebSocket closed, reconnecting...");
-          wsRef.current = null;
-          // Clear heartbeat timer
-          if (wsHeartbeatRef.current) {
-            clearInterval(wsHeartbeatRef.current);
-            wsHeartbeatRef.current = null;
+          if (msg.type === "player.play" || msg.type === "player.next") {
+            void breakPlaybackRef.current?.prepareForKaraoke();
           }
-          setTimeout(connect, 1000);
-        };
-        wsRef.current.onerror = (err) => {
-          console.error("WebSocket error:", err);
-        };
-        wsRef.current.onopen = () => {
-          console.log("WebSocket connected");
-          refresh().catch(() => {});
+          refresh();
           refreshBreakMusicState();
-          void refreshPlayerBackground();
-          // Start heartbeat - send a message every 45 seconds to keep connection alive
-          // This is in addition to server's ping/pong mechanism
-          wsHeartbeatRef.current = setInterval(() => {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              // Send a lightweight heartbeat message
-              wsRef.current.send(JSON.stringify({ type: "heartbeat" }));
-            }
-          }, 45000);
-        };
-      } catch {
-        setTimeout(connect, 1500);
-      }
-    }
-    connect();
-    return () => {
-      if (wsHeartbeatRef.current) {
-        clearInterval(wsHeartbeatRef.current);
-      }
-      wsRef.current?.close();
-    };
+          if (msg.type === "player.stop") {
+            currentQueueIdRef.current = null;
+            videoRef.current?.pause();
+            if (youtubeReadyRef.current) youtubePlayerRef.current?.pauseVideo();
+            setManualStop(true);
+          } else if (
+            msg.type === "player.play" ||
+            msg.type === "player.next"
+          ) {
+            setManualStop(false);
+          }
+        }
+        if (msg.type === "break_music.updated") {
+          refreshBreakMusicState();
+        }
+        if (msg.type === "requests.url.updated") {
+          loadPublicSettings();
+        }
+        // Handle overlay settings updates
+        if (msg.type === "overlay.settings") {
+          const settings = normalizeOverlaySettings(msg);
+          setOverlaySettings(settings);
+          if (settings.keepRotationScrollerSingers) {
+            refresh();
+          }
+        }
+        // Handle autoplay settings updates
+        if (msg.type === "autoplay.settings") {
+          if (typeof msg.enabled === "boolean") {
+            setAutoPlay(msg.enabled && msg.rotationAllowsAutoplay !== false);
+          }
+          if (typeof msg.delay === "number") {
+            // Only update delay if it actually changed to avoid resetting countdown
+            setAutoPlayDelay((prevDelay) => {
+              if (prevDelay !== msg.delay) {
+                return msg.delay;
+              }
+              return prevDelay;
+            });
+          }
+        }
+        if (msg.type === "requests.theme") {
+          setPlayerThemeId(resolvePlayerTheme(msg.theme));
+        }
+        if (msg.type === "player.background.settings") {
+          applyBackgroundSettings(msg);
+        }
+      },
+    });
   }, [refresh, refreshBreakMusicState, applyPlayerState]);
 
   // Build the media URL - pure computation, no side effects
@@ -573,6 +547,13 @@ export default function Player() {
     [now?.id, now?.external_url, refresh],
   );
 
+  // Where YouTube cannot embed (opened by IP address), go straight to the downloaded copy.
+  useEffect(() => {
+    if (!now?.id || !isYouTube || youtubeEmbedAllowed) return;
+    console.info("YouTube refuses embeds on pages opened by IP address; playing a downloaded copy instead.");
+    void fallbackYouTubeToDownloadedTrack("ip-address");
+  }, [now?.id, isYouTube, youtubeEmbedAllowed, fallbackYouTubeToDownloadedTrack]);
+
   // Monitor video play/pause state and handle video end
   useEffect(() => {
     const v = videoRef.current;
@@ -652,7 +633,7 @@ export default function Player() {
   // through the iframe first; fallback download only starts after an iframe API
   // error such as embedding disabled (101/150).
   useEffect(() => {
-    if (!now || !isYouTube || !youtubeVideoId) return;
+    if (!now || !isYouTube || !youtubeVideoId || !youtubeEmbedAllowed) return;
 
     const playerId = `youtube-player-${now.id}-${youtubeVideoId}`;
     let disposed = false;
@@ -741,9 +722,7 @@ export default function Player() {
             },
             onError: (event: any) => {
               if (disposed) return;
-              console.error("YouTube iframe error:", {
-                code: event.data,
-                message: describeYouTubeIframeError(event.data),
+              console.error(`YouTube iframe error ${event.data}: ${describeYouTubeIframeError(event.data)}`, {
                 videoId: youtubeVideoId,
                 url: now.external_url,
                 origin: window.location.origin,
@@ -884,6 +863,7 @@ export default function Player() {
   const renderOverlay = () => (
     <PlayerOverlay
       overlaySettings={overlaySettings}
+      requestsUrl={requestsUrl}
       tickerText={tickerText}
       breakMusicTrackText={breakMusicTrackText}
       rotationScrollerSingers={rotationScrollerSingers}
@@ -1055,7 +1035,11 @@ export default function Player() {
           onRetry={() => void refreshPlayerBackground()}
         />
         {renderWakeLockNotice()}
-        {isYouTube && youtubeVideoId ? (
+        {isYouTube && !youtubeEmbedAllowed ? (
+          <div className="player-youtube-preparing" role="status">
+            Preparing video…
+          </div>
+        ) : isYouTube && youtubeVideoId ? (
           <iframe
             key={`${now.id}-${youtubeVideoId}`}
             id={`youtube-player-${now.id}-${youtubeVideoId}`}

@@ -41,6 +41,25 @@ describe('queue and history crop metadata', () => {
   });
 });
 
+describe('songs without a singer', () => {
+  it('show as Anonymous until done, one entry per song, in queue order', async () => {
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({ rows: [
+        { id: 50, track_id: 1, singer_id: null, requested_by: null, status: 'playing', position: 1, title: 'Now' },
+        { id: 51, track_id: 2, singer_id: '9', requested_by: 'Singer', status: 'queued', position: 2 },
+        { id: 52, track_id: 3, singer_id: null, requested_by: '  ', status: 'queued', position: 3, title: 'Later' },
+        { id: 53, track_id: 4, singer_id: null, requested_by: null, status: 'done', position: 0 },
+        { id: 54, track_id: 5, singer_id: null, requested_by: null, status: 'removed', position: 4 },
+      ] } as any)
+      .mockResolvedValueOnce({ rows: [{ id: '9', display_name: 'Singer', status: 'active' }] } as any);
+    const { queueOrder } = await getQueueState();
+    expect(queueOrder.map((entry) => entry.singerId)).toEqual(['anonymous:50', '9', 'anonymous:52']);
+    expect(queueOrder[0]).toMatchObject({ anonymous: true, displayName: 'Anonymous', nextSong: null, queuedSongsCount: 0 });
+    expect(queueOrder[2]).toMatchObject({ anonymous: true, queuedSongsCount: 1, nextSong: { queueId: 52, title: 'Later' } });
+  });
+});
+
 function makeSinger(overrides: Partial<QueueSinger> = {}): QueueSinger {
   return {
     singerId: overrides.singerId ?? '1',

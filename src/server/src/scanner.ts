@@ -574,8 +574,13 @@ export async function getZipMp3Duration(zipPath: string, mp3Name: string): Promi
         zipFile.on('entry', (entry: any) => {
           if (entry.fileName === mp3Name) {
             // Extract MP3 to temp file to analyze duration
-            tmpFile = path.join('/tmp', `temp_${Date.now()}_${Math.random().toString(36).substring(7)}.mp3`);
+            tmpFile = path.join(os.tmpdir(), `temp_${Date.now()}_${Math.random().toString(36).substring(7)}.mp3`);
             const writeStream = require('fs').createWriteStream(tmpFile);
+            // Without a handler a failed write (e.g. an unwritable temp folder) is an uncaught exception.
+            writeStream.on('error', () => {
+              zipFile.close();
+              resolve(null);
+            });
             
             zipFile.openReadStream(entry, (err2: any, readStream: any) => {
               if (err2 || !readStream) {

@@ -155,3 +155,15 @@
     font-size: 16px !important;
   }
 }
+
+/* Shown while a YouTube song is downloaded for a Player opened by IP address. */
+.player-youtube-preparing {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: clamp(20px, 3vw, 40px);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+}

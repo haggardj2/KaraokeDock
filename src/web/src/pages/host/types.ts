@@ -33,6 +33,8 @@ export type QueueSong = {
 
 export type QueueSinger = {
   singerId: string
+  /** A song requested without a name; singerId is 'anonymous:<queueId>'. */
+  anonymous?: boolean
   publicUuid?: string | null
   displayName: string
   status: string

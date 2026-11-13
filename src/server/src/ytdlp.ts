@@ -71,7 +71,10 @@ export async function getYtDlpVersion(): Promise<string | null> {
  */
 export async function updateYtDlp(): Promise<{ success: boolean; message: string; version?: string }> {
   return new Promise((resolve) => {
-    const proc = spawn('pip3', ['install', '--upgrade', '--break-system-packages', 'yt-dlp']);
+    // Station ships the standalone yt-dlp binary, which updates itself; the Docker image installs it with pip.
+    const proc = process.env.STATION_MODE === 'true'
+      ? spawn('yt-dlp', ['-U'])
+      : spawn('pip3', ['install', '--upgrade', '--break-system-packages', 'yt-dlp']);
     let output = '';
     let errorOutput = '';
     

@@ -11,6 +11,12 @@ export default function SystemSection({ admin }: { admin: AdminState }) {
     busy,
     imageUploadsDir,
     setImageUploadsDir,
+    requestsUrlOverride,
+    setRequestsUrlOverride,
+    requestsUrlAutomatic,
+    handleRequestsUrlOverrideChange,
+    remoteGatewayEnabled,
+    remoteGatewayUrl,
     ytdlpVersion,
     ytdlpUpdating,
     downloadLocation,
@@ -232,6 +238,56 @@ export default function SystemSection({ admin }: { admin: AdminState }) {
                   </div>
                 </div>
                   </div>
+              </div>
+
+              {/* Requests link: the address printed on the Player and in its QR code */}
+              <div style={{
+                background: "var(--color-bg-secondary)",
+                border: "1px solid var(--color-border)",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16
+              }}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 16 }}><MaterialIcon name="qr_code_2" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />Requests Link &amp; QR Code</h3>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label" htmlFor="requests-url-override">Requests Link</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      id="requests-url-override"
+                      className="form-input"
+                      type="url"
+                      placeholder={requestsUrlAutomatic || "http://192.168.1.20:5174/request"}
+                      value={requestsUrlOverride}
+                      onChange={(e) => setRequestsUrlOverride(e.target.value)}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn}
+                    />
+                    <button
+                      className="btn-icon success"
+                      onClick={handleRequestsUrlOverrideChange}
+                      disabled={!auth.sessionToken || !auth.isLoggedIn}
+                      title="Save Requests link"
+                      aria-label="Save Requests link"
+                    >
+                      <MaterialIcon name="check" />
+                    </button>
+                  </div>
+                  <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+                    The address singers open to request songs, printed on the Player and in its QR code.
+                    Leave it empty to use this server's address{requestsUrlAutomatic ? <> (<code>{requestsUrlAutomatic}</code>)</> : null}.
+                  </p>
+                  <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+                    Use a name, not an IP address: for example <code>http://karaoke-pc.local:5174/request</code> rather
+                    than <code>http://192.168.1.20:5174/request</code>. YouTube refuses to play embedded videos on pages
+                    opened by IP address, so a Player opened that way plays a downloaded copy of each YouTube song instead.
+                    The same applies to the address you open the Player at on a TV or another computer.
+                  </p>
+                  {remoteGatewayEnabled && remoteGatewayUrl.trim() && (
+                    <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--color-warning, var(--color-text-muted))" }}>
+                      <MaterialIcon name="info" style={{ fontSize: 16, verticalAlign: 'text-bottom', marginRight: 4 }} />
+                      The Remote Requests Gateway is enabled, so the Player shows the Gateway address (<code>{remoteGatewayUrl.trim()}</code>) instead.
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Image Uploads */}

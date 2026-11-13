@@ -53,9 +53,39 @@ async function findStationAdmin(): Promise<User | null> {
   return res.rows[0] || null;
 }
 
-/** POST /auth/station-local: signs a Station's own windows and local browsers in as admin. */
-export function createStationLocalLoginRouter() {
+/** Whether this server runs inside Station with its desktop app reachable (native dialogs). */
+export function hasStationControl() {
+  return process.env.STATION_MODE === 'true' && Boolean(process.env.STATION_CONTROL_URL && process.env.STATION_CONTROL_TOKEN);
+}
+
+/**
+ * POST /auth/station-local: signs a Station's own windows and local browsers in as admin.
+ * POST /station/pick-folder (admin): opens the native folder picker on the Station screen,
+ * only for a page open on the Station machine itself.
+ */
+export function createStationLocalLoginRouter(adminGuard: express.RequestHandler) {
   const router = express.Router();
+  router.post('/station/pick-folder', adminGuard, express.json(), async (req, res, next) => {
+    try {
+      if (!hasStationControl() || !isStationLocalRequest(req)) {
+        res.status(404).json({ error: 'The folder picker is only available on the Station itself' });
+        return;
+      }
+      const response = await fetch(`${process.env.STATION_CONTROL_URL}/pick-folder`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.STATION_CONTROL_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: req.body?.title, defaultPath: req.body?.defaultPath }),
+      });
+      const result = await response.json() as { path?: string | null; error?: string };
+      if (!response.ok) {
+        res.status(response.status === 409 ? 409 : 502).json({ error: result.error || 'The folder picker failed' });
+        return;
+      }
+      res.json({ path: typeof result.path === 'string' ? result.path : null });
+    } catch (error) {
+      next(error);
+    }
+  });
   router.post('/auth/station-local', async (req, res, next) => {
     try {
       if (!isStationLocalRequest(req)) {

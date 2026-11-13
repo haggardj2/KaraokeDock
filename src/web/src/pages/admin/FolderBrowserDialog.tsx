@@ -1,6 +1,7 @@
 import React from "react";
 import MaterialIcon from "../../components/MaterialIcon";
 import type { AdminState } from "./useAdmin";
+import FolderBreadcrumb from "./FolderBreadcrumb";
 
 // Pick a folder on the server for a library.
 export default function FolderBrowserDialog({ admin }: { admin: AdminState }) {
@@ -38,41 +39,14 @@ export default function FolderBrowserDialog({ admin }: { admin: AdminState }) {
                     </button>
                   </div>
 
-                  <div className="browser-path">
-                    <MaterialIcon name="location_on" />
-                    <div className="breadcrumb">
-                      <span
-                        className="breadcrumb-part"
-                        onClick={() => browseFolders("/")}
-                      >
-                        /
-                      </span>
-                      {currentBrowsePath
-                        .split("/")
-                        .filter(Boolean)
-                        .map((part, idx, arr) => {
-                          const partPath = "/" + arr.slice(0, idx + 1).join("/");
-                          return (
-                            <React.Fragment key={idx}>
-                              <span className="breadcrumb-sep">/</span>
-                              <span
-                                className="breadcrumb-part"
-                                onClick={() => browseFolders(partPath)}
-                              >
-                                {part}
-                              </span>
-                            </React.Fragment>
-                          );
-                        })}
-                    </div>
-                  </div>
+                  <FolderBreadcrumb path={currentBrowsePath} onBrowse={browseFolders} />
 
                   {browseError && (
                     <div className="error-msg"><MaterialIcon name="warning" style={{ fontSize: 18, verticalAlign: 'text-bottom', marginRight: 6 }} />{browseError}</div>
                   )}
 
                   <div className="browser-container">
-                    {currentBrowsePath !== "/" && (
+                    {currentBrowsePath !== "" && (
                       <div className="folder-item" onClick={navigateUp}>
                         <MaterialIcon name="arrow_upward" className="folder-icon" />
                         <span className="folder-name">..</span>
@@ -113,6 +87,7 @@ export default function FolderBrowserDialog({ admin }: { admin: AdminState }) {
                     <button
                       className="btn success"
                       onClick={() => selectFolder(currentBrowsePath)}
+                      disabled={!currentBrowsePath}
                     >
                       <MaterialIcon name="check" /> Select This Folder
                     </button>

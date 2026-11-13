@@ -120,10 +120,12 @@ export function useSingerRotation({
 
   async function removeSingerFromRotation(singerId: string) {
     if (!auth.sessionToken || !auth.canHost) return
-    if (!confirm('Remove this singer from the active rotation? Their history and profile will remain available in Singer History.')) return
+    const singer = queueState?.queueOrder.find((entry) => entry.singerId === singerId)
+    if (!confirm(singer?.anonymous
+      ? 'Remove this song from the queue?'
+      : 'Remove this singer from the active rotation? Their history and profile will remain available in Singer History.')) return
     setBusy(true)
     try {
-      const singer = queueState?.queueOrder.find((entry) => entry.singerId === singerId)
       await Promise.all(
         (singer?.queuedSongs ?? []).map((song) =>
           api(`/api/queue/${song.queueId}/status`, {
@@ -133,7 +135,8 @@ export function useSingerRotation({
           }),
         ),
       )
-      if (queueState?.activeRotation) {
+      // An Anonymous entry is just its song; there is no rotation singer to remove.
+      if (queueState?.activeRotation && !singer?.anonymous) {
         const rotationId = queueState.activeRotation.id
         await api(`/api/rotations/${rotationId}/singers/${singerId}`, { method: 'DELETE', headers })
           .catch((err: unknown) => console.error(`Failed to remove singer ${singerId} from rotation:`, err))

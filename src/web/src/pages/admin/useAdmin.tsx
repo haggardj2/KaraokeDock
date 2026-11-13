@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, API_BASE } from "../../api";
 import { useAuth } from "../../auth-context";
 import { parseBooleanSetting } from "../../utils/settings";
+import { parentFolder } from "./folderPath";
 import SocialLoginSettings from "../../components/SocialLoginSettings";
 import AccountLinkDialog from "../../components/AccountLinkDialog";
 import SingerAvatar from "../../components/SingerAvatar";
@@ -39,7 +40,7 @@ export function useAdmin() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [banner, setBanner] = useState<string>("");
   const [showBrowser, setShowBrowser] = useState(false);
-  const [currentBrowsePath, setCurrentBrowsePath] = useState("/media");
+  const [currentBrowsePath, setCurrentBrowsePath] = useState("");
   const [folderContents, setFolderContents] = useState<FolderItem[]>([]);
   const [browseError, setBrowseError] = useState<string>("");
   const [browseTarget, setBrowseTarget] = useState<'library' | 'download' | 'breakLibrary' | 'breakPlaylists' | 'images'>('library');
@@ -92,9 +93,12 @@ export function useAdmin() {
   const [allowDownloads, setAllowDownloads] = useState(true);
   const [showDownloadBrowser, setShowDownloadBrowser] = useState(false);
   const [stationMode, setStationMode] = useState(false);
+  const [stationFolderPicker, setStationFolderPicker] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [remoteGatewayEnabled, setRemoteGatewayEnabled] = useState(false);
   const [remoteGatewayUrl, setRemoteGatewayUrl] = useState("");
+  const [requestsUrlOverride, setRequestsUrlOverride] = useState("");
+  const [requestsUrlAutomatic, setRequestsUrlAutomatic] = useState("");
   const [remoteGatewayToken, setRemoteGatewayToken] = useState("");
   const [remoteGatewayPollInterval, setRemoteGatewayPollInterval] = useState(5);
   const [remoteGatewayBusy, setRemoteGatewayBusy] = useState(false);
@@ -532,11 +536,34 @@ export function useAdmin() {
     }
   }
 
-  const openBrowser = () => {
+  // On the Station machine itself, Browse opens the system folder picker (Windows Explorer's
+  // "Select Folder" and so on). Returns the folder, null when cancelled, or undefined when the
+  // picker is not available here, in which case the web folder browser is used instead.
+  async function pickFolderOnStation(title: string, currentPath: string): Promise<string | null | undefined> {
+    if (!stationFolderPicker || !["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)) return undefined;
+    try {
+      const result = await api("/api/station/pick-folder", {
+        method: "POST",
+        headers: { ...sessionHeaders, "Content-Type": "application/json", "x-station-local": "1" },
+        body: JSON.stringify({ title, defaultPath: currentPath }),
+      });
+      return typeof result?.path === "string" ? result.path : null;
+    } catch (err) {
+      console.warn("Station folder picker unavailable; using the web folder browser:", err);
+      return undefined;
+    }
+  }
+
+  const openBrowser = async () => {
+    const picked = await pickFolderOnStation("Choose a library folder", path);
+    if (picked !== undefined) {
+      if (picked) setPath(picked);
+      return;
+    }
     setBrowseTarget('library');
     setShowBrowser(true);
-    setCurrentBrowsePath(path || "/media");
-    browseFolders(path || "/media");
+    setCurrentBrowsePath(path);
+    browseFolders(path);
   };
 
   const selectFolder = (folderPath: string) => {
@@ -555,9 +582,7 @@ export function useAdmin() {
   };
 
   const navigateUp = () => {
-    const parentPath =
-      currentBrowsePath. split("/").slice(0, -1).join("/") || "/";
-    browseFolders(parentPath);
+    browseFolders(parentFolder(currentBrowsePath));
   };
 
   // yt-dlp functions
@@ -614,9 +639,12 @@ export function useAdmin() {
       setBreakPlaylistsFolder(settings["break_music.playlists_folder"] || "/media/playlists");
       setImageUploadsDir(settings["images.upload_dir"] || "/media/images");
       setStationMode(settings["station.mode"] === true);
+      setStationFolderPicker(settings["station.folder_picker"] === true);
       setSettingsLoaded(true);
       setRemoteGatewayEnabled(settings["remote_gateway.enabled"] === true);
       setRemoteGatewayUrl(settings["remote_gateway.url"] || "");
+      setRequestsUrlOverride(settings["requests.url_override"] || "");
+      setRequestsUrlAutomatic(settings["requests.url_automatic"] || "");
       setRemoteGatewayToken(settings["remote_gateway.api_token"] || "");
       setRemoteGatewayPollInterval(Number(settings["remote_gateway.poll_interval_seconds"] ?? 5));
       if (settings["admin.log_level"]) setLogLevel(settings["admin.log_level"]);
@@ -657,6 +685,24 @@ export function useAdmin() {
       setTimeout(() => setBanner(""), 3000);
     } catch (err: any) {
       setBanner(`⚠️ Failed to update break music playlists folder: ${err.message}`);
+      setTimeout(() => setBanner(""), 5000);
+    }
+  }
+
+  async function handleRequestsUrlOverrideChange() {
+    const value = requestsUrlOverride.trim();
+    if (value && !/^https?:\/\/[^\s/]+/i.test(value)) {
+      setBanner("⚠️ The Requests link must start with http:// or https://");
+      setTimeout(() => setBanner(""), 5000);
+      return;
+    }
+    try {
+      await saveSetting("requests.url_override", value);
+      setRequestsUrlOverride(value);
+      setBanner(value ? "✔ Requests link updated" : "✔ Requests link set back to automatic");
+      setTimeout(() => setBanner(""), 3000);
+    } catch (err: any) {
+      setBanner(`⚠️ Failed to update the Requests link: ${err.message}`);
       setTimeout(() => setBanner(""), 5000);
     }
   }
@@ -880,11 +926,16 @@ export function useAdmin() {
     }
   }
 
-  const openDownloadBrowser = () => {
+  const openDownloadBrowser = async () => {
+    const picked = await pickFolderOnStation("Choose the download folder", downloadLocation);
+    if (picked !== undefined) {
+      if (picked) setDownloadLocation(picked);
+      return;
+    }
     setBrowseTarget('download');
     setShowDownloadBrowser(true);
-    setCurrentBrowsePath(downloadLocation || "/media/downloads");
-    browseFolders(downloadLocation || "/media/downloads");
+    setCurrentBrowsePath(downloadLocation);
+    browseFolders(downloadLocation);
   };
 
   const selectDownloadFolder = (folderPath: string) => {
@@ -892,25 +943,40 @@ export function useAdmin() {
     setShowDownloadBrowser(false);
   };
 
-  const openBreakLibraryBrowser = () => {
+  const openBreakLibraryBrowser = async () => {
+    const picked = await pickFolderOnStation("Choose a break music folder", breakFolderPath);
+    if (picked !== undefined) {
+      if (picked) setBreakFolderPath(picked);
+      return;
+    }
     setBrowseTarget('breakLibrary');
     setShowBrowser(true);
-    setCurrentBrowsePath(breakFolderPath || "/media");
-    browseFolders(breakFolderPath || "/media");
+    setCurrentBrowsePath(breakFolderPath);
+    browseFolders(breakFolderPath);
   };
 
-  const openBreakPlaylistsBrowser = () => {
+  const openBreakPlaylistsBrowser = async () => {
+    const picked = await pickFolderOnStation("Choose the break music playlists folder", breakPlaylistsFolder);
+    if (picked !== undefined) {
+      if (picked) setBreakPlaylistsFolder(picked);
+      return;
+    }
     setBrowseTarget('breakPlaylists');
     setShowBrowser(true);
-    setCurrentBrowsePath(breakPlaylistsFolder || "/media/playlists");
-    browseFolders(breakPlaylistsFolder || "/media/playlists");
+    setCurrentBrowsePath(breakPlaylistsFolder);
+    browseFolders(breakPlaylistsFolder);
   };
 
-  const openImageUploadsBrowser = () => {
+  const openImageUploadsBrowser = async () => {
+    const picked = await pickFolderOnStation("Choose the image upload folder", imageUploadsDir);
+    if (picked !== undefined) {
+      if (picked) setImageUploadsDir(picked);
+      return;
+    }
     setBrowseTarget('images');
     setShowBrowser(true);
-    setCurrentBrowsePath(imageUploadsDir || "/media/images");
-    browseFolders(imageUploadsDir || "/media/images");
+    setCurrentBrowsePath(imageUploadsDir);
+    browseFolders(imageUploadsDir);
   };
 
   async function scanDownloadLocation() {
@@ -1181,6 +1247,10 @@ export function useAdmin() {
     settingsLoaded,
     setSettingsLoaded,
     remoteGatewayEnabled,
+    requestsUrlOverride,
+    setRequestsUrlOverride,
+    requestsUrlAutomatic,
+    handleRequestsUrlOverrideChange,
     setRemoteGatewayEnabled,
     remoteGatewayUrl,
     setRemoteGatewayUrl,

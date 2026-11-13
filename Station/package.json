@@ -15,9 +15,11 @@
     "stage:postgres": "bash scripts/stage-postgres.sh",
     "stage:ffmpeg": "bash scripts/stage-ffmpeg.sh",
     "stage:runtimes": "npm run stage:postgres && npm run stage:ffmpeg",
+    "stage:windows": "node scripts/stage-windows.mjs",
     "check:runtime": "node scripts/check-runtime.cjs",
     "dev": "npm run check:runtime && npm run build:station && electron .",
-    "dist:appimage": "npm run check:runtime && npm run stage:runtimes && npm run build:station && electron-builder --linux AppImage"
+    "dist:appimage": "npm run check:runtime && npm run stage:runtimes && npm run build:station && electron-builder --linux AppImage",
+    "dist:win": "npm run check:runtime && npm run stage:windows && npm run build:station && electron-builder --win nsis"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
@@ -79,6 +81,32 @@
         "AppImage"
       ],
       "category": "AudioVideo"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": ".build/yt-dlp",
+          "to": "yt-dlp"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "KaraokeDock Station",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "KaraokeDock-Station-Setup-${version}.${ext}"
     }
   },
   "allowScripts": {
