@@ -1,4 +1,6 @@
 import { createPortal } from "react-dom";
+import KarafunLogo from "../../components/KarafunLogo";
+import { describeQueueVersion } from "./helpers";
 import type { MyQueue } from "./useMyQueue";
 
 // "My Queue": the bar pinned to the bottom of the Request page and the sheet it opens.
@@ -251,6 +253,16 @@ export default function MyQueueSheet({ myQueue: queue, nameConfirmed }: {
                                 <div className="my-queue-artist">
                                   {item.artist || "Unknown"}
                                 </div>
+                                {(() => {
+                                  const version = describeQueueVersion(item);
+                                  if (!version.karafun && !version.text) return null;
+                                  return (
+                                    <div className="my-queue-version">
+                                      {version.karafun && <KarafunLogo height={12} />}
+                                      {version.text && <span>{version.text}</span>}
+                                    </div>
+                                  );
+                                })()}
                                 <span
                                   className={`my-queue-status ${
                                     item.status === "playing"

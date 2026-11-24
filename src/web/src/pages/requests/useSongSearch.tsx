@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import { groupKey, searchRelevance, toLocalSearchTrack } from "./helpers";
+import { searchKarafun, toKarafunCombinedTrack, type KarafunTrack } from "./karafunSearch";
 import type {
   BrowseArtistRow,
   BrowseCategory,
@@ -8,17 +9,20 @@ import type {
   CombinedSearchTrack,
   KaraokeNerdsTrack,
   SearchRow,
+  SourceFilter,
 } from "./types";
 
 // Song search and A–Z browse on the Request page: the query and filters, the debounced
-// local + Karaoke Nerds searches, the browse loaders, and the grouped result lists.
+// local + Karaoke Nerds + KaraFun searches, the browse loaders, and the grouped result lists.
 export function useSongSearch({
   localLibraryEnabled,
   externalLibraryEnabled,
+  karafunEnabled,
   localBrowseEnabled,
 }: {
   localLibraryEnabled: boolean;
   externalLibraryEnabled: boolean;
+  karafunEnabled: boolean;
   localBrowseEnabled: boolean;
 }) {
   const [q, setQ] = useState("");
@@ -29,8 +33,10 @@ export function useSongSearch({
   const [karaokeNerdsRows, setKaraokeNerdsRows] = useState<KaraokeNerdsTrack[]>(
     [],
   );
+  const [karafunRows, setKarafunRows] = useState<KarafunTrack[]>([]);
   const [busy, setBusy] = useState(false);
   const [knBusy, setKnBusy] = useState(false);
+  const [karafunBusy, setKarafunBusy] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
   const [browseCategory, setBrowseCategory] =
     useState<BrowseCategory>("artist");
@@ -47,12 +53,19 @@ export function useSongSearch({
   // Fuzzy suggestions (shown when main search returns no results)
   const [fuzzySuggestions, setFuzzySuggestions] = useState<SearchRow[]>([]);
   // Collapsible result sections (collapsed by default)
-  // Source filter: 'all' | 'local' | 'online'
-  const [sourceFilter, setSourceFilter] = useState<"all" | "local" | "online">(
-    "all",
-  );
+  // Source filter: everything, or only the local library, Karaoke Nerds videos or KaraFun
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const browseArtistScrollYRef = useRef(0);
+  // Drop a source filter whose library has been switched off.
+  useEffect(() => {
+    if (
+      (sourceFilter === "karafun" && !karafunEnabled) ||
+      (sourceFilter === "online" && !externalLibraryEnabled)
+    ) {
+      setSourceFilter("all");
+    }
+  }, [externalLibraryEnabled, karafunEnabled, sourceFilter]);
   useEffect(() => {
     if (!localBrowseEnabled && localViewMode === "browse") {
       setLocalViewMode("search");
@@ -123,6 +136,23 @@ export function useSongSearch({
       setKaraokeNerdsRows([]);
     } finally {
       setKnBusy(false);
+    }
+  }, [q]);
+
+  // KaraFun search
+  const doKarafunSearch = useCallback(async () => {
+    if (!q.trim()) {
+      setKarafunRows([]);
+      return;
+    }
+    setKarafunBusy(true);
+    try {
+      setKarafunRows(await searchKarafun(q.trim()));
+    } catch (err) {
+      console.error("KaraFun search error:", err);
+      setKarafunRows([]);
+    } finally {
+      setKarafunBusy(false);
     }
   }, [q]);
 
@@ -266,7 +296,7 @@ export function useSongSearch({
     [kindFilter],
   );
 
-  // Debounced search — fires both local and KN simultaneously
+  // Debounced search — fires local, KN and KaraFun simultaneously
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
@@ -275,10 +305,12 @@ export function useSongSearch({
     if (localViewMode === "browse") {
       if (!q.trim()) {
         setKaraokeNerdsRows([]);
+        setKarafunRows([]);
         return;
       }
       searchTimeoutRef.current = setTimeout(() => {
         if (externalLibraryEnabled) doKaraokeNerdsSearch();
+        if (karafunEnabled) doKarafunSearch();
       }, 350);
       return () => {
         if (searchTimeoutRef.current) {
@@ -290,6 +322,7 @@ export function useSongSearch({
     searchTimeoutRef.current = setTimeout(() => {
       if (localLibraryEnabled) doLocalSearch();
       if (externalLibraryEnabled) doKaraokeNerdsSearch();
+      if (karafunEnabled) doKarafunSearch();
     }, 350);
 
     return () => {
@@ -302,8 +335,10 @@ export function useSongSearch({
     localViewMode,
     localLibraryEnabled,
     externalLibraryEnabled,
+    karafunEnabled,
     doLocalSearch,
     doKaraokeNerdsSearch,
+    doKarafunSearch,
   ]);
 
   // Re-run searches when switching back from browse to search
@@ -312,6 +347,7 @@ export function useSongSearch({
     if (q.trim()) {
       if (localLibraryEnabled) doLocalSearch();
       if (externalLibraryEnabled) doKaraokeNerdsSearch();
+      if (karafunEnabled) doKarafunSearch();
     }
   }, [localViewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -379,7 +415,9 @@ export function useSongSearch({
   const showLocalResults = localLibraryEnabled && localRows.length > 0;
   const showKnResults = externalLibraryEnabled && karaokeNerdsRows.length > 0;
   const isLoading = busy || browseBusy;
+  const showKarafunResults = karafunEnabled && karafunRows.length > 0;
   const isKnLoading = knBusy;
+  const isKarafunLoading = karafunBusy;
   const availableBrowseLetters = new Set(browseLetters);
   // Group local search results by normalised title + artist to deduplicate across disc IDs
   type GroupedResult = {
@@ -454,11 +492,20 @@ export function useSongSearch({
     });
   }, [browseCategory, isLocalBrowseMode, karaokeNerdsRows, q]);
 
+  const visibleKarafunRows = useMemo(() => {
+    if (!isLocalBrowseMode || !q.trim()) return karafunRows;
+    const query = q.trim().toLowerCase();
+    return karafunRows.filter((track) => {
+      const value = browseCategory === "artist" ? track.artist : track.title;
+      return (value ?? "").toLowerCase().includes(query);
+    });
+  }, [browseCategory, isLocalBrowseMode, karafunRows, q]);
+
   const combinedSearchGroups = useMemo((): CombinedSearchGroup[] => {
     const tracks: CombinedSearchTrack[] = [];
     if (
       localLibraryEnabled &&
-      (isLocalBrowseMode || sourceFilter !== "online")
+      (isLocalBrowseMode || sourceFilter === "all" || sourceFilter === "local")
     ) {
       for (const row of localRows) {
         tracks.push(toLocalSearchTrack(row));
@@ -466,7 +513,7 @@ export function useSongSearch({
     }
     if (
       externalLibraryEnabled &&
-      (isLocalBrowseMode || sourceFilter !== "local")
+      (isLocalBrowseMode || sourceFilter === "all" || sourceFilter === "online")
     ) {
       for (const track of visibleKaraokeNerdsRows) {
         tracks.push({
@@ -479,11 +526,18 @@ export function useSongSearch({
         });
       }
     }
+    if (karafunEnabled && (isLocalBrowseMode || sourceFilter === "all" || sourceFilter === "karafun")) {
+      for (const track of visibleKarafunRows) {
+        tracks.push(toKarafunCombinedTrack(track));
+      }
+    }
 
     const deduped = new Map<string, CombinedSearchTrack>();
     for (const track of tracks) {
       const dedupeKey =
-        track.type === "online"
+        track.type === "karafun"
+          ? `karafun:${track.track.songId}`
+          : track.type === "online"
           ? `online:${track.track.url.trim().toLowerCase().replace(/\/+$/, "")}`
           : `local:${track.track.id}`;
       if (!deduped.has(dedupeKey)) deduped.set(dedupeKey, track);
@@ -507,8 +561,8 @@ export function useSongSearch({
       .map((group) => ({
         ...group,
         versions: group.versions.sort((a, b) => {
-          const aVersion = a.type === "online" ? a.brand ?? "" : a.discId ?? "";
-          const bVersion = b.type === "online" ? b.brand ?? "" : b.discId ?? "";
+          const aVersion = a.type === "local" ? a.discId ?? "" : a.brand ?? "";
+          const bVersion = b.type === "local" ? b.discId ?? "" : b.brand ?? "";
           return aVersion.localeCompare(bVersion, undefined, {
             sensitivity: "base",
             numeric: true,
@@ -525,8 +579,10 @@ export function useSongSearch({
   }, [
     localRows,
     visibleKaraokeNerdsRows,
+    visibleKarafunRows,
     localLibraryEnabled,
     externalLibraryEnabled,
+    karafunEnabled,
     isLocalBrowseMode,
     q,
     sourceFilter,
@@ -561,6 +617,9 @@ export function useSongSearch({
     setBusy,
     knBusy,
     setKnBusy,
+    karafunRows,
+    setKarafunRows,
+    karafunBusy,
     browseBusy,
     setBrowseBusy,
     browseLetters,
@@ -587,6 +646,7 @@ export function useSongSearch({
     browseArtistScrollYRef,
     doLocalSearch,
     doKaraokeNerdsSearch,
+    doKarafunSearch,
     loadBrowseLetters,
     loadBrowseArtists,
     loadBrowseTitles,
@@ -595,14 +655,17 @@ export function useSongSearch({
     showingBrowseArtistList,
     showLocalResults,
     showKnResults,
+    showKarafunResults,
     isLoading,
     isKnLoading,
+    isKarafunLoading,
     availableBrowseLetters,
     visibleLocalRows,
     visibleBrowseArtists,
     groupedLocalRows,
     groupedFuzzySuggestions,
     visibleKaraokeNerdsRows,
+    visibleKarafunRows,
     combinedSearchGroups,
     browseCombinedGroups,
     browseCategory,

@@ -1,5 +1,6 @@
 // Data shapes used by the Request page and its dialogs.
 import type { SingerProfile } from "../../components/SingerAvatar";
+import type { KarafunTrack } from "./karafunTypes";
 
 export type SearchRow = {
   id: number;
@@ -23,9 +24,15 @@ export type MyQueueItem = {
   title: string | null;
   artist: string | null;
   status: string;
+  source?: string | null;
+  discId?: string | null;
+  kind?: string | null;
+  keyAdjustment?: number;
 };
 
 export type BrowseCategory = "artist" | "title";
+
+export type SourceFilter = "all" | "local" | "online" | "karafun";
 
 export type SelfSingerProfileResponse = {
   singerId: string;
@@ -58,6 +65,14 @@ export type CombinedSearchTrack =
       artist: string;
       brand: string | null;
       track: KaraokeNerdsTrack;
+    }
+  | {
+      type: "karafun";
+      key: string;
+      title: string;
+      artist: string;
+      brand: string;
+      track: KarafunTrack;
     };
 
 export type CombinedSearchGroup = {

@@ -55,6 +55,7 @@ export default function Host() {
   // Library availability settings
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true)
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true)
+  const [karafunEnabled, setKarafunEnabled] = useState(false)
 
   // Download settings
   const [allowDownloads, setAllowDownloads] = useState(true)
@@ -116,6 +117,7 @@ export default function Host() {
 
         setLocalLibraryEnabled(localEnabled);
         setExternalLibraryEnabled(externalEnabled);
+        setKarafunEnabled(settings['libraries.karafun_enabled'] === true);
         setAllowDownloads(downloadsAllowed);
 
       } catch (err) {
@@ -650,6 +652,7 @@ export default function Host() {
                 queueState={queueState}
                 localLibraryEnabled={localLibraryEnabled}
                 externalLibraryEnabled={externalLibraryEnabled}
+                karafunEnabled={karafunEnabled}
                 allowDownloads={allowDownloads}
                 downloadingTrack={downloadingTrack}
                 downloadVideo={downloadVideo}

@@ -11,7 +11,9 @@
   <Support>https://github.com/haggardj2/KaraokeDock/issues</Support>
   <Project>https://github.com/haggardj2/KaraokeDock</Project>
   <ReadMe>https://github.com/haggardj2/KaraokeDock/blob/main/docs/unraid_readme.md</ReadMe>
-  <Overview>KaraokeDock is a self-hosted karaoke system with singer requests, live host controls, rotation and history, MP4 and CDG+MP3 playback, online karaoke search, and break-music playlists.
+  <Overview>KaraokeDock is a self-hosted karaoke system with singer requests, live host controls, rotation and history, MP4 and CDG+MP3 playback, online karaoke search, optional KaraFun catalog, and break-music playlists.
+
+KaraFun is optional and needs a KaraFun subscription. Enter the account in Admin under KaraFun, then enable it under System, Library Availability and Requests. No extra paths or variables are needed; the container needs outbound HTTPS to KaraFun. Songs are mixed on the server when requested and kept in memory only (up to 256 MB), never saved to your shares.
 
 Requires a separate PostgreSQL database; create the database and user before starting. On default bridge networking, use the Unraid server IP and PostgreSQL's published host port. Container-name DNS requires a shared user-defined Docker network.
 

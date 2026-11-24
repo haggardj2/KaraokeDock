@@ -11,6 +11,7 @@ can manage the show from one screen while guests request songs from their phones
 - [Changelog and upgrade notes](../CHANGELOG.md)
 - [Features](#features)
 - [Web pages overview](#web-pages-overview)
+- [Themes](#themes)
 - [Quick start with Docker](#quick-start-with-docker)
 - [First-time setup](#first-time-setup)
 - [Authentication and roles](#authentication-and-roles)
@@ -25,14 +26,20 @@ can manage the show from one screen while guests request songs from their phones
 
 - Local MP4, CDG+MP3, and ZIP karaoke libraries, with FFmpeg transcoding and
   pitch adjustment.
-- Combined local and Karaoke Nerds search, relevance-ranked results, and
-  artist/song browsing.
+- Combined local, Karaoke Nerds and KaraFun search, relevance-ranked results,
+  and artist/song browsing.
+- Optional KaraFun catalog (with a KaraFun subscription): songs are prepared on
+  the server when requested and played on the Player with KaraFun's own lyric
+  timing, title card and an animated background. Nothing is saved to the media library.
 - Live singer queues, drag-and-drop ordering, multiple rotation policies,
   autoplay, singer recall, and history import/export.
 - Break music playlists, crossfades, and a choice to pause or silently advance
   break music during a performance.
-- Singer profiles, pictures and crops, optional Google/Facebook login, and
-  administrator-managed account linking.
+- Singer profiles, pictures and crops, optional Google/Facebook login,
+  administrator-managed account linking, and Host merging of a guest profile into
+  a signed-in singer.
+- A warning when a singer requests a song (any version) that another singer
+  already has queued.
 - Local password login and OIDC group-based roles.
 - Fullscreen Player with QR code, scrolling queue, custom backgrounds, and
   separate Host/Player PWA installation.
@@ -55,17 +62,31 @@ Replace `your-server:5173` with your server address or public HTTPS hostname.
 Old `/requests` links redirect to `/request`. Unknown page paths return 404.
 Public legal pages are available at `/privacy` and `/terms`.
 
-The screenshots below were captured from the current UI on **2026-10-23** with
-fictional singers and sample catalog data, not a live venue or production account.
+The screenshots below were captured from the current UI on **2026-11-23** with
+fictional singers, songs and accounts, not a live venue or production account.
 
 ### Request
 
-Search local and enabled online sources from the same page. Browse Artists and
-Browse Songs reuse the main query and restrict it to the selected field. Open
-the cog for search options; use the profile menu for name, picture, history,
-logout, and application version.
+Search local and enabled online sources from the same page. Artists and Songs
+reuse the main query and restrict it to the selected field. Results show where
+each version comes from: a disc ID and format for local songs, a globe for
+Karaoke Nerds videos, and the KaraFun logo for KaraFun songs. Use the profile
+menu for name, picture, history, logout, and application version.
 
-![Current Request page showing combined search and sample song results](screenshots/requests-page.png)
+![Current Request page showing local, Karaoke Nerds and KaraFun results](screenshots/requests-page.png)
+
+Open the filter button to choose a source (All, Local, Online for Karaoke Nerds,
+or KaraFun), where to search, and the format. Format applies only to local
+songs, so it is disabled while the KaraFun source is selected.
+
+![Request filters with the KaraFun source selected and Format disabled](screenshots/requests-karafun-filter.png)
+
+**My Queue** lists your requested songs with the version you picked: the disc
+and format, the Karaoke Nerds brand, or KaraFun, plus any key change. If you
+request a song another singer already has queued, in any version, it is still
+added and a warning tells you.
+
+![My Queue on a phone showing a local CDG song and a KaraFun song](screenshots/requests-my-queue.png)
 
 ### Host
 
@@ -73,7 +94,24 @@ Managed Users and Admins can add singers, reorder or clear queues, recall
 singers, manage history, and control playback. Drag a queue number or hold a
 singer card to reorder on supported touch devices.
 
-![Current Host page with a three-singer sample queue](screenshots/host-page.png)
+![Current Host page with a five-singer sample rotation](screenshots/host-page.png)
+
+#### Add songs for a singer
+
+**Add song** searches the local library, Karaoke Nerds (External), KaraFun, or
+takes a video URL. On a phone the four sources wrap onto two rows.
+
+![Add to Queue dialog searching KaraFun](screenshots/host-add-song.png)
+
+#### Merge a guest into a signed-in singer
+
+When someone first joined by name and later signed in with Google, Facebook, SSO
+or a password, open either singer and select the **Merge guest singer** button. Pick the signed-in
+singer to keep and the guest profile to merge in. The guest's queue and history
+move to the signed-in singer, whose name and picture are kept; logins and their
+permissions do not change. Linking two logins to each other stays an Admin action.
+
+![Merge Guest Singer into Login dialog on Host](screenshots/host-guest-merge.png)
 
 #### Manage break music
 
@@ -94,27 +132,53 @@ warning without discarding the saved playlist.
 
 #### Configure playback settings
 
-Use Host's settings control for autoplay, rotation, break music behavior,
-backgrounds, and QR/scroller options.
+Use Host's settings control for the Request page theme, autoplay, rotation,
+break music behavior, backgrounds, and QR/scroller options.
 
 ![Current Player Settings dialog opened from Host](screenshots/player_mgmt.png)
 
 ### Player
 
 Open Player on the show display and control it from Host on another device.
+Between songs it shows who is up next and the address guests use to request.
 The QR code and scroller remain separate from video playback. Local video uses
 cover sizing, which can crop edges when aspect ratios differ.
 
-![Current Player waiting screen with sample singer, QR code, and queue scroller](screenshots/player-page.png)
+![Current Player waiting screen with the next singer, request address, QR code and queue scroller](screenshots/player-page.png)
 
 ### Admin
 
-Admins manage media libraries and scans, break music folders, accounts,
-authentication, library availability, and public legal information. Linking
-social logins to a managed account is an explicit Admin action; matching names
-does not automatically grant access.
+Admins manage media libraries and scans, break music folders, the KaraFun
+account, accounts, authentication, library availability, backups, and public
+legal information. Linking social logins to a managed account is an explicit
+Admin action; matching names does not automatically grant access.
 
-![Current Admin dashboard with sample library and statistics](screenshots/admin-page.png)
+![Current Admin overview with sample statistics and sections](screenshots/admin-page.png)
+
+The **KaraFun** section stores the KaraFun account used for the online catalog
+and shows its connection status. The password is stored only as a hash. Turn
+KaraFun on or off for singers under System → Library Availability & Requests.
+When a KaraFun song is requested, the server mixes it at the requested key and
+keeps the mix in memory for up to 4 hours; the Player streams it. KaraFun songs
+are never saved to the media library.
+
+![Admin KaraFun section with a fictional connected account](screenshots/admin-karafun.png)
+
+### Themes
+
+KaraokeDock has three themes: **Midnight** (the default), **Stage** and
+**Daylight**.
+
+- **Venue theme:** the Host sets it under Player Settings → Request Page Theme.
+  It is used by the Request page and the Player.
+- **Singers** can keep the venue theme or pick their own from the profile menu
+  on the Request page. The choice is remembered on that phone.
+- **Host and Admin** share one theme, chosen from the account menu in the top
+  bar and remembered in that browser.
+
+![The Request page in the Midnight, Stage and Daylight themes](screenshots/themes-request.png)
+
+![The Host page in the Stage and Daylight themes](screenshots/themes-host.png)
 
 ## Quick start with Docker
 

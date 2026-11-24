@@ -1058,6 +1058,19 @@
   border-color: var(--color-accent);
 }
 
+/* Four sources do not fit in one row on a phone; use two rows of two. */
+@media (max-width: 560px) {
+  :is(.host-page, .host-bar-actions) .search-mode-toggle {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  :is(.host-page, .host-bar-actions) .mode-button {
+    min-width: 0;
+    padding: 10px 12px;
+  }
+}
+
 :is(.host-page, .host-bar-actions) .search-input {
   width: 100%;
   padding: 12px 16px;

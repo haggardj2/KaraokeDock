@@ -10,6 +10,11 @@ import {
 import { API_BASE, api, getWsUrl } from "../api";
 import { connectLiveSocket } from "../liveSocket";
 import { canEmbedYouTubeOn } from "./player/youtubeEmbed";
+import KarafunStage from "./player/KarafunStage";
+import KaraokeEngineStage from "./player/karaoke/KaraokeEngineStage";
+import { installKaraokeAudioUnlock } from "./player/karaoke/audioContext";
+import { getKarafunSongId } from "./player/karafunQueueItem";
+import { prefetchKarafunSong } from "./player/karaoke/prefetch";
 import type { OverlaySettings } from "../components/QueueOverlay";
 import { parseZipMediaRef } from "../zipMediaRef";
 import { DEFAULT_PLAYER_PLAYBACK_STATE, normalizePlayerPlaybackState, isSingerPaused, playSingerMedia, prepareSingerIframe, canReportSingerTiming, restoreSingerPosition, type PlayerPlaybackState } from "../playerPlayback";
@@ -46,6 +51,18 @@ export default function Player() {
   const [isPlaying, setIsPlaying] = useState(false);
   const youtubeVideoId = now?.external_url ? getYouTubeVideoId(now.external_url) : null;
   const isYouTube = !!youtubeVideoId;
+  // KaraFun songs play in their own stage, never through the <video> element.
+  const karafunSongId = getKarafunSongId(now);
+  const karafunSkipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // KaraFun songs play in the built-in engine; after an engine error for this item,
+  // KarafunStage plays the progressive Ogg tracks with native audio instead.
+  const karafunItemKey = now ? `${now.id}-${now.track_id}` : "";
+  const [karafunEngineFailedFor, setKarafunEngineFailedFor] = useState<string | null>(null);
+  // Set once the current KaraFun song is ready to play; until then break music continues.
+  const [karafunReadyFor, setKarafunReadyFor] = useState<string | null>(null);
+  const karafunReadyForRef = useRef<string | null>(null);
+  const karafunPreparing = karafunSongId != null && karafunReadyFor !== karafunItemKey;
+  const karafunEngineDurationRef = useRef(0);
   // Opened by IP address (a TV or another PC on the LAN), YouTube songs play from a download.
   const youtubeEmbedAllowed = canEmbedYouTubeOn(window.location.hostname);
   const [playerState, setPlayerState] = useState(DEFAULT_PLAYER_PLAYBACK_STATE);
@@ -90,7 +107,7 @@ export default function Player() {
     applyBackgroundSettings,
   } = usePlayerBackground();
   const { breakMusicState, breakAudioRef, breakPlaybackRef, refreshBreakMusicState } =
-    useBreakMusicPlayer({ now, playerState });
+    useBreakMusicPlayer({ now, playerState, songPreparing: karafunPreparing });
   const hideSingerQueueEnabled = overlaySettings.hideSingerQueue;
   const keepRotationScrollerSingersEnabled =
     hideSingerQueueEnabled && overlaySettings.keepRotationScrollerSingers;
@@ -111,6 +128,9 @@ export default function Player() {
       wakeLock.dispose();
     };
   }, []);
+
+  // Any tap or key press on the Player, at any time, lets KaraFun audio start by itself.
+  useEffect(() => installKaraokeAudioUnlock(), []);
 
   // Force dark theme
   useEffect(() => {
@@ -223,14 +243,18 @@ export default function Player() {
     ]);
     if (revision !== refreshRevisionRef.current) return;
     const cur = q.find((x) => x.status === "playing") || null;
+    // A KaraFun song keeps the break music going until it is ready to play.
+    const curPreparing = getKarafunSongId(cur) != null &&
+      karafunReadyForRef.current !== `${cur?.id}-${cur?.track_id}`;
+    if (curPreparing) breakPlaybackRef.current?.holdForSongPreparation(true);
     if (!cur || String(cur.id) !== String(currentQueueIdRef.current)) {
       videoRef.current?.pause();
       if (youtubeReadyRef.current) youtubePlayerRef.current?.pauseVideo();
     }
     currentQueueIdRef.current = cur?.id ?? null;
     applyPlayerState(playback);
-    breakPlaybackRef.current?.confirmKaraokeActive(!!cur || playback.queueId != null);
-    if (cur) {
+    if (!curPreparing) breakPlaybackRef.current?.confirmKaraokeActive(!!cur || playback.queueId != null);
+    if (cur && !curPreparing) {
       void breakPlaybackRef.current?.prepareForKaraoke();
     }
     setQueue(q);
@@ -317,9 +341,8 @@ export default function Player() {
           if (msg.type === "player.pause" || msg.type === "player.resume") {
             applyPlayerState(msg);
           }
-          if (msg.type === "player.play" || msg.type === "player.next") {
-            void breakPlaybackRef.current?.prepareForKaraoke();
-          }
+          // Break music fades once refresh() knows the song: a KaraFun song keeps it
+          // playing until the song is ready.
           refresh();
           refreshBreakMusicState();
           if (msg.type === "player.stop") {
@@ -378,6 +401,8 @@ export default function Player() {
     if (!now) return "";
     const keyAdjustment = now.key_adjustment ?? 0;
 
+    if (getKarafunSongId(now) != null) return "";
+
     // Handle external URLs (e.g., from Karaoke Nerds)
     if (now.external_url) {
       const videoId = getYouTubeVideoId(now.external_url);
@@ -431,6 +456,7 @@ export default function Player() {
     now?.id,
     now?.track_id,
     now?.external_url,
+    now?.source,
     now?.kind,
     now?.file_mp4,
     now?.file_cdg,
@@ -517,6 +543,35 @@ export default function Player() {
     },
     [],
   );
+
+  // A KaraFun song that cannot be streamed shows its error briefly, then finishes so the
+  // queue moves on instead of hanging on a silent stage.
+  const handleKarafunError = useCallback(
+    (message: string, queueId: number | string) => {
+      console.error("KaraFun stage error:", message);
+      if (karafunSkipTimerRef.current) clearTimeout(karafunSkipTimerRef.current);
+      karafunSkipTimerRef.current = setTimeout(() => {
+        karafunSkipTimerRef.current = null;
+        if (String(currentQueueIdRef.current) === String(queueId)) {
+          sendTimingUpdate(1, 1, queueId);
+        }
+      }, 8000);
+    },
+    [sendTimingUpdate],
+  );
+
+  // The KaraFun song is downloaded, mixed and decoded: fade the break music, then play.
+  const handleKarafunReady = useCallback((itemKey: string) => {
+    karafunReadyForRef.current = itemKey;
+    setKarafunReadyFor(itemKey);
+    return breakPlaybackRef.current?.fadeOutForKaraoke() ?? Promise.resolve();
+  }, []);
+
+  useEffect(() => () => {
+    if (karafunSkipTimerRef.current) clearTimeout(karafunSkipTimerRef.current);
+    karafunSkipTimerRef.current = null;
+    karafunEngineDurationRef.current = 0;
+  }, [now?.id, now?.track_id]);
 
   const fallbackYouTubeToDownloadedTrack = useCallback(
     async (errorCode?: number | string) => {
@@ -774,6 +829,16 @@ export default function Player() {
 
   // Memoize the queue count to avoid unnecessary effect re-runs
   const queuedCount = useMemo(() => upNext.length, [queue]);
+
+  // Make sure the server has the next KaraFun song mixed (it normally starts when the
+  // song is requested; this covers a server restart or an evicted song).
+  const nextKarafunSongId = getKarafunSongId(upNext[0]);
+  const nextKarafunKey = upNext[0]?.key_adjustment ?? 0;
+  useEffect(() => {
+    if (nextKarafunSongId == null) return;
+    const timer = setTimeout(() => prefetchKarafunSong(nextKarafunSongId, nextKarafunKey), now ? 15000 : 0);
+    return () => clearTimeout(timer);
+  }, [nextKarafunSongId, nextKarafunKey, now?.id]);
 
   // Countdown timer for autoplay when no song is playing but queue has items
   useEffect(() => {
@@ -1035,7 +1100,42 @@ export default function Player() {
           onRetry={() => void refreshPlayerBackground()}
         />
         {renderWakeLockNotice()}
-        {isYouTube && !youtubeEmbedAllowed ? (
+        {karafunSongId != null && karafunEngineFailedFor !== karafunItemKey ? (
+          <KaraokeEngineStage
+            key={karafunItemKey}
+            songId={karafunSongId}
+            title={now.title}
+            artist={now.artist}
+            pitch={now.key_adjustment ?? 0}
+            paused={singerPaused}
+            startAtSec={String(playerState.queueId) === String(now.id) ? playerState.positionSec : 0}
+            beforePlay={() => handleKarafunReady(karafunItemKey)}
+            onTime={(time, duration) => {
+              karafunEngineDurationRef.current = duration;
+              sendTimingUpdate(time, duration, now.id);
+            }}
+            onEnded={() => {
+              // The stage already reported (duration, duration); without a known duration,
+              // the sentinel still lets the server finish the song and advance the queue.
+              if (!isValidDuration(karafunEngineDurationRef.current)) sendTimingUpdate(1, 1, now.id);
+            }}
+            onError={(message) => console.error("KaraFun engine error:", message)}
+            onFatal={(message) => {
+              console.warn("KaraFun engine failed, using the fallback player:", message);
+              setKarafunEngineFailedFor(karafunItemKey);
+            }}
+          />
+        ) : karafunSongId != null ? (
+          <KarafunStage
+            key={`${now.id}-${now.track_id}`}
+            songId={karafunSongId}
+            paused={singerPaused}
+            startAtSec={String(playerState.queueId) === String(now.id) ? playerState.positionSec : 0}
+            beforePlay={() => handleKarafunReady(karafunItemKey)}
+            onTime={(time, duration) => sendTimingUpdate(time, duration, now.id)}
+            onError={(message) => handleKarafunError(message, now.id)}
+          />
+        ) : isYouTube && !youtubeEmbedAllowed ? (
           <div className="player-youtube-preparing" role="status">
             Preparing video…
           </div>

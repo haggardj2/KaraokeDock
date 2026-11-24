@@ -1,0 +1,116 @@
+.karafun-stage {
+  --kf-sung: #fdd93d;
+  --kf-unsung: #ffffff;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+  color: #fff;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  z-index: 1;
+}
+
+.kf-background {
+  position: absolute;
+  inset: -4%;
+  background-size: cover;
+  background-position: center;
+  filter: blur(16px) brightness(0.32) saturate(1.15);
+  transform: scale(1.06);
+  transition: background-image 0.4s ease;
+}
+
+.kf-background::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 40%, transparent 0%, rgba(0, 0, 0, 0.82) 78%);
+}
+
+.kf-lyrics {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 3.5vh;
+  padding: 8vh 6vw;
+  pointer-events: none;
+}
+
+/* Each row holds one line; a replaced line stays in place while it fades out. */
+.kf-row {
+  position: relative;
+  display: grid;
+  min-height: 1.2em;
+  font-size: clamp(30px, 4.8vw, 72px);
+  font-weight: 800;
+  line-height: 1.18;
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+.kf-line {
+  grid-area: 1 / 1;
+  filter: drop-shadow(0 3px 10px rgba(0, 0, 0, 0.75));
+  animation: kf-line-in 0.45s ease-out both;
+}
+
+.kf-line.kf-leaving {
+  animation: kf-line-out 0.35s ease-in both;
+}
+
+@keyframes kf-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.25em);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes kf-line-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-0.2em);
+  }
+}
+
+/* --p (0..1) sweeps a soft-edged highlight across each syllable as it is sung. */
+.kf-syl {
+  --edge: 0.06;
+  background-image: linear-gradient(
+    90deg,
+    var(--kf-sung) calc((var(--p) * (1 + 2 * var(--edge)) - 2 * var(--edge)) * 100%),
+    var(--kf-unsung) calc((var(--p) * (1 + 2 * var(--edge))) * 100%)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.kf-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 18px;
+  text-align: center;
+}
+
+.kf-error {
+  color: #ff7a7a;
+}

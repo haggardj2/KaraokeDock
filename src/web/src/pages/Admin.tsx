@@ -9,6 +9,7 @@ import LibrariesSection from "./admin/LibrariesSection";
 import BreakMusicSection from "./admin/BreakMusicSection";
 import SystemSection from "./admin/SystemSection";
 import GatewaySection from "./admin/GatewaySection";
+import KaraFunSection from "./admin/KaraFunSection";
 import BackupSection from "./admin/BackupSection";
 import UsersSection from "./admin/UsersSection";
 import OidcSection from "./admin/OidcSection";
@@ -185,6 +186,8 @@ export default function Admin() {
             <BreakMusicSection admin={admin} />
 
             <SystemSection admin={admin} />
+
+            <KaraFunSection admin={admin} />
 
             <GatewaySection admin={admin} />
 

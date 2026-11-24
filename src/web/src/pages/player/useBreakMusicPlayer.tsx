@@ -9,9 +9,12 @@ import type { BreakMusicState, QItem } from "./helpers";
 export function useBreakMusicPlayer({
   now,
   playerState,
+  songPreparing = false,
 }: {
   now: QItem | null;
   playerState: PlayerPlaybackState;
+  /** The current song is still preparing (KaraFun): keep the break music playing. */
+  songPreparing?: boolean;
 }) {
   const [breakMusicState, setBreakMusicState] = useState<BreakMusicState>({
     paused: false,
@@ -57,14 +60,16 @@ export function useBreakMusicPlayer({
     if (!breakPlaybackRef.current) {
       breakPlaybackRef.current = createBreakMusicPlayback(audio);
     }
+    if (songPreparing) breakPlaybackRef.current.holdForSongPreparation(true);
     const track = breakMusicState.currentTrack;
     void breakPlaybackRef.current.update({
       ...breakMusicState,
       src: track?.file_path ? `${API_BASE}/media/file?path=${encodeURIComponent(track.file_path)}` : "",
-      karaokeActive: !!now,
+      karaokeActive: !!now && !songPreparing,
     });
   }, [
     now,
+    songPreparing,
     playerState,
     breakMusicState.paused,
     breakMusicState.pauseDuringKaraoke,
@@ -85,7 +90,7 @@ export function useBreakMusicPlayer({
     if (!shouldRunBreakMusic({
       ...breakMusicState,
       src: breakMusicState.currentTrack?.file_path || "",
-      karaokeActive: !!now,
+      karaokeActive: !!now && !songPreparing,
     }))
       return;
 
@@ -105,6 +110,7 @@ export function useBreakMusicPlayer({
     breakMusicState.pauseDuringKaraoke,
     breakMusicState.mutedForKaraoke,
     now,
+    songPreparing,
     refreshBreakMusicState,
   ]);
 

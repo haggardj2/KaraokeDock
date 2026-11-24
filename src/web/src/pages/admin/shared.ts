@@ -93,7 +93,7 @@ export const LIBRARY_PARSE_MODE_OPTIONS: Array<{
   },
 ];
 
-export type AdminSection = "overview" | "libraries" | "break" | "system" | "gateway" | "users" | "social" | "oidc" | "backup";
+export type AdminSection = "overview" | "libraries" | "break" | "system" | "gateway" | "users" | "social" | "oidc" | "backup" | "karafun";
 
 export const ADMIN_SECTION_STORAGE_KEY = "karaokedock.admin.section";
 
@@ -102,6 +102,7 @@ export const ADMIN_SECTIONS: Array<{ id: AdminSection; label: string; icon: stri
   { id: "libraries", label: "Media Libraries", icon: "library_music", description: "Karaoke folders and how they are scanned" },
   { id: "break", label: "Break Music", icon: "music_note", description: "Break music folders and saved playlists" },
   { id: "system", label: "System", icon: "settings", description: "Requests, downloads, background tasks and logging" },
+  { id: "karafun", label: "KaraFun", icon: "queue_music", description: "KaraFun account and online catalog" },
   { id: "gateway", label: "Remote Gateway", icon: "cloud_sync", description: "Public request gateway sync" },
   { id: "users", label: "Users", icon: "group", description: "Host and admin accounts" },
   { id: "social", label: "Social Login", icon: "account_circle", description: "Google and Facebook sign-in for singers" },

@@ -86,6 +86,7 @@ export function useAdmin() {
   const [requestAcceptance, setRequestAcceptance] = useState<"local" | "external" | "disabled">("local");
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
+  const [karafunLibraryEnabled, setKarafunLibraryEnabled] = useState(false);
   const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
   const [themeId] = useStaffTheme();
   const [requestTheme, setRequestTheme] = useState<ThemeId>("midnight");
@@ -633,6 +634,7 @@ export function useAdmin() {
       setRequestAcceptance(settings["requests.acceptance"] || "local");
       setLocalLibraryEnabled(parseBooleanSetting(settings["libraries.local_enabled"]));
       setExternalLibraryEnabled(parseBooleanSetting(settings["libraries.external_enabled"]));
+      setKarafunLibraryEnabled(parseBooleanSetting(settings["libraries.karafun_enabled"] ?? false));
       setLocalBrowseEnabled(parseBooleanSetting(settings["requests.local_browse_enabled"]));
       setRequestTheme(isThemeId(settings["requests.theme"]) ? settings["requests.theme"] : "midnight");
       setAllowDownloads(parseBooleanSetting(settings["ytdlp.allow_downloads"]));
@@ -840,8 +842,25 @@ export function useAdmin() {
     }
   }
 
-  async function handleLibraryToggle(type: "local" | "external", enabled: boolean) {
-    if (type === "local") {
+  async function handleLibraryToggle(type: "local" | "external" | "karafun", enabled: boolean) {
+    if (type === "karafun") {
+      // KaraFun availability goes through its own endpoint, which refuses to enable it
+      // before an account is configured and resets the KaraFun session cache.
+      setKarafunLibraryEnabled(enabled);
+      try {
+        await api("/api/admin/karafun", {
+          method: "PUT",
+          headers: { ...sessionHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        setBanner(`✔ KaraFun ${enabled ? "enabled" : "disabled"}`);
+        setTimeout(() => setBanner(""), 3000);
+      } catch (err: any) {
+        setBanner(`⚠️ Failed to update KaraFun: ${err.message}`);
+        setTimeout(() => setBanner(""), 5000);
+        setKarafunLibraryEnabled(!enabled);
+      }
+    } else if (type === "local") {
       setLocalLibraryEnabled(enabled);
       try {
         await saveSetting("libraries.local_enabled", enabled);
@@ -1232,6 +1251,8 @@ export function useAdmin() {
     setLocalLibraryEnabled,
     externalLibraryEnabled,
     setExternalLibraryEnabled,
+    karafunLibraryEnabled,
+    setKarafunLibraryEnabled,
     localBrowseEnabled,
     setLocalBrowseEnabled,
     requestTheme,
