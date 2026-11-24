@@ -132,8 +132,8 @@ export default function KaraFunSection({ admin }: { admin: AdminState }) {
         <p style={{ margin: "0 0 16px", color: "var(--color-text-muted)", fontSize: 14 }}>
           Connect a KaraFun subscription account to include its catalog in song search.
           Credentials are hashed with the same scheme as the KaraFun desktop app before
-          being stored; the clear password is never saved or returned. The Player streams
-          KaraFun songs directly; nothing is downloaded to the media library.
+          being stored; the clear password is never saved or returned. KaraFun songs are
+          never saved to the media library.
         </p>
 
         <div className="form-group">
@@ -211,22 +211,22 @@ export default function KaraFunSection({ admin }: { admin: AdminState }) {
           )}
           <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--color-border)", fontSize: 14 }}>
             <div>
-              <strong>Renderer:</strong> built-in KaraokeDock engine (Web Audio +
-              WebGL)
+              <strong>Playback:</strong> built-in KaraokeDock engine
             </div>
             <div style={{ color: "var(--color-text-muted)", fontSize: 13, marginTop: 4 }}>
-              No KaraFun application or proprietary engine files are required.
-              The Player renders lyrics, backgrounds and a MilkDrop-family
-              visualizer in the browser, and follows the Host's key changes.
+              No KaraFun application or engine files are required. When a song is
+              requested, the server mixes it at the requested key and keeps the mix in
+              memory for up to 4 hours. The Player streams that mix and shows KaraFun's
+              lyrics and title card over an animated background. A key change made while
+              the song is queued is mixed again; a change during the song is not applied.
             </div>
           </div>
         </div>
 
         <p style={{ margin: "12px 0 0", color: "var(--color-text-muted)", fontSize: 13 }}>
-          KaraFun audio is streamed and played in the browser as Ogg Vorbis; it is only
-          held in a short-lived memory cache, not saved to the media library. It needs a
-          browser with Ogg Vorbis support (Chrome, Edge, Firefox and the Android Player app;
-          not Safari).
+          If the server mix is unavailable, the Player mixes the song in the browser
+          instead. That fallback needs Ogg Vorbis support (Chrome, Edge, Firefox and the
+          Android Player app; not Safari).
         </p>
       </div>
     </div>

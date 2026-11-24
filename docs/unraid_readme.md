@@ -10,6 +10,7 @@ This guide covers installing KaraokeDock on Unraid from **Community Applications
 - A share or folder for karaoke tracks
 - Optional folders for downloaded tracks and break music
 - Persistent writable folders for downloads, uploaded player images, and exported playlists
+- Optional: a KaraFun subscription account, to add KaraFun's online catalog
 
 ## Recommended shares and folders
 
@@ -188,6 +189,31 @@ Leave it blank to let KaraokeDock auto-pick a value.
 
 The advanced **Media Scan Interval (ms)** setting defaults to `900000` (15 minutes). Enable **periodic media library scan** in Admin separately; changing the interval alone does not enable scanning. The first enabled pass reconciles the library, and subsequent passes scan changed folders. Failed scans remain pending for retry.
 
+## KaraFun (optional)
+
+KaraokeDock can add the KaraFun online catalog to song search for venues with a
+KaraFun subscription. It needs no extra paths or template variables, only
+outbound HTTPS access from the container to KaraFun.
+
+1. In Admin, open **KaraFun**, enter the KaraFun username/e-mail and password,
+   then select **Save KaraFun settings** and **Test connection**.
+2. Turn KaraFun on for singers under **Admin → System → Library Availability &
+   Requests**. Singers then see KaraFun results, tagged with the KaraFun logo,
+   and a KaraFun source filter on the Request page.
+
+Things to know on Unraid:
+
+- **Nothing is written to your shares.** When a KaraFun song is requested, the
+  server mixes it with FFmpeg at the requested key (up to two songs at a time)
+  and keeps the mix in memory for up to 4 hours. The cache holds at most 40
+  songs or 256 MB. If you set a memory limit on the container, leave room for it.
+- **The password is stored only as a hash**, with the other settings in
+  PostgreSQL, so database backups include the KaraFun configuration.
+- **Player browsers:** the Player streams the server's mix, so any current
+  browser works. If the server mix is unavailable, the Player falls back to mixing
+  in the browser, which needs Ogg Vorbis support (Chrome, Edge, Firefox or the
+  Android Player app, not Safari).
+
 ## First startup
 
 1. Start PostgreSQL.
@@ -201,6 +227,7 @@ http://UNRAID_IP:5173/admin
 
 5. Add `/media/karaoke` as a local library in Admin, and `/media/breakmusic` as a break-music folder if used. Use container paths, not Unraid host paths.
 6. Run a library scan from the Admin page.
+   Optionally, set up [KaraFun](#karafun-optional).
 7. Open the Host page:
 
 ```text
