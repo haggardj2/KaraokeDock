@@ -20,3 +20,5 @@
 .singer-merge-confirm { display: flex; gap: 10px; font-size: 13px; line-height: 1.5; }
 .singer-merge-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .singer-merge-actions button[type="submit"] { background: var(--color-accent, #6366f1); color: white; }
+.singer-merge-kept { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; padding: 10px; border: 1px solid var(--color-border, #444); border-radius: 8px; overflow-wrap: anywhere; }
+.singer-merge-kept button { flex: 0 0 auto; }

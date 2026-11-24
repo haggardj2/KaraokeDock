@@ -29,3 +29,13 @@ export const queueLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => Boolean(req.headers['x-session-token']),
 });
+
+// KaraFun stage media (manifest, audio, image). Native <audio> issues several Range
+// requests per track while it buffers and seeks, so this is looser than search.
+export const karafunMediaLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  message: 'Too many KaraFun media requests, please slow down.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});

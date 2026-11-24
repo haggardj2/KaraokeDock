@@ -26,16 +26,16 @@ export type SingerMergeCandidate = {
   }[];
 };
 
-export async function getSingerMergeCandidates(target: unknown, search: unknown) {
-  const targetId = parseSingerId(target);
+function searchPattern(search: unknown): string {
   if (search !== undefined && (typeof search !== 'string' || search.length > 200)) {
     throw requestError('q must be a search string of at most 200 characters', 400);
   }
-  const exists = await query('SELECT id FROM singers WHERE id = $1', [targetId]);
-  if (!exists.rows.length) throw requestError('Target singer not found', 404);
-  const owners = await query('SELECT id FROM users WHERE singer_id = $1 LIMIT 1', [targetId]);
-  if (owners.rows.length) throw requestError('Account-linked singers must be linked from Admin User Manager', 409);
-  const pattern = `%${(typeof search === 'string' ? search.trim() : '').replace(/[\\%_]/g, '\\$&')}%`;
+  return `%${(typeof search === 'string' ? search.trim() : '').replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+/** Guest profiles (no login), or with `withLogins` only singers that have at least one login. */
+async function searchSingers(excludeId: bigint | null, search: unknown, withLogins: boolean) {
+  const pattern = searchPattern(search);
   const result = await query<SingerMergeCandidate>(
     `SELECT s.id::text AS "singerId", s.display_name AS "displayName", s.status,
        (SELECT COUNT(*)::int FROM queue q WHERE q.singer_id = s.id) AS "historyCount",
@@ -44,14 +44,34 @@ export async function getSingerMergeCandidates(target: unknown, search: unknown)
          'provider', COALESCE(u.social_provider, CASE WHEN u.oidc_subject IS NOT NULL THEN 'oidc' ELSE 'local' END),
          'role', u.role, 'isActive', u.is_active) ORDER BY u.id)
          FROM users u WHERE u.singer_id = s.id), '[]'::jsonb) AS "accountLogins"
-     FROM singers s WHERE s.id <> $1
-       AND NOT EXISTS (SELECT 1 FROM users owner WHERE owner.singer_id = s.id)
+     FROM singers s WHERE ($1::bigint IS NULL OR s.id <> $1)
+       AND ${withLogins ? '' : 'NOT '}EXISTS (SELECT 1 FROM users owner WHERE owner.singer_id = s.id)
        AND (s.display_name ILIKE $2 OR EXISTS (
          SELECT 1 FROM users u WHERE u.singer_id = s.id AND u.username ILIKE $2))
      ORDER BY LOWER(s.display_name), s.id LIMIT 51`,
-    [targetId, pattern],
+    [excludeId, pattern],
   );
   return { singers: result.rows.slice(0, 50), hasMore: result.rows.length > 50 };
+}
+
+export async function getSingerMergeCandidates(target: unknown, search: unknown) {
+  const targetId = parseSingerId(target);
+  searchPattern(search);
+  const exists = await query('SELECT id FROM singers WHERE id = $1', [targetId]);
+  if (!exists.rows.length) throw requestError('Target singer not found', 404);
+  const owners = await query('SELECT id FROM users WHERE singer_id = $1 LIMIT 1', [targetId]);
+  if (owners.rows.length) throw requestError('Account-linked singers must be linked from Admin User Manager', 409);
+  return searchSingers(targetId, search, false);
+}
+
+/** Singers with a login (social, SSO or password) that a guest profile can be merged into. */
+export function getAccountSingerMergeTargets(search: unknown) {
+  return searchSingers(null, search, true);
+}
+
+/** Guest profiles that can be merged into a singer with a login. */
+export function getGuestSingerMergeSources(target: unknown, search: unknown) {
+  return searchSingers(parseSingerId(target, 'targetId'), search, false);
 }
 
 function hasImage(singer: SingerRow): boolean {
@@ -75,6 +95,31 @@ export async function mergeSingers(target: unknown, source: unknown) {
   const sourceId = parseSingerId(source, 'sourceId');
   if (targetId === sourceId) throw requestError('Cannot merge singer with itself', 400);
   return withQueueTransaction((client) => mergeSingersWithClient(client, targetId, sourceId));
+}
+
+/**
+ * Merges a guest profile (no login) into a singer that has a login, e.g. someone who first
+ * joined by name and later signed in with Google. The login's singer, name and picture are
+ * kept; logins and their permissions are untouched.
+ */
+export async function mergeGuestIntoAccountSinger(target: unknown, source: unknown) {
+  const targetId = parseSingerId(target, 'targetId');
+  const sourceId = parseSingerId(source, 'sourceId');
+  if (targetId === sourceId) throw requestError('Cannot merge singer with itself', 400);
+  return withQueueTransaction(async (client) => {
+    await client.query('SELECT id FROM rotations ORDER BY id FOR UPDATE');
+    const owners = await client.query<{ singer_id: string }>(
+      'SELECT singer_id FROM users WHERE singer_id = ANY($1::bigint[]) ORDER BY id FOR UPDATE',
+      [[targetId, sourceId]],
+    );
+    if (owners.rows.some((user) => BigInt(user.singer_id) === sourceId)) {
+      throw requestError('The singer to merge has a login. Only guest profiles can be merged into a login', 409);
+    }
+    if (!owners.rows.some((user) => BigInt(user.singer_id) === targetId)) {
+      throw requestError('The singer to keep has no login. Use a guest merge instead', 409);
+    }
+    return mergeSingersWithClient(client, targetId, sourceId, true);
+  });
 }
 
 /** Internal primitive for the explicit admin account-link transaction; never expose its flag in HTTP input. */

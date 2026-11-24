@@ -11,6 +11,7 @@ import SingerAvatar, { type SingerProfile, type ProfileCrop } from "../component
 import ProfileImageEditor from "../components/ProfileImageEditor";
 import ProfileDialog from "../components/ProfileDialog";
 import ThemePicker from "../components/ThemePicker";
+import KarafunLogo from "../components/KarafunLogo";
 import { downloadJsonFile, readJsonFile, safeHistoryFilename } from "../utils/jsonFiles";
 import {
   BROWSE_LETTERS,
@@ -145,6 +146,7 @@ export default function Requests() {
   // Library availability from the venue's public settings
   const [localLibraryEnabled, setLocalLibraryEnabled] = useState(true);
   const [externalLibraryEnabled, setExternalLibraryEnabled] = useState(true);
+  const [karafunEnabled, setKarafunEnabled] = useState(false);
   const [localBrowseEnabled, setLocalBrowseEnabled] = useState(true);
   const {
     q,
@@ -181,6 +183,7 @@ export default function Requests() {
     showKnResults,
     isLoading,
     isKnLoading,
+    isKarafunLoading,
     availableBrowseLetters,
     visibleLocalRows,
     visibleBrowseArtists,
@@ -190,7 +193,8 @@ export default function Requests() {
     browseCombinedGroups,
     browseCategory,
     setBrowseCategory,
-  } = useSongSearch({ localLibraryEnabled, externalLibraryEnabled, localBrowseEnabled });
+  } = useSongSearch({ localLibraryEnabled, externalLibraryEnabled, karafunEnabled, localBrowseEnabled });
+  const formatFilterDisabled = sourceFilter === "karafun";
   const {
     addingLocal,
     lyricsPopupOpen,
@@ -202,6 +206,7 @@ export default function Requests() {
     fetchLyrics,
     enqueueLocal,
     enqueueKaraokeNerds,
+    enqueueKarafun,
     songResultActions,
   } = useSongActions({
     requestedBy,
@@ -295,6 +300,7 @@ export default function Requests() {
 
         setLocalLibraryEnabled(localEnabled);
         setExternalLibraryEnabled(externalEnabled);
+        setKarafunEnabled(settings["libraries.karafun_enabled"] === true);
         setLocalBrowseEnabled(browseEnabled);
         if (settings["requests.theme"]) {
           setVenueTheme(settings["requests.theme"]);
@@ -437,13 +443,16 @@ export default function Requests() {
 
   const showToast = (
     message: string,
-    type: "success" | "error" = "success",
+    type: "success" | "error" | "warning" = "success",
   ) => {
+    // Only one toast at a time; a newer one replaces the one still showing.
+    document.querySelectorAll(".toast-notification").forEach((existing) => existing.remove());
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     const toast = document.createElement("div");
     toast.className = `toast-notification ${type}`;
     const icon = document.createElement("div");
     icon.className = "toast-icon";
-    icon.textContent = type === "success" ? "✓" : "⚠";
+    icon.textContent = type === "success" ? "✓" : type === "warning" ? "!" : "⚠";
     const text = document.createElement("div");
     text.className = "toast-message";
     text.textContent = message;
@@ -462,7 +471,7 @@ export default function Requests() {
           document.body.removeChild(toast);
         }
       }, 300);
-    }, 3000);
+    }, type === "warning" ? 6000 : 3000);
   };
 
 
@@ -869,7 +878,7 @@ export default function Requests() {
                   <div className="search-filters">
                     <div className="filter-options">
                       <div className="filter-group">
-                          {localLibraryEnabled && externalLibraryEnabled && (
+                          {localLibraryEnabled && (externalLibraryEnabled || karafunEnabled) && (
                             <>
                               <label className="filter-label">Source</label>
                               <div
@@ -888,12 +897,27 @@ export default function Requests() {
                                 >
                                   <span>📚 Local</span>
                                 </button>
-                                <button
-                                  className={`filter-chip ${sourceFilter === "online" ? "active" : ""}`}
-                                  onClick={() => setSourceFilter("online")}
-                                >
-                                  <span>🌐 Online</span>
-                                </button>
+                                {externalLibraryEnabled && (
+                                  <button
+                                    className={`filter-chip ${sourceFilter === "online" ? "active" : ""}`}
+                                    onClick={() => setSourceFilter("online")}
+                                  >
+                                    <span>🌐 Online</span>
+                                  </button>
+                                )}
+                                {karafunEnabled && (
+                                  <button
+                                    className={`filter-chip ${sourceFilter === "karafun" ? "active" : ""}`}
+                                    onClick={() => setSourceFilter("karafun")}
+                                    aria-label="KaraFun"
+                                    aria-pressed={sourceFilter === "karafun"}
+                                  >
+                                    <KarafunLogo
+                                      height={14}
+                                      color={sourceFilter === "karafun" ? "currentColor" : undefined}
+                                    />
+                                  </button>
+                                )}
                               </div>
                             </>
                           )}
@@ -927,23 +951,27 @@ export default function Requests() {
                             </>
                           )}
 
+                          {/* Formats are local-library file types; KaraFun songs have none. */}
                           <label className="filter-label">Format</label>
                           <div className="filter-chips">
                             <button
                               className={`filter-chip ${kindFilter === "all" ? "active" : ""}`}
                               onClick={() => setKindFilter("all")}
+                              disabled={formatFilterDisabled}
                             >
                               <span>All Formats</span>
                             </button>
                             <button
                               className={`filter-chip ${kindFilter === "mp4" ? "active" : ""}`}
                               onClick={() => setKindFilter("mp4")}
+                              disabled={formatFilterDisabled}
                             >
                               <span>🎬 Video</span>
                             </button>
                             <button
                               className={`filter-chip ${kindFilter === "cdgmp3" ? "active" : ""}`}
                               onClick={() => setKindFilter("cdgmp3")}
+                              disabled={formatFilterDisabled}
                             >
                               <span>📀 CDG</span>
                             </button>
@@ -1124,10 +1152,10 @@ export default function Requests() {
                     </div>
                   )
                 ) : (
-                  /* Search mode — show local + KN results together */
+                  /* Search mode — show local + KN + KaraFun results together */
                   <>
                     {q.trim() &&
-                      (isLoading || isKnLoading ? (
+                      (isLoading || isKnLoading || isKarafunLoading ? (
                         <div className="loading-container">
                           <div className="loading-spinner"></div>
                           <div className="loading-text">Searching...</div>
@@ -1150,7 +1178,7 @@ export default function Requests() {
                               in {combinedSearchGroups.length} song group
                               {combinedSearchGroups.length === 1 ? "" : "s"}
                             </span>
-                            {kindFilter !== "all" && (
+                            {kindFilter !== "all" && !formatFilterDisabled && (
                               <span className="active-filter-badge">
                                 {kindFilter === "mp4"
                                   ? "🎬 Video"
@@ -1170,7 +1198,7 @@ export default function Requests() {
                           <div className="empty-title">
                             No results for "{q}"
                           </div>
-                          {sourceFilter !== "online" &&
+                          {(sourceFilter === "all" || sourceFilter === "local") &&
                             groupedFuzzySuggestions.length > 0 && (
                               <div
                                 style={{
@@ -1278,12 +1306,15 @@ export default function Requests() {
                       !showLocalResults &&
                       !showKnResults &&
                       !isLoading &&
-                      !isKnLoading && (
+                      !isKnLoading &&
+                      !isKarafunLoading && (
                         <div className="empty-state">
                           <div className="empty-icon">🎤</div>
                           <div className="empty-title">Ready to search?</div>
                           <div className="empty-message">
-                            {localLibraryEnabled && externalLibraryEnabled
+                            {localLibraryEnabled && externalLibraryEnabled && karafunEnabled
+                              ? "Search local library, Karaoke Nerds and KaraFun at once"
+                              : localLibraryEnabled && externalLibraryEnabled
                               ? "Search local library and Karaoke Nerds at once"
                               : localLibraryEnabled
                                 ? "Search the local karaoke library"
@@ -1307,6 +1338,7 @@ export default function Requests() {
         fetchLyrics={fetchLyrics}
         enqueueLocal={enqueueLocal}
         enqueueKaraokeNerds={enqueueKaraokeNerds}
+        enqueueKarafun={enqueueKarafun}
       />
 
 

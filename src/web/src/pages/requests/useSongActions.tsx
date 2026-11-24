@@ -8,6 +8,7 @@ import {
 import { api } from "../../api";
 import { MAX_KEY_ADJUSTMENT, MIN_KEY_ADJUSTMENT } from "./helpers";
 import type { SongResultActions } from "./SongResultCard";
+import type { KarafunTrack } from "./karafunTypes";
 import type { CombinedSearchTrack, KaraokeNerdsTrack, LyricsData, VersionPicker } from "./types";
 
 // What a singer can do with a search result: pick a key, open the options sheet or
@@ -23,7 +24,7 @@ export function useSongActions({
   requestSingerUuid: string | undefined;
   requesterJsonHeaders: Record<string, string>;
   requireName: () => void;
-  showToast: (message: string, type?: "success" | "error") => void;
+  showToast: (message: string, type?: "success" | "error" | "warning") => void;
 }) {
   const [keyAdjustments, setKeyAdjustments] = useState<Map<string, number>>(
     new Map(),
@@ -32,6 +33,7 @@ export function useSongActions({
   const [addingKaraokeNerds, setAddingKaraokeNerds] = useState<string | null>(
     null,
   );
+  const [addingKarafun, setAddingKarafun] = useState<number | null>(null);
   const [recentlyAdded, setRecentlyAdded] = useState<Set<string>>(new Set());
   const [actionMenuOpen, setActionMenuOpen] = useState<string | null>(null);
   const [lyricsPopupOpen, setLyricsPopupOpen] = useState<string | null>(null);
@@ -134,7 +136,7 @@ export function useSongActions({
     [],
   );
 
-  // Shared request flow for both libraries: require a name, send the request,
+  // Shared request flow for every library: require a name, send the request,
   // flash "Added" on the card and confirm with a toast.
   async function submitRequest(
     trackKey: string,
@@ -153,7 +155,7 @@ export function useSongActions({
 
     setAdding(true);
     try {
-      await api(endpoint, {
+      const added = await api(endpoint, {
         method: "POST",
         headers: requesterJsonHeaders,
         body: JSON.stringify({
@@ -178,9 +180,17 @@ export function useSongActions({
         keyAdjustment !== 0
           ? ` (Key: ${keyAdjustment > 0 ? "+" : ""}${keyAdjustment})`
           : "";
-      showToast(
-        `Added "${songTitle || "Unknown"}" to ${name}'s queue${keyText}`,
-      );
+      // Still added; the singer may want to pick a different song once they know.
+      if ((added as { queuedByOther?: unknown } | null)?.queuedByOther === true) {
+        showToast(
+          `Added "${songTitle || "Unknown"}"${keyText}. Heads up: another singer already has this song in the queue.`,
+          "warning",
+        );
+      } else {
+        showToast(
+          `Added "${songTitle || "Unknown"}" to ${name}'s queue${keyText}`,
+        );
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       if (
@@ -213,10 +223,22 @@ export function useSongActions({
     );
   }
 
+  // The server re-reads title/artist from KaraFun, so only the song id is sent.
+  function enqueueKarafun(track: KarafunTrack) {
+    return submitRequest(
+      `karafun-${track.songId}`,
+      track.title,
+      "/api/karafun/add",
+      { songId: track.songId },
+      (adding) => setAddingKarafun(adding ? track.songId : null),
+    );
+  }
+
   const songResultActions: SongResultActions = {
     recentlyAdded,
     addingLocal,
     addingKaraokeNerds,
+    addingKarafun,
     keyAdjustments,
     adjustKey,
     actionMenuOpen,
@@ -226,6 +248,7 @@ export function useSongActions({
     setCombinedVersionPicker,
     enqueueLocal,
     enqueueKaraokeNerds,
+    enqueueKarafun,
     setLyricsPopupOpen,
     lyricsData,
     fetchLyrics,
@@ -237,6 +260,7 @@ export function useSongActions({
     setAddingLocal,
     addingKaraokeNerds,
     setAddingKaraokeNerds,
+    addingKarafun,
     recentlyAdded,
     setRecentlyAdded,
     actionMenuOpen,
@@ -254,6 +278,7 @@ export function useSongActions({
     fetchLyrics,
     enqueueLocal,
     enqueueKaraokeNerds,
+    enqueueKarafun,
     songResultActions,
   };
 }

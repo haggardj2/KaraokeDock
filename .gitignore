@@ -7,26 +7,31 @@ build/
 out/
 .build/
 release/
-!PlayerTV/release/
-# Only publish the two signed Player APKs.
-/PlayerTV/*
-!/PlayerTV/release/
-/PlayerTV/release/*
-!/PlayerTV/release/KaraokeDock-Player-1.1.3-v7-AndroidTV-universal-signed.apk
-!/PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-signed.apk
+*.tsbuildinfo
 *.AppImage
 *.snap
 *.flatpak
 *.deb
 *.rpm
 
-# Generated TypeScript/React outputs
-*.tsbuildinfo
+# Generated JavaScript beside the web TypeScript sources
 /src/web/src/**/*.js
 /src/web/src/**/*.js.map
 /src/web/src/**/*.d.ts.map
 
-# Test and coverage output
+# Player TV: only the two signed APKs are published.
+/PlayerTV/*
+!/PlayerTV/release/
+/PlayerTV/release/*
+!/PlayerTV/release/KaraokeDock-Player-1.1.3-v7-AndroidTV-universal-signed.apk
+!/PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-signed.apk
+
+# Tests and test output (kept locally, never committed)
+*.test.*
+*.spec.*
+/src/web/tests/
+/src/server/src/integrationTestMigrations.ts
+/dev/test/
 coverage/
 .nyc_output/
 test-results/
@@ -36,11 +41,7 @@ junit*.xml
 coverage-final.json
 *.lcov
 
-# Logs and runtime state
-# Automatic database snapshots (and their key) from a development server
-/src/server/snapshots/
-# Default SNAPSHOTS_PATH when running docker-compose from the repo
-/snapshots/
+# Logs, databases and runtime data
 *.log
 logs/
 *.pid
@@ -53,13 +54,16 @@ logs/
 db/
 /Gateway/data/
 /media/
+# Database snapshots (and their key) from a development server or docker-compose
+/src/server/snapshots/
+/snapshots/
 
-# Local environment/configuration
+# Local environment and configuration
 .env
 .env.*
 !.env.example
 
-# Editor, OS, and tool caches
+# Editor, OS and tool caches
 .DS_Store
 Thumbs.db
 *.swp
@@ -71,15 +75,15 @@ Thumbs.db
 .fallow/
 
 # Local development scripts and scratch files
+/build-and-publish.sh
+/redeploy-webkaraoke.sh
 /dev/build-and-publish.sh
-/dev/build-and-publish.test.mjs
 /dev/redeploy-webkaraoke.sh
-/dev/test/
+/dev/install-dockerless.sh
 /dev/my-karaokedock.xml
 /dev/To do
 /dev/Screenshot_*.png
-/dev/install-dockerless.sh
-/build-and-publish.sh
-/redeploy-webkaraoke.sh
-PlayerTV/release/KaraokeDock-Player-1.1.3-v7-unsigned.apk
-PlayerTV/release/KaraokeDock-Player-1.1.3-v7-Android13-tablet-unsigned.apk
+
+# KaraFun engine runtime and handoff material; never committed, not needed for the build.
+KaraFunEngine.*
+karafun-engine-handoff/

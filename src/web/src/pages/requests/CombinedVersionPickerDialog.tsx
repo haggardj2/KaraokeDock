@@ -1,5 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
+import KarafunLogo from "../../components/KarafunLogo";
 import { formatTrackKind } from "./helpers";
+import type { KarafunTrack } from "./karafunTypes";
 import type { CombinedSearchTrack, KaraokeNerdsTrack, LyricsData, VersionPicker } from "./types";
 
 // Pick which version to request when a song has both local and online matches.
@@ -11,6 +13,7 @@ export default function CombinedVersionPickerDialog({
   fetchLyrics,
   enqueueLocal,
   enqueueKaraokeNerds,
+  enqueueKarafun,
 }: {
   combinedVersionPicker: VersionPicker<CombinedSearchTrack> | null;
   setCombinedVersionPicker: Dispatch<SetStateAction<VersionPicker<CombinedSearchTrack> | null>>;
@@ -19,6 +22,7 @@ export default function CombinedVersionPickerDialog({
   fetchLyrics: (trackKey: string, artist: string, title: string) => Promise<void>;
   enqueueLocal: (id: number, songTitle: string) => Promise<void>;
   enqueueKaraokeNerds: (track: KaraokeNerdsTrack) => Promise<void>;
+  enqueueKarafun: (track: KarafunTrack) => Promise<void>;
 }) {
   return (
     <>
@@ -68,11 +72,17 @@ export default function CombinedVersionPickerDialog({
             <div className="version-list">
               {combinedVersionPicker.versions.map((version) => {
                 const isLocal = version.type === "local";
-                const label = isLocal
-                  ? version.discId || "Version"
-                  : version.brand || "Karaoke Version";
+                const label =
+                  version.type === "karafun" ? (
+                    <KarafunLogo height={16} />
+                  ) : isLocal ? (
+                    version.discId || "Version"
+                  ) : (
+                    version.brand || "Karaoke Version"
+                  );
                 const meta = [
-                  !isLocal ? "🌐 Online" : null,
+                  version.type === "online" ? "🌐 Online" : null,
+                  version.type === "karafun" ? "Online" : null,
                   isLocal ? formatTrackKind(version.kind) : null,
                 ]
                   .filter(Boolean)
@@ -95,6 +105,8 @@ export default function CombinedVersionPickerDialog({
                             version.track.id,
                             version.title || "Unknown",
                           );
+                        } else if (version.type === "karafun") {
+                          void enqueueKarafun(version.track);
                         } else {
                           void enqueueKaraokeNerds(version.track);
                         }

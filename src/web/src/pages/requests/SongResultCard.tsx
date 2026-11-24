@@ -1,6 +1,8 @@
 import type { Dispatch, MouseEvent, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
+import KarafunLogo from "../../components/KarafunLogo";
 import { MAX_KEY_ADJUSTMENT, MIN_KEY_ADJUSTMENT, formatCount, formatTrackKind } from "./helpers";
+import type { KarafunTrack } from "./karafunTypes";
 import type { CombinedSearchGroup, CombinedSearchTrack, KaraokeNerdsTrack, LyricsData, VersionPicker } from "./types";
 
 // Everything a result card needs from the Request page, built once and shared by every card.
@@ -8,6 +10,7 @@ export type SongResultActions = {
   recentlyAdded: Set<string>;
   addingLocal: number | null;
   addingKaraokeNerds: string | null;
+  addingKarafun: number | null;
   keyAdjustments: Map<string, number>;
   adjustKey: (trackKey: string, delta: number) => void;
   actionMenuOpen: string | null;
@@ -17,6 +20,7 @@ export type SongResultActions = {
   setCombinedVersionPicker: Dispatch<SetStateAction<VersionPicker<CombinedSearchTrack> | null>>;
   enqueueLocal: (id: number, songTitle: string) => Promise<void>;
   enqueueKaraokeNerds: (track: KaraokeNerdsTrack) => Promise<void>;
+  enqueueKarafun: (track: KarafunTrack) => Promise<void>;
   setLyricsPopupOpen: Dispatch<SetStateAction<string | null>>;
   lyricsData: LyricsData;
   fetchLyrics: (trackKey: string, artist: string, title: string) => Promise<void>;
@@ -32,9 +36,11 @@ export default function SongResultCard({ group, idx, actions }: {
     actionMenuOpen,
     actionMenuRef,
     addingKaraokeNerds,
+    addingKarafun,
     addingLocal,
     adjustKey,
     enqueueKaraokeNerds,
+    enqueueKarafun,
     enqueueLocal,
     fetchLyrics,
     handleActionMenuToggle,
@@ -49,23 +55,30 @@ export default function SongResultCard({ group, idx, actions }: {
   const hasMultipleVersions =
     group.versions.length > 1;
   const hasExternal = group.versions.some(
-    (track) => track.type === "online",
+    (track) => track.type !== "local",
   );
+  const hasOnlineVideo = group.versions.some((track) => track.type === "online");
+  const hasKarafun = group.versions.some((track) => track.type === "karafun");
   const isRecentlyAdded = group.versions.some(
     (track) => recentlyAdded.has(track.key),
   );
   const isAdding = group.versions.some((track) =>
     track.type === "local"
       ? addingLocal === track.track.id
-      : addingKaraokeNerds === track.track.url,
+      : track.type === "karafun"
+        ? addingKarafun === track.track.songId
+        : addingKaraokeNerds === track.track.url,
   );
   const trackKey = firstTrack.key;
   const currentKey =
     keyAdjustments.get(trackKey) ?? 0;
+  // KaraFun is named by its logo after the text, so it is left out of the text itself.
   const versionText =
-    firstTrack.type === "online"
-      ? firstTrack.brand || "Karaoke Version"
-      : firstTrack.discId || "";
+    firstTrack.type === "karafun"
+      ? null
+      : firstTrack.type === "online"
+        ? firstTrack.brand || "Karaoke Version"
+        : firstTrack.discId || "";
   const metaLine = [
     group.artist || "Unknown Artist",
     firstTrack.type === "online"
@@ -88,11 +101,16 @@ export default function SongResultCard({ group, idx, actions }: {
           {group.artist || "Unknown Artist"}
         </div>
         <div className="result-meta">
-          {hasMultipleVersions || hasExternal ? (
+          {hasKarafun && (
+            <span className="meta-tag karafun" title="KaraFun">
+              <KarafunLogo height={12} />
+            </span>
+          )}
+          {hasMultipleVersions || hasOnlineVideo ? (
             <span
               className={`meta-tag ${hasExternal ? "brand" : ""}`}
             >
-              {hasExternal ? "🌐 " : ""}
+              {hasOnlineVideo ? "🌐 " : ""}
               {formatCount(group.versions.length, "version")}
             </span>
           ) : (
@@ -121,7 +139,7 @@ export default function SongResultCard({ group, idx, actions }: {
       </div>
       <div className="button-container">
         <button
-          className={`action-menu-button ${firstTrack.type === "online" ? "karaoke-nerds" : ""} ${isRecentlyAdded ? "success" : ""}`}
+          className={`action-menu-button ${firstTrack.type !== "local" ? "karaoke-nerds" : ""} ${isRecentlyAdded ? "success" : ""}`}
           type="button"
           title={
             hasMultipleVersions
@@ -191,6 +209,12 @@ export default function SongResultCard({ group, idx, actions }: {
                 <div className="action-menu-body">
                   <p className="action-menu-meta">
                     {metaLine}
+                    {firstTrack.type === "karafun" && (
+                      <>
+                        {" · "}
+                        <KarafunLogo height={13} />
+                      </>
+                    )}
                   </p>
                   {firstTrack.type === "local" && (
                     <div className="key-controls">
@@ -243,6 +267,8 @@ export default function SongResultCard({ group, idx, actions }: {
                             firstTrack.title ||
                               "Unknown",
                           );
+                        } else if (firstTrack.type === "karafun") {
+                          void enqueueKarafun(firstTrack.track);
                         } else {
                           void enqueueKaraokeNerds(
                             firstTrack.track,

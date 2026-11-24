@@ -346,6 +346,11 @@
   color: var(--color-on-accent);
 }
 
+.request-page-gateway-theme .filter-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .request-page-gateway-theme .section-title {
   margin: 0 0 14px;
   color: var(--color-text-primary);
@@ -576,6 +581,13 @@
 .request-page-gateway-theme .meta-tag.brand {
   background: color-mix(in srgb, var(--color-accent-2) 20%, transparent);
   color: var(--color-accent-text);
+}
+
+.request-page-gateway-theme .meta-tag.karafun {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  background: color-mix(in srgb, #e20d83 14%, var(--color-bg-primary));
 }
 
 .request-page-gateway-theme .button-container {
@@ -1052,6 +1064,15 @@
 
 .toast-notification.error {
   border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
+}
+
+.toast-notification.warning {
+  border-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
+}
+
+.toast-notification.warning .toast-icon {
+  background: color-mix(in srgb, var(--color-warning) 30%, transparent);
+  font-weight: 800;
 }
 
 .toast-icon {
@@ -1583,6 +1604,16 @@
 .my-queue-artist {
   color: var(--color-text-secondary);
   font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.my-queue-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }

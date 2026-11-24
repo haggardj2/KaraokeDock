@@ -2,6 +2,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
+import { isSongQueuedByOtherSinger } from '../queueDuplicates.js';
 import { getOrderedBreakTracks, isPositiveTrackId, rotateBreakPlaylistToFront, saveBreakMusicPlaylist, validateBreakTrackIds, type BreakMusicTrackRow } from '../breakMusicPlaylists.js';
 import {
   query,
@@ -42,7 +43,9 @@ import QRCode from 'qrcode';
 import { searchKaraokeNerds } from '../karaoke-nerds';
 import crypto from 'crypto';
 import * as oidc from 'openid-client';
-import { authLimiter, searchLimiter, queueLimiter } from '../middleware/rateLimiters';
+import { authLimiter, searchLimiter, queueLimiter, karafunMediaLimiter } from '../middleware/rateLimiters';
+import { createKarafunRoutes } from '../karafun/routes.js';
+import { karafunPreparedService } from '../karafun/prepared.js';
 import { setLogLevel, logger, logRequestFailure, type LogLevel } from '../logger';
 import {
   syncBackgroundTaskState,
@@ -72,7 +75,10 @@ import {
 import { recalculateSingerStats } from '../singerStats.js';
 import { ensureAuthenticatedSinger, getRequestIdentity, renameAuthenticatedSinger, renameSingerById, resolveQueueRequester } from '../authenticatedSinger.js';
 import { resolveGuestSinger } from '../guestSinger.js';
-import { getSingerMergeCandidates, mergeSingers, parseSingerId } from '../singerMerge.js';
+import {
+  getAccountSingerMergeTargets, getGuestSingerMergeSources, getSingerMergeCandidates, mergeGuestIntoAccountSinger,
+  mergeSingers, parseSingerId,
+} from '../singerMerge.js';
 import { getAccountLinkCandidates, getLinkedLogins, isManagedAccount, linkAccountLogin, parseUserId } from '../accountLinks.js';
 import {
   SINGER_PROFILE_IMAGE_MAX_BYTES,
@@ -115,6 +121,7 @@ export const apiRouter = express.Router();
 interface PublicSettings {
   'libraries.local_enabled': boolean;
   'libraries.external_enabled': boolean;
+  'libraries.karafun_enabled': boolean;
   'requests.acceptance': 'local' | 'external' | 'disabled';
   'requests.local_browse_enabled': boolean;
   'requests.url': string;
@@ -820,7 +827,11 @@ async function queueRemoteGatewayRequest(request: RemoteGatewayPendingRequest): 
   }
 
   const isExternal = trackInfo.rows[0].source && trackInfo.rows[0].source !== 'local';
-  if (isExternal && await getSetting('libraries.external_enabled') === false) {
+  if (trackInfo.rows[0].source === 'karafun') {
+    if (await getSetting('libraries.karafun_enabled') !== true) {
+      return { status: 'rejected', error: 'KaraFun is disabled' };
+    }
+  } else if (isExternal && await getSetting('libraries.external_enabled') === false) {
     return { status: 'rejected', error: 'External library is disabled' };
   }
   if (!isExternal && await getSetting('libraries.local_enabled') === false) {
@@ -1533,13 +1544,23 @@ async function setBreakMusicState(partial: Partial<BreakMusicState>) {
   await Promise.all(writes);
 }
 
+// KaraFun songs take a moment to prepare on the Player; break music keeps playing until
+// the Player reports the song's first real position (see /player/timing).
+const karafunAudioStarted = new Set<number>();
+let lastSourceCheckedQueueId: number | null = null;
+
 async function syncBreakMusicForKaraoke() {
   const [pauseSetting, playing] = await Promise.all([
     getSetting('break_music.pause_during_karaoke'),
-    query(`SELECT id FROM queue WHERE status = 'playing' LIMIT 1`),
+    query<{ id: number; source: string | null }>(
+      `SELECT q.id, t.source FROM queue q LEFT JOIN tracks t ON t.id = q.track_id
+        WHERE q.status = 'playing' LIMIT 1`,
+    ),
   ]);
   const pauseDuringKaraoke = pauseSetting !== false;
-  const mutedForKaraoke = playing.rows.length > 0;
+  const current = playing.rows[0];
+  const mutedForKaraoke = !!current &&
+    (current.source !== 'karafun' || karafunAudioStarted.has(Number(current.id)));
   const breakState = await getBreakMusicState();
   if (pauseDuringKaraoke && mutedForKaraoke) {
     if (!breakState.paused) {
@@ -3192,6 +3213,19 @@ apiRouter.get(
   })
 );
 
+// ===================== KARAFUN =====================
+
+apiRouter.use(
+  createKarafunRoutes({
+    adminGuard,
+    searchLimiter,
+    queueLimiter,
+    mediaLimiter: karafunMediaLimiter,
+    postQueueUpdate: (type, data) => postQueueUpdate(type, data),
+    resortQueueByRotation,
+  }),
+);
+
 // ===================== KARAOKE NERDS SEARCH =====================
 
 apiRouter.get(
@@ -3273,6 +3307,11 @@ apiRouter.post(
     const queueRequestedBy = singer?.display_name ?? null;
     if (singer) await ensureSingerInActiveRotation(singer.id);
 
+    const queuedByOther = await isSongQueuedByOtherSinger(track.id, {
+      singerId: kn_singerId,
+      requestedBy: queueRequestedBy,
+    });
+
     // Try to insert with key_adjustment if the column exists
     try {
       const r = await query(
@@ -3281,7 +3320,7 @@ apiRouter.post(
          RETURNING id, track_id, requested_by, singer_id, status, position, key_adjustment, created_at`,
         [track.id, queueRequestedBy, kn_singerId, position, keyAdj]
       );
-      res.json(r.rows[0]);
+      res.json({ ...r.rows[0], queuedByOther });
       await resortQueueByRotation();
       postQueueUpdate('queue.updated');
       return;
@@ -3300,7 +3339,7 @@ apiRouter.post(
            RETURNING id, track_id, requested_by, singer_id, status, position, created_at`,
           [track.id, queueRequestedBy, kn_singerId, position]
         );
-        res.json(r.rows[0]);
+        res.json({ ...r.rows[0], queuedByOther });
         await resortQueueByRotation();
         postQueueUpdate('queue.updated');
         return;
@@ -3993,6 +4032,33 @@ apiRouter.post(
   })
 );
 
+// Host: merge a guest profile (joined by name) into a singer that has a login.
+apiRouter.get(
+  '/singers/guest-merge/targets',
+  hostGuard,
+  ah(async (req, res) => {
+    res.json(await getAccountSingerMergeTargets(req.query.q));
+  }),
+);
+
+apiRouter.get(
+  '/singers/:id/guest-merge-sources',
+  hostGuard,
+  ah(async (req, res) => {
+    res.json(await getGuestSingerMergeSources(req.params.id, req.query.q));
+  }),
+);
+
+apiRouter.post(
+  '/singers/:id/guest-merge',
+  hostGuard,
+  ah(async (req, res) => {
+    const merged = await mergeGuestIntoAccountSinger(req.params.id, req.body?.sourceId);
+    postQueueUpdate('queue.updated');
+    res.json(merged);
+  }),
+);
+
 // ---------------------------------------------------------------------------
 // GET /api/queue/by-requester — public: requester views their own queued songs
 // ---------------------------------------------------------------------------
@@ -4006,7 +4072,7 @@ apiRouter.get(
     if (authenticatedSinger) {
       const qRes = await query(
         `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
-                t.title, t.kind, a.name AS artist
+                t.title, t.kind, t.source, t.disc_id, q.key_adjustment, a.name AS artist
            FROM queue q
            JOIN tracks t ON t.id = q.track_id
            LEFT JOIN artists a ON a.id = t.artist_id
@@ -4022,7 +4088,7 @@ apiRouter.get(
     const singer = await resolveSingerForRequester(name, singerUuid);
     const qRes = await query(
       `SELECT q.id, q.track_id, q.status, q.position, q.created_at, q.started_at, q.finished_at,
-              t.title, t.kind, a.name AS artist
+              t.title, t.kind, t.source, t.disc_id, q.key_adjustment, a.name AS artist
          FROM queue q
          JOIN tracks t ON t.id = q.track_id
          LEFT JOIN artists a ON a.id = t.artist_id
@@ -4323,7 +4389,11 @@ apiRouter.post(
     const isExternal = track.source && track.source !== 'local';
     
     // Check library settings
-    if (isExternal) {
+    if (track.source === 'karafun') {
+      if (await getSetting('libraries.karafun_enabled') !== true) {
+        return res.status(403).json({ error: 'KaraFun is disabled' });
+      }
+    } else if (isExternal) {
       const externalLibraryEnabled = await getSetting('libraries.external_enabled');
       if (externalLibraryEnabled === false) {
         return res.status(403).json({ error: 'External library is disabled' });
@@ -4353,6 +4423,7 @@ apiRouter.post(
         return res.status(409).json({ error: 'You have already requested this song' });
       }
     }
+    const queuedByOther = await isSongQueuedByOtherSinger(trackId, { singerId, requestedBy: queueRequestedBy });
 
     // Try to insert with key_adjustment if the column exists
     try {
@@ -4363,7 +4434,7 @@ apiRouter.post(
         [trackId, queueRequestedBy, singerId, position, keyAdjustment]
       );
       logger.info(`Singer request queued: "${queueRequestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
-      res.json(r.rows[0]);
+      res.json({ ...r.rows[0], queuedByOther });
     } catch (err: any) {
       // If key_adjustment column doesn't exist, fall back to insert without it
       // PostgreSQL error code 42703 = undefined_column
@@ -4380,7 +4451,7 @@ apiRouter.post(
           [trackId, queueRequestedBy, singerId, position]
         );
         logger.info(`Singer request queued: "${queueRequestedBy ?? 'anonymous'}" added track ${trackId} (queue id ${r.rows[0].id})`);
-        res.json(r.rows[0]);
+        res.json({ ...r.rows[0], queuedByOther });
       } else {
         // Re-throw if it's a different error
         throw err;
@@ -4504,6 +4575,16 @@ apiRouter.post(
     await query(`UPDATE queue SET key_adjustment = $1 WHERE id = $2`, [keyAdjustment, id]);
     res.json({ ok: true });
     postQueueUpdate('queue.updated');
+    // A KaraFun song is mixed at its key ahead of time; mix the new key now.
+    const karafun = await query<{ external_url: string | null }>(
+      `SELECT t.external_url FROM queue q JOIN tracks t ON t.id = q.track_id
+        WHERE q.id = $1 AND q.status = 'queued' AND t.source = 'karafun'`,
+      [id],
+    );
+    const songId = /^karafun:(\d+)$/.exec(karafun.rows[0]?.external_url ?? '')?.[1];
+    if (songId && await getSetting('libraries.karafun_enabled') === true) {
+      karafunPreparedService.prepareInBackground(Number(songId), keyAdjustment);
+    }
   })
 );
 
@@ -4792,7 +4873,9 @@ apiRouter.post(
     );
     const row = current.rows[0];
     if (!row) return res.status(404).json({ error: 'Current playing song not found' });
-    if (!row.external_url) return res.status(400).json({ error: 'Current song is not an external video' });
+    if (!row.external_url || row.external_url.startsWith('karafun:')) {
+      return res.status(400).json({ error: 'Current song is not an external video' });
+    }
 
     const postFallbackStatus = (status: 'downloading' | 'ready' | 'error', message: string) => {
       postQueueUpdate('player.youtube_fallback', {
@@ -5401,6 +5484,18 @@ apiRouter.post(
     const playback = await getPlayerPlaybackState();
     if (playback.queueId !== reportId || playback.paused) return res.json({ ok: true, ignored: true });
     lastPlayerTiming = { queueId: reportId, positionSec: currentTime };
+    if (currentTime > 0 && lastSourceCheckedQueueId !== reportId) {
+      lastSourceCheckedQueueId = reportId;
+      const source = await query<{ source: string | null }>(
+        `SELECT t.source FROM queue q JOIN tracks t ON t.id = q.track_id WHERE q.id = $1`,
+        [reportId],
+      );
+      if (source.rows[0]?.source === 'karafun') {
+        if (karafunAudioStarted.size > 200) karafunAudioStarted.clear();
+        karafunAudioStarted.add(reportId);
+        await syncBreakMusicForKaraoke();
+      }
+    }
 
     // Broadcast timing update to all connected clients via WebSocket
     postQueueUpdate('player.timing', {
@@ -5929,6 +6024,7 @@ apiRouter.get(
     const publicKeys: Array<keyof PublicSettings> = [
       'libraries.local_enabled',
       'libraries.external_enabled',
+      'libraries.karafun_enabled',
       'requests.acceptance',
       'requests.local_browse_enabled',
       'requests.theme'
@@ -5944,6 +6040,7 @@ apiRouter.get(
     const completeSettings: PublicSettings = {
       'libraries.local_enabled': settings['libraries.local_enabled'] ?? true,
       'libraries.external_enabled': settings['libraries.external_enabled'] ?? true,
+      'libraries.karafun_enabled': settings['libraries.karafun_enabled'] === true,
       'requests.acceptance': settings['requests.acceptance'] ?? 'local',
       'requests.local_browse_enabled': settings['requests.local_browse_enabled'] ?? true,
       'requests.url': await getPublicRequestsUrl(req),
@@ -5961,7 +6058,11 @@ apiRouter.get(
   ah(async (_req, res) => {
     const keys = ['libraries.local_enabled', 'libraries.external_enabled', 'ytdlp.allow_downloads'];
     const values = await Promise.all(keys.map(key => getSetting(key)));
-    res.json(Object.fromEntries(keys.map((key, index) => [key, values[index] ?? true])));
+    res.json({
+      ...Object.fromEntries(keys.map((key, index) => [key, values[index] ?? true])),
+      // Off unless an admin has configured and enabled it.
+      'libraries.karafun_enabled': await getSetting('libraries.karafun_enabled') === true,
+    });
   }),
 );
 
@@ -5991,6 +6092,9 @@ apiRouter.get(
     for (const row of result.rows) {
       if (row.key === 'oidc.client_secret') {
         settings[row.key] = row.value ? '***' : '';
+      } else if (row.key === 'karafun.password_hash') {
+        // Write-only; Admin › KaraFun only learns whether a password is set.
+        continue;
       } else {
         settings[row.key] = row.key === SOCIAL_CONFIG_KEY
           ? maskSocialConfig(row.value as SocialConfig) : row.value;
@@ -6044,6 +6148,9 @@ apiRouter.put(
     }
     if (key === 'oidc' || key.startsWith('oidc.')) {
       return res.status(400).json({ error: 'Use /api/admin/settings/oidc to update OIDC settings' });
+    }
+    if (key === 'libraries.karafun_enabled' || key.startsWith('karafun.')) {
+      return res.status(400).json({ error: 'Use /api/admin/karafun to update KaraFun settings' });
     }
     
     await setSetting(key, value);

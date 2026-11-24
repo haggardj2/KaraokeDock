@@ -15,13 +15,17 @@ export function formatCount(count: number, noun: string) {
 export function normalizeMyQueueItems(items: unknown): MyQueueItem[] {
   if (!Array.isArray(items)) return [];
   return items
-    .map((item) => {
+    .map((item): MyQueueItem | null => {
       if (!item || typeof item !== "object") return null;
       const row = item as {
         id?: unknown;
         title?: unknown;
         artist?: unknown;
         status?: unknown;
+        source?: unknown;
+        disc_id?: unknown;
+        kind?: unknown;
+        key_adjustment?: unknown;
       };
       const id = Number(row.id);
       if (!Number.isFinite(id)) return null;
@@ -30,6 +34,10 @@ export function normalizeMyQueueItems(items: unknown): MyQueueItem[] {
         title: typeof row.title === "string" ? row.title : null,
         artist: typeof row.artist === "string" ? row.artist : null,
         status: typeof row.status === "string" ? row.status : "",
+        source: typeof row.source === "string" ? row.source : null,
+        discId: typeof row.disc_id === "string" ? row.disc_id : null,
+        kind: typeof row.kind === "string" ? row.kind : null,
+        keyAdjustment: Number(row.key_adjustment) || 0,
       };
     })
     .filter((item): item is MyQueueItem => item !== null);
@@ -107,6 +115,27 @@ export function formatTrackKind(kind: string | null | undefined): string {
   if (kind === "mp4") return "Video";
   if (kind === "cdgmp3") return "CDG";
   return kind?.toUpperCase() ?? "";
+}
+
+/**
+ * Which version of a song a queue entry is, for My Queue: KaraFun (shown as its logo),
+ * an online video with its brand, or a local disc and format. The key is added when changed.
+ */
+export function describeQueueVersion(item: MyQueueItem): { karafun: boolean; text: string } {
+  const karafun = item.source === "karafun";
+  const parts: string[] = [];
+  if (!karafun) {
+    if (item.source && item.source !== "local") {
+      parts.push(`🌐 ${item.discId?.trim() || "Online"}`);
+    } else {
+      if (item.discId?.trim()) parts.push(item.discId.trim());
+      const kind = formatTrackKind(item.kind);
+      if (kind) parts.push(kind);
+    }
+  }
+  const key = item.keyAdjustment ?? 0;
+  if (key !== 0) parts.push(`Key ${key > 0 ? "+" : ""}${key}`);
+  return { karafun, text: parts.join(" · ") };
 }
 
 export function createSingerUuid(): string {

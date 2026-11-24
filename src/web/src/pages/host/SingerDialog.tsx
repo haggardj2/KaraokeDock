@@ -4,6 +4,7 @@ import { useAuth } from '../../auth-context'
 import MaterialIcon from '../../components/MaterialIcon'
 import ProfileDialog from '../../components/ProfileDialog'
 import ProfileImageEditor from '../../components/ProfileImageEditor'
+import SingerMergeDialog from '../../components/SingerMergeDialog'
 import QueueDragHandle from '../../components/QueueDragHandle'
 import ScrollingText from '../../components/ScrollingText'
 import SingerAvatar, { type ProfileCrop } from '../../components/SingerAvatar'
@@ -51,6 +52,7 @@ export default function SingerDialog({
   const auth = useAuth()
   const [singerImageEditorOpen, setSingerImageEditorOpen] = useState(false)
   const [renameSingerDialogOpen, setRenameSingerDialogOpen] = useState(false)
+  const [mergeDialogOpen, setMergeDialogOpen] = useState(false)
   const [editingSingerName, setEditingSingerName] = useState('')
   const [savingSingerName, setSavingSingerName] = useState(false)
   const [modalSongDraggedId, setModalSongDraggedId] = useState<number | null>(null)
@@ -281,6 +283,18 @@ export default function SingerDialog({
               onClick={openRenameSingerDialog}
             >
               <MaterialIcon name="edit" />
+            </button>
+          )}
+          {selectedSingerHistory && selectedSingerId && (
+            <button
+              className="control-btn"
+              type="button"
+              title="Merge a guest profile with a signed-in singer"
+              aria-label="Merge guest singer"
+              style={{ width: 36, height: 36, padding: 0, flexShrink: 0 }}
+              onClick={() => setMergeDialogOpen(true)}
+            >
+              <MaterialIcon name="merge" />
             </button>
           )}
           {selectedSingerHistory && (
@@ -592,6 +606,20 @@ export default function SingerDialog({
         </div>
       )}
     </div>
+    {mergeDialogOpen && selectedSingerHistory && selectedSingerId && (
+      <SingerMergeDialog
+        singer={{ singerId: selectedSingerId, displayName: selectedSingerHistory.singer.displayName }}
+        headers={headers}
+        onClose={() => setMergeDialogOpen(false)}
+        onMerged={(sourceName, targetName) => {
+          setMergeDialogOpen(false)
+          setBanner(`Merged guest "${sourceName}" into "${targetName}". Their queue and history now belong to the signed-in singer.`)
+          void refreshQueueState()
+          // The guest profile is gone, and the kept singer's history has changed.
+          onClose()
+        }}
+      />
+    )}
     {renameSingerDialogOpen && selectedSingerHistory && (
       <>
         <div className="modal-backdrop" onClick={closeRenameSingerDialog} />

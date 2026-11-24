@@ -35,6 +35,8 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
   let fadeTarget: number | null = null;
   let preparation: Promise<void> | null = null;
   let finishPreparation: (() => void) | null = null;
+  // While a KaraFun song prepares, the music between songs keeps playing.
+  let songPreparing = false;
 
   const settlePreparation = () => {
     const finish = finishPreparation;
@@ -95,6 +97,7 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
   };
 
   const prepareForKaraoke = (hold = true): Promise<void> => {
+    if (songPreparing) return Promise.resolve();
     if (hold) karaokeMuteHeld = true;
     if (preparation) return preparation;
     revision += 1;
@@ -115,9 +118,49 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
     return pending;
   };
 
+  // A song that took time to prepare is ready: fade the break music out (even when it
+  // pauses during karaoke) and resolve once it is silent.
+  const fadeOutForKaraoke = (): Promise<void> => {
+    songPreparing = false;
+    karaokeMuteHeld = true;
+    if (preparation) return preparation;
+    revision += 1;
+    const pauseAfter = () => {
+      if (state?.paused || state?.pauseDuringKaraoke !== false) audio.pause();
+    };
+    if (disposed || audio.paused || audio.muted || audio.volume <= 0) {
+      silence();
+      pauseAfter();
+      return Promise.resolve();
+    }
+    cancelFade();
+    mustMute = false;
+    const pending = new Promise<void>((resolve) => { finishPreparation = resolve; });
+    preparation = pending;
+    const seconds = Math.min(3, Math.max(0, state?.crossfadeSeconds ?? 2));
+    fadeTo(0, seconds, () => {
+      silence();
+      pauseAfter();
+    });
+    return pending;
+  };
+
   return {
     prepareForKaraoke,
+    fadeOutForKaraoke,
     isPreparingForKaraoke: () => preparation !== null,
+    /** Keeps break music playing while the current song prepares (see fadeOutForKaraoke). */
+    holdForSongPreparation(hold: boolean) {
+      if (hold === songPreparing) return;
+      songPreparing = hold;
+      if (hold) {
+        karaokeMuteHeld = false;
+        if (preparation) {
+          cancelFade();
+          settlePreparation();
+        }
+      }
+    },
     // Called before React commits singer playback, not after a pending fade/play.
     muteForKaraoke() {
       karaokeMuteHeld = true;
@@ -125,6 +168,7 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
       if (state?.pauseDuringKaraoke) audio.pause();
     },
     confirmKaraokeActive(active: boolean) {
+      if (songPreparing) return;
       karaokeMuteHeld = active;
       if (active) {
         void prepareForKaraoke();
@@ -138,7 +182,9 @@ export function createBreakMusicPlayback(audio: BreakAudio) {
       revision += 1;
       // Only a fresh queue snapshot can release the immediate WebSocket mute.
       // An older break-music response may still describe the inter-song gap.
-      next = { ...next, karaokeActive: next.karaokeActive || karaokeMuteHeld };
+      next = songPreparing
+        ? { ...next, karaokeActive: false, mutedForKaraoke: false }
+        : { ...next, karaokeActive: next.karaokeActive || karaokeMuteHeld };
       state = next;
       if (next.karaokeActive || next.mutedForKaraoke) {
         void prepareForKaraoke(false);

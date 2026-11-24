@@ -31,6 +31,7 @@ export default function SystemSection({ admin }: { admin: AdminState }) {
     requestAcceptance,
     localLibraryEnabled,
     externalLibraryEnabled,
+    karafunLibraryEnabled,
     localBrowseEnabled,
     requestTheme,
     allowDownloads,
@@ -76,7 +77,7 @@ export default function SystemSection({ admin }: { admin: AdminState }) {
                     <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                       <input
                         type="checkbox"
-                        checked={requestAcceptance === "disabled" || (!localLibraryEnabled && !externalLibraryEnabled)}
+                        checked={requestAcceptance === "disabled" || (!localLibraryEnabled && !externalLibraryEnabled && !karafunLibraryEnabled)}
                         onChange={(e) => {
                           const disabled = e.target.checked;
                           void (async () => {
@@ -89,6 +90,7 @@ export default function SystemSection({ admin }: { admin: AdminState }) {
                             await Promise.all([
                               handleLibraryToggle("local", false),
                               handleLibraryToggle("external", false),
+                              ...(karafunLibraryEnabled ? [handleLibraryToggle("karafun", false)] : []),
                             ]);
                           })();
                         }}
@@ -116,6 +118,16 @@ export default function SystemSection({ admin }: { admin: AdminState }) {
                         style={{ width: 18, height: 18 }}
                       />
                       <span style={{ fontSize: 14 }}>Enable External Library (Karaoke Nerds)</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={karafunLibraryEnabled}
+                        onChange={(e) => handleLibraryToggle("karafun", e.target.checked)}
+                        disabled={!auth.sessionToken || !auth.isLoggedIn}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <span style={{ fontSize: 14 }}>Enable KaraFun Online (account set in Admin → KaraFun)</span>
                     </label>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: localLibraryEnabled ? "pointer" : "not-allowed", opacity: localLibraryEnabled ? 1 : 0.6 }}>
                       <input

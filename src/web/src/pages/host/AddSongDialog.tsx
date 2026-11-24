@@ -2,13 +2,16 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import { api } from '../../api'
 import { useAuth } from '../../auth-context'
 import MaterialIcon from '../../components/MaterialIcon'
+import KarafunLogo from '../../components/KarafunLogo'
 import { KARAOKE_NERDS_SEARCH_DELAY_MS, LOCAL_SEARCH_DELAY_MS, fetchVideoTitle, renderSearchResultText } from './songSearch'
 import type { QueueState } from './types'
+import { searchKarafun, type KarafunTrack } from '../requests/karafunSearch'
 
 // Opened from a singer's dialog, it starts out adding for that singer.
 export type AddSongPreset = { singerId: string | null; name: string }
 
-// Host-side "Add to Queue": pick a singer, then a local track, a Karaoke Nerds result or a video URL.
+// Host-side "Add to Queue": pick a singer, then a local track, a Karaoke Nerds or KaraFun result,
+// or a video URL.
 export default function AddSongDialog({
   preset,
   headers,
@@ -17,6 +20,7 @@ export default function AddSongDialog({
   queueState,
   localLibraryEnabled,
   externalLibraryEnabled,
+  karafunEnabled,
   allowDownloads,
   downloadingTrack,
   downloadVideo,
@@ -30,6 +34,7 @@ export default function AddSongDialog({
   queueState: QueueState | null
   localLibraryEnabled: boolean
   externalLibraryEnabled: boolean
+  karafunEnabled: boolean
   allowDownloads: boolean
   downloadingTrack: string | null
   downloadVideo: (url: string, title: string, artist: string, brand?: string, discId?: string) => void | Promise<void>
@@ -37,7 +42,7 @@ export default function AddSongDialog({
   onClose: () => void
 }) {
   const auth = useAuth()
-  const [manualRequestMode, setManualRequestMode] = useState<'local' | 'external' | 'url'>('local')
+  const [manualRequestMode, setManualRequestMode] = useState<'local' | 'external' | 'karafun' | 'url'>('local')
   const [manualRequestQuery, setManualRequestQuery] = useState('')
   const [manualRequestResults, setManualRequestResults] = useState<any[]>([])
   const [manualRequestName, setManualRequestName] = useState(preset?.name ?? '')
@@ -87,6 +92,11 @@ export default function AddSongDialog({
     }
   }, [manualRequestUrl, manualRequestMode, manualRequestTitle])
 
+  // Results from one source never render with another source's row layout.
+  useEffect(() => {
+    setManualRequestResults([])
+  }, [manualRequestMode])
+
   // Effect to handle manual request search with debouncing
   useEffect(() => {
     if (manualRequestMode === 'url') {
@@ -122,6 +132,8 @@ export default function AddSongDialog({
       } else if (manualRequestMode === 'external') {
         const results = await api(`/api/karaoke-nerds/search?q=${encodeURIComponent(query)}`)
         setManualRequestResults(results || [])
+      } else if (manualRequestMode === 'karafun') {
+        setManualRequestResults(await searchKarafun(query))
       }
     } catch {
       setManualRequestResults([])
@@ -187,6 +199,28 @@ export default function AddSongDialog({
           artist: track.artist,
           url: track.url,
           brand: track.brand || null,
+          requestedBy: manualRequestName || null,
+          ...getManualRequestTarget(),
+        })
+      })
+
+      resetManualRequestModal()
+    } finally {
+      setBusy(false)
+      await refreshQueue()
+    }
+  }
+
+  async function addManualRequestKarafun(track: KarafunTrack) {
+    if (!auth.sessionToken || !auth.canHost) return
+
+    setBusy(true)
+    try {
+      await api('/api/karafun/add', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          songId: track.songId,
           requestedBy: manualRequestName || null,
           ...getManualRequestTarget(),
         })
@@ -364,6 +398,22 @@ export default function AddSongDialog({
           </button>
         )}
 
+        {karafunEnabled && (
+          <button
+            className={`mode-button ${manualRequestMode === 'karafun' ? 'active karaoke-nerds' : ''}`}
+            onClick={() => setManualRequestMode('karafun')}
+          >
+            <KarafunLogo
+              variant="mark"
+              height={18}
+              className="mode-icon"
+              color={manualRequestMode === 'karafun' ? 'currentColor' : undefined}
+              style={{ marginRight: 6 }}
+            />
+            KaraFun
+          </button>
+        )}
+
         <button
           className={`mode-button ${manualRequestMode === 'url' ? 'active' : ''}`}
           onClick={() => setManualRequestMode('url')}
@@ -472,7 +522,7 @@ export default function AddSongDialog({
         <>
           <input
             className="search-input"
-            placeholder={manualRequestMode === 'local' ? "Search local library..." : "Search Karaoke Nerds..."}
+            placeholder={manualRequestMode === 'local' ? "Search local library..." : manualRequestMode === 'karafun' ? "Search KaraFun..." : "Search Karaoke Nerds..."}
             value={manualRequestQuery}
             onChange={e => setManualRequestQuery(e.target.value)}
             autoFocus
@@ -538,6 +588,29 @@ export default function AddSongDialog({
                         onClick={(e) => {
                           e.stopPropagation();
                           addManualRequestLocal(track.id);
+                        }}
+                        disabled={busy}
+                        aria-label="Add to queue"
+                        title="Add to queue"
+                      >
+                        {busy ? '…' : <MaterialIcon name="add" style={{ fontSize: 16 }} />}
+                      </button>
+                    </div>
+                  ))
+                ) : manualRequestMode === 'karafun' ? (
+                  // KaraFun results stream on the Player; they cannot be downloaded to the library.
+                  (manualRequestResults as KarafunTrack[]).map((track) => (
+                    <div
+                      key={track.songId}
+                      className="search-result"
+                      onClick={() => addManualRequestKarafun(track)}
+                    >
+                      {renderSearchResultText(track, { text: 'KaraFun', brand: true })}
+                      <button
+                        className="control-btn primary search-result-action"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          addManualRequestKarafun(track);
                         }}
                         disabled={busy}
                         aria-label="Add to queue"
